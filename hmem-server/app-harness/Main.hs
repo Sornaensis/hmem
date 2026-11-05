@@ -830,12 +830,13 @@ qualificationInput qualified stopped serverDone = loop
               runArchivesOperationWithPool qualified.runtimePool (ArchivesInstallReplacement path)
         "status" -> do
           current <- ArchiveMaintenance.maintenanceStatus qualified.runtimePool
-          clock <- DBPool.runSession qualified.adminEnv.pool $ S.statement () $ St.Statement
-            "SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint::text"
-            E.noParams (D.singleRow (D.column (D.nonNullable D.text))) False
+          clock <- databaseClock
           case current of
             Object fields -> pure (Object (KM.insert "db_clock_epoch_us" (String clock) fields))
             _ -> fail "Qualification maintenance status is not an object"
+        "foreground-clock" | qualified.sanitizedQualification -> do
+          clock <- databaseClock
+          pure (object ["db_clock_epoch_us" .= clock, "source" .= ("postgresql-clock-timestamp" :: Text)])
         "sanitized-reclaim-progress" | qualified.sanitizedQualification ->
           controlField @Text "generation" request >>= qualificationReclaimProgress qualified
         "snapshot" -> qualificationSnapshot qualified
@@ -845,6 +846,9 @@ qualificationInput qualified stopped serverDone = loop
       hFlush stdout
       if command == "stop" then putMVar stopped () else loop
     control action = ArchiveMaintenance.configureMaintenance qualified.runtimePool action >> ArchiveMaintenance.maintenanceStatus qualified.runtimePool
+    databaseClock = DBPool.runSession qualified.adminEnv.pool $ S.statement () $ St.Statement
+      "SELECT floor(extract(epoch FROM clock_timestamp())*1000000)::bigint::text"
+      E.noParams (D.singleRow (D.column (D.nonNullable D.text))) False
 
 qualificationReclaimProgress :: Qualification -> Text -> IO Value
 qualificationReclaimProgress qualified generation = DBPool.runSession qualified.adminEnv.pool $ S.statement generation $

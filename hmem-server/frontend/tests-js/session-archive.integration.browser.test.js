@@ -603,11 +603,13 @@ function observeArchiveManifests(page,url,observe){
   return {first,ready,stop,snapshot:()=>({scope:'passive real frontend response observations; queued Preparing is not active compression; event delivery uses caller monotonic time',records:[...records],errors:[...errors],...(sanitizedRun?{lostPolls:[...lostPolls]}:{})})}
 }
 
-async function clockSnapshot(actions,harness){
+async function clockSnapshot(actions,harness,{sanitized=false}={}){
   const metadataSentAt=performance.now(),value=await actions.control(harness,'snapshot'),metadataReceivedAt=performance.now()
-  const sentAt=performance.now(),clock=await actions.control(harness,'status'),receivedAt=performance.now()
-  assert.match(clock.db_clock_epoch_us,/^[0-9]+$/,'actual narrow-status PostgreSQL clock sample')
-  return {sentAt,receivedAt,dbClockEpochUs:clock.db_clock_epoch_us,generation:value.archive_generation,postgres:value,metadataTiming:{sentAt:metadataSentAt,receivedAt:metadataReceivedAt,dbClockEpochUs:value.db_clock_epoch_us}}
+  const control=sanitized?'foreground-clock':'status'
+  const sentAt=performance.now(),clock=await actions.control(harness,control),receivedAt=performance.now()
+  assert.match(clock.db_clock_epoch_us,/^[0-9]+$/,'actual PostgreSQL clock sample')
+  if(sanitized)assert.equal(clock.source,'postgresql-clock-timestamp','direct PostgreSQL clock source')
+  return {control,...(sanitized?{source:clock.source}:{}),sentAt,receivedAt,dbClockEpochUs:clock.db_clock_epoch_us,generation:value.archive_generation,postgres:value,metadataTiming:{sentAt:metadataSentAt,receivedAt:metadataReceivedAt,dbClockEpochUs:value.db_clock_epoch_us}}
 }
 
 async function awaitManifest(observation,actions,label,maximumMs=30000){
@@ -622,6 +624,7 @@ async function awaitManifest(observation,actions,label,maximumMs=30000){
 }
 
 function foregroundCoverage(before,after,load,expected,admitted){
+  assert.equal(before.control,after.control,'matching foreground clock controls')
   for(const sample of [before,after]){
     assert.ok(Number.isFinite(sample.sentAt)&&sample.receivedAt>=sample.sentAt)
     assert.match(sample.dbClockEpochUs,/^[0-9]+$/)
@@ -634,13 +637,14 @@ function foregroundCoverage(before,after,load,expected,admitted){
   const created=Date.parse(generation.created_at),published=Date.parse(generation.published_at)
   assert.ok(Number.isFinite(created)&&Number.isFinite(published)&&published>=created,'actual persisted generation interval')
   const offsets=[before,after].map(value=>({low:value.sentAt-Number(value.dbClockEpochUs)/1000,high:value.receivedAt-Number(value.dbClockEpochUs)/1000}))
-  const anchors=[before,after].map((value,index)=>({control:'status',sentAt:value.sentAt,receivedAt:value.receivedAt,roundTripMs:value.receivedAt-value.sentAt,dbClockEpochUs:value.dbClockEpochUs,offsetLowMs:offsets[index].low,offsetHighMs:offsets[index].high,metadataTiming:value.metadataTiming??null}))
+  const anchors=[before,after].map((value,index)=>({control:value.control,...(value.source?{source:value.source}:{}),sentAt:value.sentAt,receivedAt:value.receivedAt,roundTripMs:value.receivedAt-value.sentAt,dbClockEpochUs:value.dbClockEpochUs,offsetLowMs:offsets[index].low,offsetHighMs:offsets[index].high,metadataTiming:value.metadataTiming??null}))
   const offsetLow=Math.min(...offsets.map(value=>value.low))-1,offsetHigh=Math.max(...offsets.map(value=>value.high))+1
   const width=offsetHigh-offsetLow,inner={startAt:created+offsetHigh,endAt:published+offsetLow}
   const overlaps=load.requests.rows.filter(row=>row[0]>=inner.startAt&&row[3]<=inner.endAt).length
   const admittedDraft=admitted===true&&before.generation?.id===expected.generation&&before.generation?.session_id===expected.session&&before.generation?.published_at===null
   const qualified=admittedDraft&&width<=10&&load.samples.length===40&&load.requests.rows.length===40&&overlaps===40
-  return {status:qualified?'qualified-coverage':'inconclusive',scope:'persisted draft-created to published processing/publication bracket; not uninterrupted compression CPU',requiredOverlap:40,observedOverlap:overlaps,admittedOwnedUnpublishedDraft:admittedDraft,clockMapping:{method:'union of narrow-status caller send/receive minus DB clock intervals; widened 1ms for timestamp precision; assumes no unobserved intervening clock step',samples:anchors,offsetLowMs:offsetLow,offsetHighMs:offsetHigh,uncertaintyWidthMs:width,maximumWidthMs:10},generation,conservativeInnerBracket:inner,reason:qualified?null:!admittedDraft?'owned unpublished draft was not observed before timed admission':width>10?'clock mapping uncertainty exceeds 10ms':'fewer than all40 timed requests fit inside the conservative processing/publication bracket'}
+  const clockControl=before.control==='status'?'narrow-status':before.control
+  return {status:qualified?'qualified-coverage':'inconclusive',scope:'persisted draft-created to published processing/publication bracket; not uninterrupted compression CPU',requiredOverlap:40,observedOverlap:overlaps,admittedOwnedUnpublishedDraft:admittedDraft,clockMapping:{method:`union of ${clockControl} caller send/receive minus DB clock intervals; widened 1ms for timestamp precision; assumes no unobserved intervening clock step`,samples:anchors,offsetLowMs:offsetLow,offsetHighMs:offsetHigh,uncertaintyWidthMs:width,maximumWidthMs:10},generation,conservativeInnerBracket:inner,reason:qualified?null:!admittedDraft?'owned unpublished draft was not observed before timed admission':width>10?'clock mapping uncertainty exceeds 10ms':'fewer than all40 timed requests fit inside the conservative processing/publication bracket'}
 }
 
 function foregroundResult(baseline,load,coverage,enforce=true){
@@ -1068,11 +1072,11 @@ async function integrateArchive(harness,run,actions,vector){
     await actions.control(harness,'resume')
     progress.resume.acknowledgedAt=performance.now()
     const admission=await awaitManifest(manifestObserver.first,actions,'passive frontend active-or-ready observation',preparationRemaining())
-    before=await clockSnapshot(actions,harness)
+    before=await clockSnapshot(actions,harness,vector)
     assert.ok(before.generation,'owned draft/publication snapshot required before timed admission')
     assert.equal(before.generation.session_id,id,'snapshot belongs to this owned session')
     admittedDraft=admission.active&&before.generation.published_at===null
-    progress.admission={observation:admission.record,snapshot:{sentAt:before.sentAt,receivedAt:before.receivedAt,dbClockEpochUs:before.dbClockEpochUs,generation:before.generation},ownedUnpublishedDraft:admittedDraft}
+    progress.admission={observation:admission.record,snapshot:{control:before.control,...(before.source?{source:before.source}:{}),sentAt:before.sentAt,receivedAt:before.receivedAt,dbClockEpochUs:before.dbClockEpochUs,generation:before.generation},ownedUnpublishedDraft:admittedDraft}
     load={};progress.load=load
     foreground=ordinaryForeground(actions,harness.origin,load).then(value=>({value}),error=>({error}))
     const published=await awaitManifest(manifestObserver.ready,actions,'real frontend publication observation',preparationRemaining())
@@ -1110,7 +1114,7 @@ async function integrateArchive(harness,run,actions,vector){
     progress.load=load;progress.loadMemory=phase
   }
   if(loadError)throw loadError
-  after=await clockSnapshot(actions,harness)
+  after=await clockSnapshot(actions,harness,vector)
   const coverage=foregroundCoverage(before,after,load,{generation:manifest.generation_id,session:id},admittedDraft)
   progress.foregroundCoverage=coverage;progress.manifests=manifestObserver.snapshot();manifestObserver.stop()
   progress.phase='independent-http-receipt'
@@ -1353,13 +1357,21 @@ test('integration protocol causal: view waits consume one unchanged product dead
   assert.throws(()=>remainingView({remaining(){throw Error('case cutoff')}},100,budget,200),/case cutoff/)
 })
 
-test('integration protocol causal: narrow status clock retains separate broad-metadata bounds',async()=>{
-  const calls=[],sample=await clockSnapshot({control:async(_owner,command)=>{
-    calls.push(command)
-    return command==='snapshot'?{db_clock_epoch_us:'111000000',archive_generation:{id:'owned'},raw_rows:16}:{db_clock_epoch_us:'222000000',paused:false}
-  }},{})
-  assert.deepEqual(calls,['snapshot','status']);assert.equal(sample.dbClockEpochUs,'222000000');assert.equal(sample.metadataTiming.dbClockEpochUs,'111000000')
-  assert.equal(sample.generation.id,'owned');assert.ok(sample.sentAt>=sample.metadataTiming.receivedAt);assert.ok(sample.receivedAt>=sample.sentAt)
+test('integration protocol causal: sanitized foreground clock retains separate broad-metadata bounds',async()=>{
+  const replies={
+    snapshot:{db_clock_epoch_us:'111000000',archive_generation:{id:'owned'},raw_rows:16},
+    status:{db_clock_epoch_us:'222000000',paused:false},
+    'foreground-clock':{db_clock_epoch_us:'333000000',source:'postgresql-clock-timestamp'}
+  }
+  for(const [mode,control] of [['integration-1024MiB','status'],['sanitized-1024MiB','foreground-clock']]){
+    const calls=[],sample=await clockSnapshot({control:async(_owner,command)=>{calls.push(command);return replies[command]}},{},integrationCases[mode])
+    assert.deepEqual(calls,['snapshot',control]);assert.equal(sample.control,control);assert.equal(sample.source,replies[control].source)
+    assert.equal(sample.dbClockEpochUs,replies[control].db_clock_epoch_us);assert.equal(sample.metadataTiming.dbClockEpochUs,'111000000')
+    assert.equal(sample.generation.id,'owned');assert.ok(sample.sentAt>=sample.metadataTiming.receivedAt);assert.ok(sample.receivedAt>=sample.sentAt)
+  }
+  const sanitized=integrationCases['sanitized-1024MiB']
+  await assert.rejects(clockSnapshot({control:async(_owner,command)=>command==='snapshot'?replies.snapshot:{...replies['foreground-clock'],source:'process-clock'}},{},sanitized),/direct PostgreSQL clock source/)
+  await assert.rejects(clockSnapshot({control:async(_owner,command)=>command==='snapshot'?replies.snapshot:{...replies['foreground-clock'],db_clock_epoch_us:'invalid'}},{},sanitized),/actual PostgreSQL clock sample/)
   assert.equal(crc32(Buffer.from('123456789')),0xcbf43926)
   assert.equal(crc32(Buffer.from('456789'),crc32(Buffer.from('123'))),0xcbf43926,'streamed ZIP CRC state matches the independent standard vector')
 })
@@ -1410,19 +1422,26 @@ test('integration protocol causal: passive manifest observations make no HTTP an
 
 test('integration protocol causal: conservative clock coverage cannot qualify missing active samples or waive p95',()=>{
   const epoch=1700000000000,expected={generation:'g',session:'s'}
-  const before={sentAt:100,receivedAt:102,dbClockEpochUs:String(epoch*1000),generation:{id:'g',session_id:'s',created_at:new Date(epoch-50).toISOString(),published_at:null}}
-  const after={sentAt:400,receivedAt:402,dbClockEpochUs:String((epoch+300)*1000),generation:{...before.generation,published_at:new Date(epoch+100).toISOString()}}
+  const before={control:'foreground-clock',source:'postgresql-clock-timestamp',sentAt:100,receivedAt:102,dbClockEpochUs:String(epoch*1000),generation:{id:'g',session_id:'s',created_at:new Date(epoch-50).toISOString(),published_at:null}}
+  const after={...before,sentAt:400,receivedAt:402,dbClockEpochUs:String((epoch+300)*1000),generation:{...before.generation,published_at:new Date(epoch+100).toISOString()}}
   const load={samples:Array(40).fill(1),p95Ms:1,requests:{rows:Array.from({length:40},(_,index)=>[80+index*2,80+index*2,81+index*2,81+index*2,'id',0])}}
   const covered=foregroundCoverage(before,after,load,expected,true)
   assert.equal(covered.status,'qualified-coverage');assert.equal(covered.observedOverlap,40)
   assert.equal(covered.clockMapping.samples.length,2);assert.equal(covered.clockMapping.samples[0].sentAt,100);assert.equal(covered.clockMapping.samples[0].receivedAt,102);assert.equal(covered.clockMapping.samples[0].roundTripMs,2);assert.equal(covered.clockMapping.samples[1].dbClockEpochUs,after.dbClockEpochUs)
+  assert.ok(covered.clockMapping.samples.every(sample=>sample.control==='foreground-clock'&&sample.source==='postgresql-clock-timestamp'))
+  const widthLimit=foregroundCoverage(before,{...after,receivedAt:408},load,expected,true)
+  assert.equal(widthLimit.clockMapping.uncertaintyWidthMs,10);assert.equal(widthLimit.status,'qualified-coverage')
+  assert.equal(foregroundCoverage(before,{...after,receivedAt:409},load,expected,true).status,'inconclusive')
   const missing=structuredClone(load);missing.requests.rows[0][0]=52
   const incomplete=foregroundCoverage(before,after,missing,expected,true)
   assert.equal(incomplete.status,'inconclusive');assert.equal(incomplete.observedOverlap,39)
+  assert.equal(foregroundCoverage(before,after,{...load,samples:load.samples.slice(0,39)},expected,true).status,'inconclusive')
   assert.equal(foregroundCoverage(before,{...after,receivedAt:420},load,expected,true).status,'inconclusive')
   assert.equal(foregroundCoverage(before,after,load,expected,false).status,'inconclusive')
+  assert.throws(()=>foregroundCoverage(before,{...after,control:'status'},load,expected,true),/matching foreground clock controls/)
   assert.throws(()=>foregroundCoverage(before,after,load,{...expected,generation:'foreign'},true),/equal/)
   assert.throws(()=>foregroundResult({p95Ms:1},{...load,p95Ms:1.2},covered),/1.10/)
+  assert.equal(foregroundResult({p95Ms:1},{...load,p95Ms:1.10},covered).status,'passed')
   assert.equal(foregroundResult({p95Ms:1},{...load,p95Ms:1.2},incomplete).status,'inconclusive')
   assert.equal(foregroundResult({p95Ms:1},load,covered).maximumRatio,1.10)
 })

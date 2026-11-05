@@ -48,7 +48,7 @@ async function setup() {
   }, async close() { for (const release of releases) release(); await h.close() } }
 }
 
-async function history(h, kind, id) {
+async function showHistory(h, kind, id) {
   if (kind === 'task') {
     for (const [ancestorKind, ancestorId] of [['project', 'root-project'], ...(id === 'child' ? [['task', 'parent']] : [])]) {
       await h.scrollTo(ancestorKind + ':' + ancestorId)
@@ -61,6 +61,10 @@ async function history(h, kind, id) {
   await card.locator('.btn-extras-toggle').first().click()
   await card.getByRole('button',{name:'History',exact:true}).click()
   assert.equal(await card.locator('.entity-history-toggle').count(),0)
+  return card
+}
+async function history(h, kind, id) {
+  const card = await showHistory(h, kind, id)
   await card.locator('.history-entry').waitFor()
   return card
 }
@@ -72,12 +76,94 @@ async function open(h, id, field = 'description') {
 async function current(h) {
   await dialog(h).getByRole('button', { name: 'Against current', exact: true }).click()
   await dialog(h).getByText(/Current loaded at/).waitFor()
-  await h.page.waitForFunction(() => !document.querySelector('#audit-diff-dialog')?.textContent.includes('Loading current…'))
+  await dialog(h).getByRole('status', { name: 'Loading current comparison', exact: true }).waitFor({ state: 'detached' })
 }
 const close = h => dialog(h).getByRole('button', { name: 'Close', exact: true }).click()
 const content = h => dialog(h).locator('.audit-diff-content')
 const frame = (h, kind, id, eventId, invalidations = [{ kind: 'entity', target: kind + ':' + id }]) => ({ schema_version: 1, type: 'change', event: { schema_version: 1, event_id: eventId, scope: 'workspace', workspace_id: h.f.workspace.id, occurred_at: '2026-10-15T12:00:00Z', transaction: { id: eventId, cause: 'rest', request_id: 'other-request' }, actor: { type: 'system', id: null }, entity: { type: kind, id, action: 'updated' }, invalidations } })
 const emit = (h, frames) => h.page.evaluate(frames => window.pushHierarchyFrames(frames), frames)
+
+test('production entity history distinguishes first failure, empty success, and retained continuation retries', { timeout: 35000 }, async () => {
+  const h = await setup(), receipts = []
+  const controls = []
+  const hold = (entity, limit, status, response) => {
+    let arrive, release
+    const control = { entity, limit, status, response, used: false,
+      arrived: new Promise(resolve => { arrive = resolve }),
+      gate: new Promise(resolve => { release = resolve }),
+      arrive, release }
+    controls.push(control)
+    return control
+  }
+  const first = hold('root-project', null, 503, { error: 'Controlled first-page failure' })
+  const empty = hold('root-project', null, 200, { items: [], has_more: false })
+  const firstTask = hold('parent', null, 200, { items: [h.events[1]], has_more: true })
+  const more = hold('parent', '21', 503, { error: 'Controlled continuation failure' })
+  const last = hold('parent', '21', 200, { items: [h.events[1], { ...h.events[1], id: 'event-parent-earlier' }], has_more: false })
+  await h.page.route('**/api/v1/audit?**', async route => {
+    const query = new URL(route.request().url()).searchParams
+    const entity = query.get('entity_id'), limit = query.get('limit')
+    const control = controls.find(value => !value.used && value.entity === entity && value.limit === limit)
+    if (!control) return route.fallback()
+    control.used = true
+    receipts.push([entity, limit])
+    control.arrive()
+    await control.gate
+    return route.fulfill({ status: control.status, json: control.response })
+  })
+  const status = (panel, name) => panel.getByRole('status', { name, exact: true })
+  const retry = panel => panel.getByRole('button', { name: 'Retry history', exact: true })
+  const arrive = control => h.bounded(control.arrived, 5000, 'Expected guarded entity history read')
+  try {
+    await h.start(); await h.idle()
+    const project = (await showHistory(h, 'project', 'root-project')).locator('.entity-history-timeline')
+    await arrive(first)
+    const projectPending = status(project, 'Loading entity history')
+    await projectPending.waitFor()
+    assert.equal(await project.getByText('No history entries').count(), 0)
+    first.release()
+    await project.getByRole('alert').waitFor()
+    assert.equal(await projectPending.count(), 0)
+    assert.equal(await project.getByText('No history entries').count(), 0)
+    await retry(project).focus()
+    await h.page.keyboard.press('Enter')
+    await arrive(empty)
+    await projectPending.waitFor()
+    assert.equal(await retry(project).count(), 0)
+    await h.page.waitForFunction(() => document.activeElement?.id === 'entity-history-project-root-project')
+    empty.release()
+    await project.getByText('No history entries').waitFor()
+    assert.equal(await projectPending.count(), 0)
+
+    const task = (await showHistory(h, 'task', 'parent')).locator('.entity-history-timeline')
+    await arrive(firstTask); firstTask.release()
+    const rows = task.locator('.history-entry')
+    await rows.waitFor()
+    const load = task.getByRole('button', { name: 'Load more...', exact: true })
+    await load.click()
+    await arrive(more)
+    const morePending = status(task, 'Loading more entity history')
+    await morePending.waitFor()
+    assert.equal(await rows.count(), 1)
+    assert.equal(await load.isDisabled(), true)
+    more.release()
+    await task.getByRole('alert').waitFor()
+    assert.equal(await rows.count(), 1)
+    assert.equal(await morePending.count(), 0)
+    await retry(task).click()
+    await arrive(last)
+    await morePending.waitFor()
+    assert.equal(await retry(task).count(), 0)
+    assert.equal(await rows.count(), 1)
+    last.release()
+    await morePending.waitFor({ state: 'detached' })
+    assert.equal(await rows.count(), 2)
+    assert.deepEqual(receipts, [['root-project', null], ['root-project', null], ['parent', null], ['parent', '21'], ['parent', '21']])
+  } finally {
+    for (const control of controls) control.release()
+    await h.close()
+  }
+})
 
 test('production collapsed audit row action has stable eligibility/defaults and preserves row/field keyboard origins', { timeout: 45000 }, async () => {
   const h = await setup()
@@ -390,7 +476,13 @@ test('production full entity GET timeout keeps This change usable and permits re
     await h.start(); await h.idle(); await history(h, 'task', 'parent'); await open(h, 'parent', 'title')
     const held = h.control('task', 'parent', { hold: true })
     await dialog(h).getByRole('button', { name: 'Against current', exact: true }).click(); await held.arrived
+    const pending = dialog(h).getByRole('status', { name: 'Loading current comparison', exact: true })
+    await pending.waitFor()
+    assert.doesNotMatch(await dialog(h).locator('.audit-diff-endpoints').innerText(), /missing snapshot/)
+    assert.doesNotMatch(await content(h).innerText(), /Comparison unavailable/)
     await dialog(h).getByText('Current request timed out. Refresh to retry.', { exact: true }).waitFor({ timeout: 23000 })
+    assert.equal(await pending.count(), 0)
+    assert.match(await content(h).innerText(), /Comparison unavailable/)
     await dialog(h).getByRole('button', { name: 'This change', exact: true }).click()
     await h.page.waitForFunction(() => document.querySelector('#audit-diff-dialog .audit-diff-content')?.textContent.includes('Before parent'))
     held.release()

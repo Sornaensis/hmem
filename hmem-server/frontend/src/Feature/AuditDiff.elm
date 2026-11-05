@@ -10,6 +10,7 @@ import Http
 import Json.Decode as Decode
 import Permissions
 import Set
+import Spinner
 import Task
 import Time
 import TimestampDisplay
@@ -271,6 +272,7 @@ view model =
                 newLabel = if dialog.againstCurrent then "Current" else "After"
                 newTime = if dialog.againstCurrent then dialog.current |> Maybe.map .updatedAt |> Maybe.withDefault "" else historicalTime dialog.entry.newValues
                 loading = dialog.request /= Nothing || dialog.queued
+                awaitingCurrent = dialog.againstCurrent && loading && dialog.current == Nothing
                 notice = if dialog.changed then "Current has changed — Refresh." else ""
             in
             node "dialog" [ id "audit-diff-dialog", class "audit-diff-dialog", attribute "aria-labelledby" "audit-diff-title", attribute "data-dialog-token" (String.fromInt dialog.token), attribute "data-dialog-origin" dialog.origin, preventDefaultOn "cancel" (Decode.succeed ( CloseAuditDiff, True )) ]
@@ -286,22 +288,22 @@ view model =
                     , label [] [ text "Field", select [ class "filter-select audit-diff-select", attribute "aria-label" "Field", onInput AuditDiffField ] (fields dialog.entry |> List.map (\field -> option [ value field, selected (field == dialog.field) ] [ text (fieldLabel field) ])) ]
                     , if dialog.againstCurrent then label [] [ text "Baseline", select [ class "filter-select audit-diff-select", attribute "aria-label" "Historical baseline", onInput ((==) "before" >> AuditDiffBaseline) ] [ option [ value "after", selected (not dialog.beforeBaseline) ] [ text "After" ], option [ value "before", selected dialog.beforeBaseline ] [ text "Before" ] ] ] else text ""
                     ]
-                , div [ class "audit-diff-endpoints" ] [ endpoint "-" oldLabel (timestamp oldTime) before, endpoint "+" newLabel (timestamp newTime) after ]
+                , div [ class "audit-diff-endpoints" ] [ endpoint "-" oldLabel (timestamp oldTime) before False, endpoint "+" newLabel (timestamp newTime) after awaitingCurrent ]
                 , div [ class "audit-diff-content", tabindex 0, attribute "aria-label" "Text comparison" ]
-                    [ case dialog.comparison of
+                    [ if awaitingCurrent then text "" else case dialog.comparison of
                         Equal -> p [] [ text "No differences" ]
                         Unavailable -> p [] [ text "Comparison unavailable. Both endpoints require readable snapshots; unavailable data is not an empty or removed value." ]
                         Simplified -> div [ class "audit-diff-simplified" ] [ p [] [ text "Large input: simplified full before/after presentation. Text is complete; line and word comparison was skipped." ], fullEndpoint oldLabel before, fullEndpoint newLabel after ]
                         Unified hunks -> div [] (List.map viewHunk hunks)
                     ]
-                , if dialog.againstCurrent then div [ class "audit-diff-current", attribute "role" "status" ]
+                , if dialog.againstCurrent then div [ class "audit-diff-current" ]
                     [ div [ class "audit-diff-current-heading" ]
-                        [ p [] [ text (dialog.current |> Maybe.map (\snapshot -> "Current loaded at " ++ timestamp (loadedTime snapshot.loadedAt) ++ "; entity updated at " ++ timestamp snapshot.updatedAt) |> Maybe.withDefault "Current not loaded.") ]
+                        [ p [ attribute "role" "status" ] [ text (dialog.current |> Maybe.map (\snapshot -> "Current loaded at " ++ timestamp (loadedTime snapshot.loadedAt) ++ "; entity updated at " ++ timestamp snapshot.updatedAt) |> Maybe.withDefault (if loading then "" else "Current not loaded.")) ]
                         , button [ class "btn btn-secondary", onClick RefreshAuditDiff ] [ text "Refresh" ]
                         ]
-                    , if loading then p [] [ text "Loading current…" ] else text ""
-                    , dialog.error |> Maybe.map (\error -> p [ class "audit-diff-error" ] [ text error ]) |> Maybe.withDefault (text "")
-                    , if dialog.changed then p [ class "audit-diff-notice" ] [ text notice ] else text ""
+                    , if loading then p [] [ Spinner.inline "Loading current comparison" ] else text ""
+                    , dialog.error |> Maybe.map (\error -> p [ class "audit-diff-error", attribute "role" "alert" ] [ text error ]) |> Maybe.withDefault (text "")
+                    , if dialog.changed then p [ class "audit-diff-notice", attribute "role" "status" ] [ text notice ] else text ""
                     , if model.webSocket.state /= Connected then p [] [ text "Freshness unknown: disconnected or resynchronizing." ] else text ""
                     , if model.page == AuditLogPage then p [] [ text "Global Audit does not subscribe to every workspace. Loaded-at and Refresh are the freshness guarantee; change notices reflect only observed evidence." ] else text ""
                     ] else text ""
@@ -313,8 +315,12 @@ fieldLabel field = String.toUpper (String.left 1 field) ++ String.dropLeft 1 fie
 originId : Api.AuditLogEntry -> String -> String
 originId entry field = "audit-diff-origin-" ++ entry.id ++ "-" ++ field
 
-endpoint : String -> String -> String -> Value -> Html Msg
-endpoint sign labelText timestamp value_ = div [ class "audit-diff-endpoint" ] [ strong [] [ text (sign ++ " " ++ labelText) ], span [] [ text (timestamp ++ " · " ++ AuditDiff.describe value_) ] ]
+endpoint : String -> String -> String -> Value -> Bool -> Html Msg
+endpoint sign labelText timestamp value_ pending =
+    div [ class "audit-diff-endpoint" ]
+        [ strong [] [ text (sign ++ " " ++ labelText) ]
+        , span [] [ text (if pending then "\u{00A0}" else timestamp ++ " · " ++ AuditDiff.describe value_) ]
+        ]
 
 fullEndpoint : String -> Value -> Html Msg
 fullEndpoint labelText value_ = section [] [ h3 [] [ text labelText ], pre [] [ text (case value_ of

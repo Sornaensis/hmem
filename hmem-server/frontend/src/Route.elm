@@ -447,6 +447,8 @@ handleUrlChangeWithoutProtectedExit url model =
                         { currentAuditLog
                             | entityHistory = Dict.empty
                             , entityHistoryHasMore = Dict.empty
+                            , entityHistoryRequests = Dict.empty
+                            , entityHistoryFailures = Dict.empty
                             , historyExpanded = Dict.empty
                         }
 

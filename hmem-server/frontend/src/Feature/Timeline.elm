@@ -8,10 +8,11 @@ import Feature.Focus as Focus
 import Feature.FocusedFilters
 import Helpers exposing (buildFragment, focusElement, pushUrl, saveFiltersCmd)
 import Html exposing (..)
-import Html.Attributes exposing (attribute, class, disabled, selected, title, type_, value)
+import Html.Attributes exposing (attribute, class, disabled, id, selected, tabindex, title, type_, value)
 import Html.Events exposing (onBlur, onClick, onFocus, onInput, onMouseEnter, onMouseLeave, preventDefaultOn)
 import Json.Decode as Decode
 import Process
+import Spinner
 import String
 import Svg
 import Svg.Attributes as SA
@@ -879,12 +880,12 @@ viewWorkspaceTimelinePanel wsId model =
     in
     div [ class "timeline-panel" ]
         [ div [ class "timeline-panel-header" ]
-            [ h3 [] [ text "Timeline" ]
+            [ h3 [ id "workspace-timeline-heading", tabindex -1 ] [ text "Timeline" ]
             , p [] [ text "Curated task and project lifecycle events for this workspace." ]
             ]
         , viewTimelineHistogram model.timestamps timeline
         , if timeline.loading && List.isEmpty timeline.events then
-            div [ class "loading-indicator" ] [ text "Loading timeline..." ]
+            Spinner.block "Loading timeline events"
 
           else
             viewTimelineBody model.timestamps wsId timeline
@@ -963,7 +964,7 @@ viewTimelineHistogramContent display timeline =
     in
     div [ class "timeline-graph-content" ]
         [ if timeline.histogramLoading && not hasBuckets then
-            div [ class "timeline-graph-state" ] [ text "Loading lifecycle graph..." ]
+            div [ class "timeline-graph-state" ] [ Spinner.inline "Loading lifecycle graph" ]
 
           else
             text ""
@@ -1631,7 +1632,7 @@ viewTimelineBody display wsId timeline =
             if not (timelineErrorIsBlocking timeline) then
                 div [ class "timeline-stale-notice" ]
                     [ p [] [ text (message ++ " Showing the last successful timeline.") ]
-                    , button [ class "btn-secondary", onClick RetryTimelineRefresh ] [ text "Retry" ]
+                    , button [ class "btn-secondary", Spinner.preserveFocus "workspace-timeline-heading", onClick RetryTimelineRefresh ] [ text "Retry" ]
                     , viewTimelineEvents display wsId timeline
                     ]
 
@@ -1639,7 +1640,7 @@ viewTimelineBody display wsId timeline =
                 div [ class "empty-state timeline-state" ]
                     [ h3 [] [ text "Timeline unavailable" ]
                     , p [] [ text message ]
-                    , button [ class "btn-secondary", onClick RetryTimelineRefresh ] [ text "Retry" ]
+                    , button [ class "btn-secondary", Spinner.preserveFocus "workspace-timeline-heading", onClick RetryTimelineRefresh ] [ text "Retry" ]
                     ]
 
         Nothing ->

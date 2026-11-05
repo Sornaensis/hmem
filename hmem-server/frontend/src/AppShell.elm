@@ -952,7 +952,16 @@ clearSessionScopedState model =
         , dragDrop = Feature.DragDrop.init
         , focus = Feature.Focus.init Nothing
         , groups = let empty = Feature.Groups.init in { empty | collapsedGroups = model.groups.collapsedGroups, nextDeletionToken = model.groups.nextDeletionToken, catalogueEpoch = model.groups.catalogueEpoch + 1 }
-        , auditLog = let empty = Feature.AuditLog.init in { empty | nextRequestId = model.auditLog.nextRequestId, nextNavigationId = model.auditLog.nextNavigationId }
+        , auditLog =
+            let
+                empty = Feature.AuditLog.init
+                previous = model.auditLog
+            in
+            { empty
+                | nextRequestId = previous.nextRequestId
+                , nextNavigationId = previous.nextNavigationId
+                , nextEntityHistoryRequestId = previous.nextEntityHistoryRequestId
+            }
         , auditDiff = let state = model.auditDiff in { state | dialog = Nothing }
         , timeline = Feature.Timeline.init
         , workspaceAdmin = Feature.WorkspaceAdmin.retireSessionState model.workspaceAdmin

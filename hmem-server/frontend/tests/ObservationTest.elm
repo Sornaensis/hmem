@@ -491,7 +491,7 @@ suite =
                                     , \_ -> Feature.Observation.update RebaseObservationEdit checking |> Tuple.first |> .observations |> Expect.equal checking.observations
                                     , \_ -> Feature.Observation.update ReloadObservationEdit checking |> Tuple.first |> .observations |> Expect.equal checking.observations
                                     , \_ -> view |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Keep my draft" ] ] |> Query.has [ Selector.disabled True ]
-                                    , \_ -> view |> Query.has [ Selector.text "Checking the current version", Selector.text "Use retained version" ]
+                                    , \_ -> view |> Query.has [ Selector.attribute (attribute "aria-label" "Checking the current version"), Selector.text "Use retained version" ]
                                     , \_ -> checked.observations.edit |> Maybe.map (\edit -> ( edit.activeCanonicalRequest, edit.canonicalProvisional, edit.draft )) |> Expect.equal (Just ( Nothing, False, "Preserved delayed conflict draft" ))
                                     , \_ -> rebased.observations.edit |> Maybe.map .baseContentVersion |> Expect.equal (Just known.contentVersion)
                                     , \_ -> useLatest.observations.edit |> Maybe.map (\edit -> ( edit.baseContentVersion, edit.draft )) |> Expect.equal (Just ( known.contentVersion, known.content ))
@@ -1637,7 +1637,8 @@ suite =
                         Feature.Observation.update ReturnToObservationDraft tabbed |> Tuple.first
                 in
                 Expect.all
-                    [ \_ -> notice |> Query.has [ Selector.text "Return to draft", Selector.text "Discard draft", Selector.text "Saving..." ]
+                    [ \_ -> notice |> Query.has [ Selector.text "Return to draft", Selector.text "Discard draft", Selector.attribute (attribute "aria-label" "Saving Observation draft") ]
+                    , \_ -> notice |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Save draft" ] ] |> Query.has [ Selector.disabled True ]
                     , \_ -> notice |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Return to draft" ] ] |> Event.simulate Event.click |> Event.expect ReturnToObservationDraft
                     , \_ -> notice |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Discard draft" ] ] |> Query.has [ Selector.attribute (Html.Attributes.disabled True) ]
                     , \_ -> Feature.Observation.update CancelObservationEdit tabbed |> Tuple.first |> .observations |> .edit |> Expect.equal saving.observations.edit
@@ -1968,17 +1969,18 @@ suite =
                         { empty | selectedId = Just "glob", detailError = Just "Failed to load observation detail." }
 
                     paginating =
-                        { loaded | loading = True }
+                        { loaded | loading = True, expectedOffset = Just 50 }
                 in
                 Expect.all
                     [ \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty unavailable empty |> Query.fromHtml |> Query.has [ Selector.text "Observations unavailable" ]
-                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { empty | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Loading observations..." ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { empty | loading = True } |> Query.fromHtml |> Query.find [ Selector.attribute (attribute "aria-label" "Loading observations") ] |> Query.has [ Selector.attribute (attribute "role" "status") ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository empty |> Query.fromHtml |> Query.has [ Selector.text "No observations found" ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { empty | error = Just "Failed to load observations." } |> Query.fromHtml |> Query.has [ Selector.text "Unable to load observations", Selector.text "Failed to load observations." ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.has [ Selector.text "Glob", Selector.text "src/**/*.elm", Selector.text "Creation revision", Selector.text fullSha, Selector.text "Subject kind", Selector.text "Exact subject", Selector.text "Creation Git SHA" ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Load more" ] ] |> Query.hasNot [ Selector.disabled True ]
-                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository paginating |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Loading..." ] ] |> Query.has [ Selector.disabled True ]
-                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository detailLoading |> Query.fromHtml |> Query.has [ Selector.text "Loading detail..." ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository paginating |> Query.fromHtml |> Query.find [ Selector.tag "button", Selector.attribute (attribute "aria-label" "Load more") ] |> Query.has [ Selector.disabled True ]
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository paginating |> Query.fromHtml |> Query.findAll [ Selector.attribute (attribute "aria-label" "Loading more observations"), Selector.attribute (attribute "role" "status") ] |> Query.count (Expect.equal 1)
+                    , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository detailLoading |> Query.fromHtml |> Query.find [ Selector.attribute (attribute "aria-label" "Loading Observation detail") ] |> Query.has [ Selector.attribute (attribute "role" "status") ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository detailError |> Query.fromHtml |> Query.has [ Selector.text "Failed to load observation detail." ]
                     ]
                     ()
@@ -2338,7 +2340,7 @@ suite =
                         observationWorkspace Api.Repository
                 in
                 Expect.all
-                    [ \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { base | loading = True } |> Query.fromHtml |> Query.has [ Selector.text "Matching repository files..." ]
+                    [ \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { base | loading = True } |> Query.fromHtml |> Query.find [ Selector.attribute (attribute "aria-label" "Matching repository files") ] |> Query.has [ Selector.attribute (attribute "role" "status") ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository base |> Query.fromHtml |> Query.has [ Selector.text "No matching observations", Selector.text "Every supplied path is shown below. Try different paths or clear the match.", Selector.text "No loaded matches for this path." ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository { base | error = Just "Failed to match repository files." } |> Query.fromHtml |> Query.has [ Selector.text "Failed to match repository files." ]
                     , \_ -> Feature.Observation.viewObservationsState TimestampDisplay.empty repository loaded |> Query.fromHtml |> Query.hasNot [ Selector.id "observation-subject" ]
@@ -3443,7 +3445,10 @@ suite =
                         let
                             model = appliedModeModel mode
                             state = model.observations
-                            view = Feature.Observation.viewObservations (observationWorkspace Api.Repository) { model | observations = { state | fileComposerOpen = open } } |> Query.fromHtml
+                            counts = state.counts
+                            tree = state.tree
+                            settled = { state | fileComposerOpen = open, counts = { counts | pending = False, active = Nothing }, tree = { tree | totals = Just ( 1, 1 ) } }
+                            view = Feature.Observation.viewObservations (observationWorkspace Api.Repository) { model | observations = settled } |> Query.fromHtml
                         in
                         Expect.all
                             [ \_ -> view |> Query.findAll [ Selector.class "observation-mode-button" ] |> Query.count (Expect.equal 3)

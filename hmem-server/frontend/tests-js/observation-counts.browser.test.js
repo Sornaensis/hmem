@@ -51,7 +51,25 @@ for (const width of [1440, 320]) test(`production ${width}: 200 pages and author
     assert.equal(first.payload.limit, 50); assert.equal(first.response.page.items.length, 50); assert.equal(first.response.page.has_more, true)
     await capture(h, `observation-counts-unfiltered-${width === 320 ? 'narrow' : 'desktop'}`)
     const countRequests = counts(h).length
-    while(Number(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'))<265) { await h.page.getByRole('button', { name: 'Load more', exact: true }).click(); await h.idle() }
+    const more = h.page.getByRole('button', { name: 'Load more', exact: true })
+    const dimensions = () => more.evaluate(element => {
+      const rect = element.getBoundingClientRect()
+      return { width: rect.width, height: rect.height, containerWidth: element.closest('.observation-pagination').clientWidth }
+    })
+    const before = await dimensions()
+    const nextPage = h.gate(value => value.payload?.view === 'list' && value.payload.offset === 50, { hold: true })
+    try {
+      await more.click()
+      await h.bounded(nextPage.arrived, 5000, 'Offset-50 Observation read')
+      const pending = h.page.getByRole('status', { name: 'Loading more observations', exact: true })
+      await pending.waitFor()
+      assert.equal(await pending.count(), 1)
+      assert.equal(await more.isDisabled(), true)
+      assert.deepEqual(await dimensions(), before, 'Pending retains the idle Load more dimensions')
+      if (width === 320) assert.ok(Math.abs(before.width - before.containerWidth) < 1, 'Load more fills the narrow pagination row')
+    } finally { nextPage.release() }
+    await h.idle()
+    while(Number(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'))<265) { await more.click(); await h.idle() }
     assert.equal(await h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count'), '265')
     assert.equal(counts(h).length, countRequests)
     assert.equal(h.receipts.filter(value=>value.payload?.view==='list').at(-1).payload.offset, 250)
@@ -113,7 +131,7 @@ test('production inactive workspace totals coalesce stale replies, count unloade
         entity: { type: 'observation', id, action }, invalidations: [{ kind: 'collection', target: 'observations:' + h.fixture.workspace.id }] }
     })
     await push(); await h.bounded((async () => { while (!release) await h.page.waitForTimeout(20) })(), 5000, 'Held inactive count request'); await paint(h.page)
-    assert.match((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), /Updating Observation total/)
+    assert.equal(await h.page.locator('.workspace-header .workspace-observation-total').getByRole('status', { name: 'Updating Observation total', exact: true }).count(), 1)
     await push(); await push(); await paint(h.page); assert.equal(requests.length, 1)
     release(); release = null; await h.idle()
     assert.equal(requests.length, 2); assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '265 observations')
@@ -145,7 +163,7 @@ test('production held count success cannot survive live read revocation and a fr
     })
     await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=observations')
     await h.bounded((async()=>{while(!release)await h.page.waitForTimeout(20)})(),5000,'Discovery count envelope held before revocation')
-    assert.match((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), /Loading Observation total/)
+    assert.equal(await h.page.locator('.workspace-header .workspace-observation-total').getByRole('status', { name: 'Loading Observation total', exact: true }).count(), 1)
     canRead = false
     await h.page.evaluate(workspace => window.pushHierarchyFrames([{ schema_version: 1, type: 'access_revoked', workspace_id: workspace }]), h.fixture.workspace.id)
     await h.page.waitForFunction(() => !document.getElementById('observation-panel'), null, { timeout: 5000 })

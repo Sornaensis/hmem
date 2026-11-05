@@ -86,7 +86,7 @@ test('production compact history auto-pages once, retains repeated SHAs and sequ
     await h.page.locator('#observation-history-toggle').click()
     await history.waitFor(value => value.offset === 25)
     assert.equal(await rows(h).count(), 25)
-    assert.equal(await h.page.locator('.observation-history [role=status]').innerText(), 'Loading…')
+    assert.equal(await h.page.locator('.observation-history').getByRole('status', { name: 'Loading Observation revision history', exact: true }).count(), 1)
     const placement = await h.page.locator('#observation-history-toggle').evaluate(element => ({ sharesValue: !!element.closest('dd')?.querySelector('.observation-revision-value'), top: element.getBoundingClientRect().top, shaBottom: element.closest('dd')?.querySelector('.observation-revision-value').getBoundingClientRect().bottom }))
     assert.ok(placement.sharesValue); assert.ok(placement.top >= placement.shaBottom)
     await h.page.locator('#observation-history-toggle').click()

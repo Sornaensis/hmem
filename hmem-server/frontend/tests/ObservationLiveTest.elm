@@ -9,6 +9,7 @@ import Feature.DataLoading as Loading
 import Feature.Observation as O
 import Feature.Search as Search
 import Helpers
+import Html.Attributes exposing (attribute)
 import Http
 import Json.Decode as D
 import Json.Encode as E
@@ -386,12 +387,17 @@ liveFilterTests =
                 ObservationCardRow _ value -> value.id == "file"
                 _ -> False
             incomplete = {completeTree | branches = Dict.update "a" (Maybe.map (\branch -> {branch | error = Just "Retry paths"})) completeTree.branches}
+            discovery = state.discovery
+            browse = { state | requestMode = ObservationFacetMode, tree = incomplete, discovery = { discovery | context = Just { token = "current", expiresAt = "", retrieval = { mode = "fts", reason = Nothing } } } }
+            retryControl current = O.viewObservationsState TimestampDisplay.empty workspaceFixture current |> Query.fromHtml |> Query.find [ Selector.class "observation-tree-more", Selector.containing [ Selector.text "Retry paths" ] ]
         in
         Expect.all
             [ \_ -> topology (matchesPath "a") completeTree |> Maybe.andThen .children |> Maybe.map (\rail -> (rail.owner, rail.tail, rail.unknown)) |> Expect.equal (Just ("tree-path:a", "tree-path:a/c", False))
             , \_ -> topology (matchesPath "a/c") completeTree |> Maybe.map .following |> Expect.equal (Just TreeEnd)
             , \_ -> topology (matchesPath "a/c") incomplete |> Maybe.map .following |> Expect.equal (Just TreeUnknown)
             , \_ -> topology (matchesPath "a") incomplete |> Maybe.andThen .children |> Maybe.map (\rail -> (rail.tail, rail.unknown)) |> Expect.equal (Just ("tree-page:branch:a", True))
+            , \_ -> retryControl { browse | gitSha = "abc" } |> Query.has [ Selector.disabled True ]
+            , \_ -> retryControl browse |> Query.hasNot [ Selector.disabled True ]
             , \_ -> topology card completeTree |> Maybe.andThen .parent |> Maybe.map .owner |> Expect.equal (Just "tree-terminal:file:a")
             , \_ -> topology card completeTree |> Maybe.map (\value -> List.map .owner value.ancestors) |> Expect.equal (Just ["tree-path:a"])
             , \_ -> topology (matchesPath "z") completeTree |> Maybe.map (\value -> (value.parent, value.ancestors, value.root)) |> Expect.equal (Just (Nothing, [], "tree-path:z"))
@@ -769,7 +775,7 @@ liveFilterTests =
             , \_ -> invalidated.observations.orderedIds |> Expect.equal model.observations.orderedIds
             , \_ -> O.filterValidationError invalidated.observations |> (/=) Nothing |> Expect.equal True
             , \_ -> O.viewObservationsState TimestampDisplay.empty workspaceFixture invalidated.observations |> Query.fromHtml |> Query.has [ Selector.text "Enter a full lowercase 40-character Git SHA, or clear the field." ]
-            , \_ -> O.viewObservationsState TimestampDisplay.empty workspaceFixture invalidated.observations |> Query.fromHtml |> Query.hasNot [ Selector.text "Counting matching Observations…" ]
+            , \_ -> O.viewObservationsState TimestampDisplay.empty workspaceFixture invalidated.observations |> Query.fromHtml |> Query.findAll [ Selector.attribute (attribute "role" "status"), Selector.attribute (attribute "aria-label" "Counting matching Observations") ] |> Query.count (Expect.equal 0)
             , \_ -> (query.gitSha, query.currentGitSha, query.historyGitSha) |> Expect.equal (Just (String.repeat 40 "a"), Just (String.repeat 40 "b"), Just (String.repeat 40 "c"))
             , \_ -> history.observations.expectedOffset |> Expect.equal (Just 0) ] ()
     , test "old timers fail after workspace mode and authority changes" <| \_ ->

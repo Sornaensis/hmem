@@ -44,6 +44,7 @@ import Html.Events exposing (..)
 import Types exposing (..)
 import Json.Decode as Decode
 import Process
+import Spinner
 import Task
 
 
@@ -569,7 +570,7 @@ viewSearchBar : Model -> Html Msg
 viewSearchBar model =
     div [ class "global-search-bar" ]
         [ div [ class "search-bar" ]
-            [ input [ class "search-input", type_ "search", placeholder "Search all entities...", attribute "aria-label" "Search all entities", value model.search.globalQuery
+            [ input [ id "unified-search-input", class "search-input", type_ "search", placeholder "Search all entities...", attribute "aria-label" "Search all entities", value model.search.globalQuery
                 , onInput GlobalSearchInput
                 , on "compositionstart" (Decode.succeed GlobalSearchCompositionStart)
                 , on "compositionend" (Decode.map GlobalSearchCompositionEnd (Decode.at [ "target", "value" ] Decode.string)) ] []
@@ -925,9 +926,9 @@ searchResultPresentations results =
 
 viewUnifiedSearchLoading : Model -> Html Msg
 viewUnifiedSearchLoading model =
-    div [ class "unified-search-results search-results-state", attribute "role" "status", attribute "aria-live" "polite" ]
+    div [ class "unified-search-results search-results-state" ]
         [ div [ class "search-state-card" ]
-            [ h3 [] [ text "Searching…" ]
+            [ h3 [] [ Spinner.inline "Searching all entities" ]
             , p [] [ text ("Looking for results matching " ++ searchQueryLabel model ++ ".") ]
             ]
         , viewPreviousResults model
@@ -947,12 +948,12 @@ viewPreviousResults model =
 
 viewUnifiedSearchError : Model -> String -> Html Msg
 viewUnifiedSearchError model message =
-    div [ class "unified-search-results search-results-state", attribute "role" "alert" ]
+    div [ class "unified-search-results search-results-state" ]
         [ div [ class "search-state-card search-state-error" ]
             [ h3 [] [ text "Search unavailable" ]
-            , p [] [ text message ]
+            , p [ attribute "role" "alert" ] [ text message ]
             , p [ class "search-state-muted" ] [ text ("Query: " ++ searchQueryLabel model) ]
-            , button [ class "btn-small search-result-action", onClick SubmitSearch ] [ text "Retry search" ]
+            , button [ class "btn-small search-result-action", Spinner.preserveFocus "unified-search-input", onClick SubmitSearch ] [ text "Retry search" ]
             ]
         , viewPreviousResults model
         ]

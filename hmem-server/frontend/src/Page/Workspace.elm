@@ -372,7 +372,7 @@ viewTabContent wsId model =
                     Feature.Observation.viewObservations workspace model
 
                 Nothing ->
-                    div [ class "loading-indicator" ] [ text "Loading observations..." ]
+                    Spinner.block "Loading observations"
 
         TimelineTab ->
             Feature.Timeline.viewWorkspaceTimelinePanel wsId model

@@ -99,6 +99,7 @@ import Process
 import Task
 import Ports exposing (copyToClipboard)
 import Set
+import Spinner
 import Toast exposing (addToast)
 import TimestampDisplay
 import Types exposing (..)
@@ -1852,7 +1853,7 @@ checkConflictCanonical model =
 
                 checking =
                     updateObservation
-                        (\state -> { state | edit = Just { edit | activeCanonicalRequest = Just request, error = Just "Checking the current version before choosing how to continue. Your draft is preserved." }, nextMutationRequestToken = token + 1 })
+                        (\state -> { state | edit = Just { edit | activeCanonicalRequest = Just request, error = Nothing }, nextMutationRequestToken = token + 1 })
                         model
             in
             ( checking, Api.fetchObservation model.flags.apiUrl edit.observationId (ObservationConflictCanonicalFetched request edit.latestCanonical.contentVersion) )
@@ -4837,13 +4838,47 @@ viewTreePage state prefix kind =
             Nothing -> Dict.get prefix state.tree.branches |> Maybe.map (\branch -> (branch.request /= Nothing, branch.error, branch.hasMore)) |> Maybe.withDefault (True, Nothing, False)
             Just value -> Dict.get (ObservationTree.terminalKey {subjectKind = value, subject = prefix}) state.tree.terminals |> Maybe.map (\terminal -> (terminal.request /= Nothing, terminal.error, terminal.hasMore)) |> Maybe.withDefault (True, Nothing, False)
         label = if kind == Nothing then "paths" else "observations"
+        loadingLabel =
+            case kind of
+                Just value -> "Loading " ++ String.toLower (subjectKindLabel value) ++ " observations for " ++ prefix
+                Nothing -> "Loading paths for " ++ (if prefix == "" then "Subject Tree" else prefix)
+
         exhausted = case kind of
             Nothing -> Dict.get prefix state.tree.branches |> Maybe.map (\branch -> branch.nextOffset > 2147483647) |> Maybe.withDefault False
             Just value -> Dict.get (ObservationTree.terminalKey {subjectKind = value, subject = prefix}) state.tree.terminals |> Maybe.map (\terminal -> terminal.nextOffset > 100000) |> Maybe.withDefault False
+
+        paused =
+            filtersPending state
+                || List.length state.discovery.physical >= 4
+                || List.length state.tree.physical >= 4
+                || (state.discovery.context == Nothing && (prefix /= "" || kind /= Nothing))
+                || (kind == Nothing && prefix /= "" && state.tree.lifetime /= state.tree.displayLifetime)
+
+        showStatus =
+            loading && not (filtersPending state) && (prefix /= "" || kind /= Nothing || state.tree.totals /= Nothing)
+
+        actionLabel =
+            if exhausted then "Offset limit reached" else (if error /= Nothing then "Retry " else "Load more ") ++ label
+
+        -- A continuation can move down the virtual list when new rows arrive.
+        -- Keep its control for the viewport's existing native focus pin.
+        controlAttributes =
+            if loading then
+                [ attribute "aria-disabled" "true" ]
+            else
+                [ disabled (exhausted || paused), onClick (LoadObservationTreePage prefix kind) ]
+                    ++ (if more then [] else [ Spinner.preserveFocus "observation-results" ])
     in div [class "observation-tree-page", treeIndent (if prefix == "" then 0 else List.length (String.split "/" prefix))]
-        [ if loading then span [attribute "role" "status"] [text ("Loading " ++ label ++ "…")] else text ""
+        [ if showStatus && not more then
+            Spinner.inline loadingLabel
+          else text ""
         , error |> Maybe.map (\message -> p [class "form-error", attribute "role" "alert"] [text message]) |> Maybe.withDefault (text "")
-        , if not loading && (more || error /= Nothing) then button [type_ "button", class "btn btn-secondary observation-tree-more", disabled exhausted, onClick (LoadObservationTreePage prefix kind)] [text (if exhausted then "Offset limit reached" else (if error /= Nothing then "Retry " else "Load more ") ++ label)] else text "" ]
+        , if more || (not loading && error /= Nothing) then
+            viewSpinnerControl [] (showStatus && more) loadingLabel
+                (button ([ type_ "button", class "btn btn-secondary observation-tree-more", style "grid-area" "1 / 1", attribute "aria-label" actionLabel ] ++ controlAttributes)
+                    [ spinnerControlLabel (showStatus && more) actionLabel ])
+          else text ""
+        ]
 
 
 viewTree : TimestampDisplay.State -> Bool -> ObservationModel -> Html Msg
@@ -4851,7 +4886,7 @@ viewTree display canEdit state =
     div [id "observation-results", class "entity-list observation-list observation-subject-tree", tabindex -1]
         [ viewStaleResultsNotice state
         , p [class "form-help observation-tree-count-help"] [text "Counts are unique within each path. An observation can appear under multiple paths, so child counts may overlap."]
-        , if state.tree.refreshing || state.refreshPending then p [class "form-help", attribute "role" "status"] [text "Refreshing Subject Tree. Showing the last completed paths."] else text ""
+        , if state.tree.totals /= Nothing && (state.tree.refreshing || state.refreshPending) then p [class "form-help"] [text "Showing the last completed paths."] else text ""
         , if state.tree.totals |> Maybe.map (Tuple.second >> (==) 0) |> Maybe.withDefault False then p [class "empty-state"] [text "No matching subjects."] else text ""
         , viewResultRows display canEdit state ]
 
@@ -4943,11 +4978,12 @@ viewRetainedDraft model =
     case model.observations.edit of
         Just edit ->
             if hasProtectedEdit model && (model.activeTab /= ObservationsTab || model.observations.selectedId /= Just edit.observationId) then
-                div [ class "observation-retained-draft", attribute "role" "status" ]
-                    [ p [] [ text "Your Observation draft is retained. Save or discard it before leaving this workspace or editing another observation." ]
+                div [ id "observation-retained-draft", class "observation-retained-draft", tabindex -1 ]
+                    [ p [ attribute "role" "status" ] [ text "Your Observation draft is retained. Save or discard it before leaving this workspace or editing another observation." ]
                     , button [ class "btn btn-secondary", type_ "button", onClick ReturnToObservationDraft ] [ text "Return to draft" ]
-                    , button [ class "btn btn-primary", type_ "button", onClick SaveObservationEdit, disabled (edit.saving || edit.conflict || editValidationError edit /= Nothing) ]
-                        [ text (if edit.saving then "Saving..." else "Save draft") ]
+                    , if edit.saving then Spinner.inline "Saving Observation draft" else text ""
+                    , button [ class "btn btn-primary", type_ "button", Spinner.preserveFocus "observation-retained-draft", onClick SaveObservationEdit, disabled (edit.saving || edit.conflict || editValidationError edit /= Nothing) ]
+                        [ text "Save draft" ]
                     , button [ class "btn btn-secondary", type_ "button", onClick CancelObservationEdit, disabled edit.saving ] [ text "Discard draft" ]
                     ]
 
@@ -5109,12 +5145,12 @@ viewAppliedFilters state =
                 Nothing -> text ""
           else text ""
         , case state.discovery.error of
-            Just message -> div [class "observation-discovery-error", attribute "role" "alert"] [p [] [text message], button [class "btn btn-secondary", type_ "button", onClick RetryObservationResults] [text "Retry search"]]
+            Just message -> div [class "observation-discovery-error", attribute "role" "alert"] [p [] [text message], button [class "btn btn-secondary", type_ "button", Spinner.preserveFocus "observation-mode-heading", onClick RetryObservationResults] [text "Retry search"]]
             Nothing -> text ""
         , if filtersPending state then
             p [ class "form-help observation-filter-pending" ] [ text (if state.completedQuery == Nothing && List.isEmpty state.orderedIds && List.isEmpty state.facetKeys then "Editing filters." else "Editing filters. Showing the last completed results.") ]
-          else if state.refreshPass /= Nothing then
-            p [ class "form-help" ] [ text "Updating results. Showing the last completed results." ]
+           else if state.refreshPass /= Nothing && not (List.isEmpty state.orderedIds && List.isEmpty state.facetKeys) then
+             p [ class "form-help" ] [ text "Showing the last completed results." ]
           else text ""
         , if state.refreshError /= Nothing then
             p [ class "form-help" ] [ text "Showing the last completed results." ]
@@ -5158,22 +5194,64 @@ viewModeNavigation state =
                 ]
                 [ text "Files" ]
             ]
-        , if treeMode state.requestMode then
-            p [class "observation-mode-announcement", attribute "aria-live" "polite"]
-                [text (state.tree.totals |> Maybe.map (\(total, matches) -> if matches == total then String.fromInt total ++ (if total == 1 then " observation" else " observations") else String.fromInt matches ++ " matching observations · " ++ String.fromInt total ++ " in workspace") |> Maybe.withDefault (if Dict.get "" state.tree.branches |> Maybe.andThen .error |> (/=) Nothing then "Subject Tree unavailable" else "Loading Subject Tree…"))]
-          else if hasAppliedCountFilter state then
-            let counts = state.counts in
-            p [ class "observation-mode-announcement", attribute "aria-live" "polite" ]
-                [ text (if state.requestMode == ObservationMatchMode && List.isEmpty state.matchAppliedPaths then "Select Match files to load file results."
-                    else if filtersPending state then
-                    counts.value |> Maybe.map (\value -> "Last completed count: " ++ String.fromInt value.matchCount) |> Maybe.withDefault "Editing filters"
-                    else if counts.current && counts.valueFingerprint == countFingerprint (Maybe.map .workspaceId counts.owner |> Maybe.withDefault "") state then
-                    counts.value |> Maybe.map (\value -> String.fromInt value.matchCount ++ (if value.matchCount == 1 then " Observation matches" else " Observations match")) |> Maybe.withDefault "Observation match count unavailable"
-                    else if counts.error /= Nothing then "Observation match count unavailable"
-                    else "Counting matching Observations…")
-                , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryObservationCounts ] [ text "Retry counts" ] else text "" ]
-          else text ""
+        , viewModeCounts state
         ]
+
+
+viewModeCounts : ObservationModel -> Html Msg
+viewModeCounts state =
+    let
+        settled children =
+            p [ class "observation-mode-announcement", attribute "aria-live" "polite" ] children
+
+        pending children labelText =
+            p [ class "observation-mode-announcement" ] (children ++ [ Spinner.inline labelText ])
+
+        root =
+            Dict.get "" state.tree.branches
+
+        counts =
+            state.counts
+
+        lastCount =
+            Maybe.map (\value -> "Last completed count: " ++ String.fromInt value.matchCount) counts.value
+    in
+    if treeMode state.requestMode then
+        case state.tree.totals of
+            Just ( total, matches ) ->
+                settled [ text (if matches == total then String.fromInt total ++ (if total == 1 then " observation" else " observations") else String.fromInt matches ++ " matching observations · " ++ String.fromInt total ++ " in workspace") ]
+
+            Nothing ->
+                if Maybe.andThen .error root /= Nothing || state.discovery.error /= Nothing then
+                    settled [ text "Subject Tree unavailable" ]
+                else if not (filtersPending state) && (Maybe.andThen .request root /= Nothing || state.discovery.bootstrap /= Nothing || state.discovery.afterBootstrap /= Nothing) then
+                    pending [] "Loading Subject Tree"
+                else
+                    settled []
+
+    else if not (hasAppliedCountFilter state) then
+        text ""
+
+    else if state.requestMode == ObservationMatchMode && List.isEmpty state.matchAppliedPaths then
+        settled [ text "Select Match files to load file results." ]
+
+    else if filtersPending state then
+        settled [ text (Maybe.withDefault "Editing filters" lastCount) ]
+
+    else if counts.current && counts.valueFingerprint == countFingerprint (Maybe.map .workspaceId counts.owner |> Maybe.withDefault "") state then
+        settled [ text (counts.value |> Maybe.map (\value -> String.fromInt value.matchCount ++ (if value.matchCount == 1 then " Observation matches" else " Observations match")) |> Maybe.withDefault "Observation match count unavailable") ]
+
+    else if counts.error /= Nothing then
+        settled
+            [ text "Observation match count unavailable"
+            , button [ class "btn btn-sm", type_ "button", Spinner.preserveFocus "observation-mode-heading", onClick RetryObservationCounts ] [ text "Retry counts" ]
+            ]
+
+    else if counts.pending || counts.active /= Nothing then
+        pending (lastCount |> Maybe.map (\count -> [ text (count ++ " ") ]) |> Maybe.withDefault []) "Counting matching Observations"
+
+    else
+        settled (lastCount |> Maybe.map (text >> List.singleton) |> Maybe.withDefault [])
 
 
 viewList : TimestampDisplay.State -> Bool -> String -> ObservationModel -> Html Msg
@@ -5198,21 +5276,14 @@ viewObservationResults display canEdit workspaceId ariaLabel emptyHeading state 
         observations =
             state.orderedIds |> List.filterMap (\observationId -> Dict.get observationId state.items)
 
-        context =
-            case state.requestMode of
-                ObservationExactSubjectMode ->
-                    state.selectedFacet
-                        |> Maybe.map (\selectedFacet -> "exact:" ++ facetKey selectedFacet.subjectKind selectedFacet.subject)
-                        |> Maybe.withDefault "exact:missing"
-
-                _ ->
-                    "flat"
+        paginating =
+            not (List.isEmpty observations) && pageControlPending state.loading state.hasMore state.expectedOffset state
     in
     div [ id "observation-results", class "entity-list observation-list", tabindex -1 ]
         [ viewStaleResultsNotice state
         , if state.loading && List.isEmpty observations then
-            div [ class "loading-indicator observation-state observation-state-loading", attribute "role" "status", attribute "aria-live" "polite" ]
-                [ text "Loading observations..." ]
+            div [ class "loading-indicator observation-state observation-state-loading" ]
+                [ Spinner.inline "Loading observations" ]
 
           else
             text ""
@@ -5230,21 +5301,13 @@ viewObservationResults display canEdit workspaceId ariaLabel emptyHeading state 
                 else
                     text ""
         , Lazy.lazy3 viewResultRows display canEdit state
-        , if state.loading && not (List.isEmpty observations) then
+        , if state.loading && not (List.isEmpty observations) && not paginating then
             viewPageLoading state.expectedOffset "observations"
           else
             text ""
         , if state.hasMore then
             div [ class "observation-pagination" ]
-                [ button [ class "btn btn-secondary observation-load-more", type_ "button", onClick LoadMoreObservations, disabled (not (canLoadMore workspaceId state)) ]
-                    [ text
-                        (if state.loading then
-                            "Loading..."
-
-                         else
-                            "Load more"
-                        )
-                    ]
+                [ viewPageControl "observation-load-more" "Load more" "observations" (canLoadMore workspaceId state) paginating LoadMoreObservations
                 ]
 
           else
@@ -5257,7 +5320,7 @@ viewStaleResultsNotice state =
     case state.refreshError of
         Just message ->
             div [ class "observation-state observation-state-error", attribute "role" "status" ]
-                [ text message, button [ class "btn btn-secondary observation-retry", type_ "button", onClick RetryObservationResults, disabled (state.loading || state.facetLoading) ] [ text "Retry refresh" ] ]
+                [ text message, button [ class "btn btn-secondary observation-retry", type_ "button", Spinner.preserveFocus "observation-results", onClick RetryObservationResults, disabled (state.loading || state.facetLoading) ] [ text "Retry refresh" ] ]
         Nothing -> text ""
 
 
@@ -5274,7 +5337,7 @@ viewRequestError heading message hasCached state =
           else
             text ""
         , button
-            [ class "btn btn-secondary observation-retry", type_ "button", onClick RetryObservationResults
+            [ class "btn btn-secondary observation-retry", type_ "button", Spinner.preserveFocus "observation-results", onClick RetryObservationResults
             , disabled ((if state.requestMode == ObservationFacetMode then state.facetLoading else state.loading) || state.failedRequest == Nothing)
             ] [ text "Retry results" ]
         ]
@@ -5282,13 +5345,50 @@ viewRequestError heading message hasCached state =
 
 viewPageLoading : Maybe Int -> String -> Html Msg
 viewPageLoading offset labelText =
-    p [ class "observation-loading-page", attribute "role" "status", attribute "aria-live" "polite" ]
-        [ text
+    p [ class "observation-loading-page" ]
+        [ Spinner.inline
             (if offset == Just 0 then
-                "Refreshing " ++ labelText ++ "..."
+                "Refreshing " ++ labelText
              else
-                "Loading more " ++ labelText ++ "..."
+                "Loading more " ++ labelText
             )
+        ]
+
+
+pageControlPending : Bool -> Bool -> Maybe Int -> ObservationModel -> Bool
+pageControlPending loading hasMore offset state =
+    loading && hasMore && Maybe.withDefault 0 offset > 0 && state.refreshPass == Nothing
+
+
+viewPageControl : String -> String -> String -> Bool -> Bool -> Msg -> Html Msg
+viewPageControl buttonClass actionLabel itemsLabel allowed pending message =
+    viewSpinnerControl [ class "observation-spinner-control" ] pending ("Loading more " ++ itemsLabel)
+        (button
+            [ class ("btn btn-secondary " ++ buttonClass)
+            , type_ "button"
+            , attribute "aria-label" actionLabel
+            , style "grid-area" "1 / 1"
+            , Spinner.preserveFocus "observation-results"
+            , onClick message
+            , disabled (not allowed)
+            ]
+            [ spinnerControlLabel pending actionLabel ])
+
+
+spinnerControlLabel : Bool -> String -> Html Msg
+spinnerControlLabel pending label =
+    if pending then span [ style "visibility" "hidden" ] [ text label ] else text label
+
+
+viewSpinnerControl : List (Html.Attribute Msg) -> Bool -> String -> Html Msg -> Html Msg
+viewSpinnerControl attributes pending pendingLabel control =
+    div (style "display" "grid" :: attributes)
+        [ control
+        , if pending then
+            span [ style "grid-area" "1 / 1", style "place-self" "center", style "pointer-events" "none" ]
+                [ Spinner.inline pendingLabel ]
+          else
+            text ""
         ]
 
 
@@ -5297,11 +5397,14 @@ viewFacetCatalogue display canEdit workspaceId state =
     let
         facets =
             state.facetKeys |> List.filterMap (\key -> Dict.get key state.facets)
+
+        paginating =
+            not (List.isEmpty facets) && pageControlPending state.facetLoading state.facetHasMore state.facetExpectedOffset state
     in
     div [ id "observation-results", class "entity-list observation-list observation-facet-list", tabindex -1 ]
         [ viewStaleResultsNotice state
         , if state.facetLoading && List.isEmpty facets then
-            div [ class "loading-indicator observation-state observation-state-loading", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Loading shared subjects..." ]
+            div [ class "loading-indicator observation-state observation-state-loading" ] [ Spinner.inline "Loading shared subjects" ]
 
           else
             text ""
@@ -5319,21 +5422,13 @@ viewFacetCatalogue display canEdit workspaceId state =
                 else
                     text ""
         , Lazy.lazy3 viewResultRows display canEdit state
-        , if state.facetLoading && not (List.isEmpty facets) then
+        , if state.facetLoading && not (List.isEmpty facets) && not paginating then
             viewPageLoading state.facetExpectedOffset "shared subjects"
           else
             text ""
         , if state.facetHasMore then
             div [ class "observation-pagination" ]
-                [ button [ class "btn btn-secondary observation-facet-load-more", type_ "button", onClick LoadMoreObservationFacets, disabled (not (canLoadMoreFacets workspaceId state)) ]
-                    [ text
-                        (if state.facetLoading then
-                            "Loading..."
-
-                         else
-                            "Load more subjects"
-                        )
-                    ]
+                [ viewPageControl "observation-facet-load-more" "Load more subjects" "shared subjects" (canLoadMoreFacets workspaceId state) paginating LoadMoreObservationFacets
                 ]
 
           else
@@ -5362,11 +5457,14 @@ viewMatchResults display canEdit workspaceId state =
 
         hasAnyGroups =
             not (List.isEmpty state.orderedIds)
+
+        paginating =
+            hasAnyGroups && pageControlPending state.loading state.hasMore state.expectedOffset state
     in
     div [ id "observation-results", class "entity-list observation-list observation-match-results", tabindex -1 ]
         [ viewStaleResultsNotice state
         , if state.loading && List.isEmpty state.orderedIds then
-            div [ class "loading-indicator observation-state observation-state-loading", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Matching repository files..." ]
+            div [ class "loading-indicator observation-state observation-state-loading" ] [ Spinner.inline "Matching repository files" ]
 
           else
             text ""
@@ -5391,22 +5489,14 @@ viewMatchResults display canEdit workspaceId state =
             Lazy.lazy3 viewResultRows display canEdit state
           else
             text ""
-        , if state.loading && not (List.isEmpty state.orderedIds) then
+        , if state.loading && hasAnyGroups && not paginating then
             viewPageLoading state.expectedOffset "path matches"
 
           else
             text ""
         , if state.hasMore then
             div [ class "observation-pagination" ]
-                [ button [ class "btn btn-secondary observation-load-more", type_ "button", onClick LoadMoreObservations, disabled (not (canLoadMore workspaceId state)) ]
-                    [ text
-                        (if state.loading then
-                            "Loading..."
-
-                         else
-                            "Load more observations"
-                        )
-                    ]
+                [ viewPageControl "observation-load-more" "Load more observations" "path matches" (canLoadMore workspaceId state) paginating LoadMoreObservations
                 , span [ class "form-help" ] [ text "Counts in path groups are loaded observations, not server totals." ]
                 ]
 
@@ -5516,9 +5606,9 @@ viewDetail display canEdit state =
             text ""
 
         Just _ ->
-            section [ id "observation-detail", class "observation-detail" ]
+            section [ id "observation-detail", class "observation-detail", tabindex -1 ]
                 [ if state.detailLoading then
-                    div [ class "loading-indicator observation-state observation-detail-state", attribute "role" "status", attribute "aria-live" "polite" ] [ text "Loading detail..." ]
+                    div [ class "loading-indicator observation-state observation-detail-state" ] [ Spinner.inline "Loading Observation detail" ]
 
                   else
                     text ""
@@ -5526,7 +5616,7 @@ viewDetail display canEdit state =
                     Just message ->
                         div [ class "observation-state observation-state-error observation-detail-state", attribute "role" "alert" ]
                             [ text message
-                            , button [ class "btn btn-secondary", type_ "button", onClick RetryObservationDetail, disabled state.detailLoading ] [ text "Retry detail" ]
+                            , button [ class "btn btn-secondary", type_ "button", Spinner.preserveFocus "observation-detail", onClick RetryObservationDetail, disabled state.detailLoading ] [ text "Retry detail" ]
                             ]
 
                     Nothing ->
@@ -5573,7 +5663,7 @@ viewDetailContent canEdit observation maybeEdit =
                     validationError =
                         editValidationError edit
                 in
-                div [ class "observation-edit-form" ]
+                div [ id "observation-edit-form", class "observation-edit-form", tabindex -1 ]
                     [ label [ class "filter-label", for "observation-edit-content" ] [ text "Observation content" ]
                     , textarea
                         [ id "observation-edit-content"
@@ -5594,20 +5684,18 @@ viewDetailContent canEdit observation maybeEdit =
 
                         Nothing ->
                             if edit.conflict then
-                                div [ id "observation-edit-status", class "observation-edit-conflict", attribute "role" "alert" ]
+                                div [ id "observation-edit-status", class "observation-edit-conflict" ]
                                     [ p []
-                                        [ text
-                                            (if edit.activeCanonicalRequest /= Nothing then
-                                                "Checking the current version before choosing how to continue. Your draft is preserved."
-                                             else
-                                                Maybe.withDefault
-                                                    "This observation changed elsewhere. Your draft is preserved; choose how to continue before saving."
-                                                    edit.error
-                                            )
-                                        ]
+                                        (if edit.activeCanonicalRequest /= Nothing then
+                                            [ Spinner.inline "Checking the current version", text " Your draft is preserved." ]
+                                         else
+                                            [ span [ attribute "role" "alert" ]
+                                                [ text (Maybe.withDefault "This observation changed elsewhere. Your draft is preserved; choose how to continue before saving." edit.error) ]
+                                            ]
+                                        )
                                     , div [ class "observation-conflict-actions" ]
-                                        [ button [ class "btn btn-secondary", type_ "button", onClick ReloadObservationEdit, disabled (edit.saving || edit.activeCanonicalRequest /= Nothing) ] [ text (if edit.canonicalProvisional then "Use retained version" else "Use latest version") ]
-                                        , button [ class "btn btn-secondary", type_ "button", onClick RebaseObservationEdit, disabled (edit.saving || edit.activeCanonicalRequest /= Nothing) ] [ text "Keep my draft" ]
+                                        [ button [ class "btn btn-secondary", type_ "button", Spinner.preserveFocus "observation-edit-form", onClick ReloadObservationEdit, disabled (edit.saving || edit.activeCanonicalRequest /= Nothing) ] [ text (if edit.canonicalProvisional then "Use retained version" else "Use latest version") ]
+                                        , button [ class "btn btn-secondary", type_ "button", Spinner.preserveFocus "observation-edit-form", onClick RebaseObservationEdit, disabled (edit.saving || edit.activeCanonicalRequest /= Nothing) ] [ text "Keep my draft" ]
                                         ]
                                     ]
 
@@ -5617,30 +5705,17 @@ viewDetailContent canEdit observation maybeEdit =
                                         p [ id "observation-edit-status", class "form-error", attribute "role" "alert" ] [ text message ]
 
                                     Nothing ->
-                                        span [ id "observation-edit-status", attribute "aria-live" "polite" ]
-                                            [ text
-                                                (if edit.saving then
-                                                    "Saving observation..."
-
-                                                 else
-                                                    ""
-                                                )
-                                            ]
+                                        span [ id "observation-edit-status" ]
+                                            [ if edit.saving then Spinner.inline "Saving Observation" else text "" ]
                     , div [ class "observation-edit-actions" ]
                         [ button
                             [ class "btn btn-primary"
                             , type_ "button"
+                            , Spinner.preserveFocus "observation-edit-form"
                             , onClick SaveObservationEdit
                             , disabled (edit.saving || edit.conflict || validationError /= Nothing)
                             ]
-                            [ text
-                                (if edit.saving then
-                                    "Saving..."
-
-                                 else
-                                    (if edit.draft == edit.baseContent then "Record re-audit" else "Save reviewed content")
-                                )
-                            ]
+                            [ text (if edit.draft == edit.baseContent then "Record re-audit" else "Save reviewed content") ]
                         , button [ class "btn btn-secondary", type_ "button", onClick CancelObservationEdit, disabled edit.saving ] [ text "Cancel" ]
                         ]
                     ]
@@ -5712,25 +5787,10 @@ viewDeleteConfirmation canEdit state =
                             p [ class "form-error observation-delete-error", attribute "role" "alert" ] [ text message ]
 
                         Nothing ->
-                            span [ attribute "aria-live" "polite" ]
-                                [ text
-                                    (if confirmation.deleting then
-                                        "Deleting observation..."
-
-                                     else
-                                        ""
-                                    )
-                                ]
+                            if confirmation.deleting then Spinner.inline "Deleting Observation" else text ""
                     , div [ class "modal-actions" ]
-                        [ button [ id "observation-delete-confirm", class "btn btn-danger", type_ "button", onClick ConfirmObservationDelete, disabled confirmation.deleting ]
-                            [ text
-                                (if confirmation.deleting then
-                                    "Deleting..."
-
-                                 else
-                                    "Delete permanently"
-                                )
-                            ]
+                        [ button [ id "observation-delete-confirm", class "btn btn-danger", type_ "button", Spinner.preserveFocus "observation-delete-dialog", onClick ConfirmObservationDelete, disabled confirmation.deleting ]
+                            [ text "Delete permanently" ]
                         , button [ id "observation-delete-cancel", class "btn btn-secondary", type_ "button", onClick CancelObservationDelete, disabled confirmation.deleting ] [ text "Cancel" ]
                         ]
                     ]
@@ -6061,10 +6121,10 @@ viewHistory display observation state =
         , if state.historyExpanded then
             div [ class "observation-history-content" ]
                 [ saved |> Maybe.map (\history -> ol [] (List.map entry history.items)) |> Maybe.withDefault (text "")
-                , if saved |> Maybe.map .loading |> Maybe.withDefault False then span [ class "form-help", attribute "role" "status" ] [ text "Loading…" ] else text ""
+                , if saved |> Maybe.map .loading |> Maybe.withDefault False then Spinner.inline "Loading Observation revision history" else text ""
                 , saved |> Maybe.andThen .error |> Maybe.map (\message -> div [ class "form-error", attribute "role" "alert" ]
                     [ text message
-                    , if saved |> Maybe.map (\history -> history.nextOffset <= 100000) |> Maybe.withDefault False then button [ id "observation-history-load", type_ "button", class "observation-history-toggle", onClick LoadObservationHistory ] [ text "Retry" ] else text ""
+                    , if saved |> Maybe.map (\history -> history.nextOffset <= 100000) |> Maybe.withDefault False then button [ id "observation-history-load", type_ "button", class "observation-history-toggle", Spinner.preserveFocus "observation-history-toggle", onClick LoadObservationHistory ] [ text "Retry" ] else text ""
                     ]) |> Maybe.withDefault (text "")
                 ]
           else text ""

@@ -96,11 +96,13 @@ test('global input position and focus stay stable on the first character and key
 
 test('global search is live and independent with persistent actor preferences through pending/error/empty/clear', { timeout: 60000 }, async () => {
   const fixture = hierarchyFixture(), h = await openHierarchy(fixture), requests = []
-  let releasePending, retry = false
+  let releasePending, releaseRetry, retry = false
   const pending = new Promise(resolve => { releasePending = resolve })
+  const retryPending = new Promise(resolve => { releaseRetry = resolve })
   await h.page.route('**/api/v1/search', async route => {
     const body = route.request().postDataJSON(); requests.push(body)
     if (body.query === 'pending' && !retry) { await pending; return respond(route, { error: 'Controlled failure' }, 500) }
+    if (body.query === 'pending') await retryPending
     return respond(route, body.query === 'alpha' ? { ...empty, projects: fixture.projects } : empty)
   })
   try {
@@ -122,16 +124,26 @@ test('global search is live and independent with persistent actor preferences th
     assert.equal(await input(h).evaluate(element => !!element.closest('.sticky-workspace-bar')), false)
     await enterSearch(h); await input(h).fill('pending')
     await waitFor(h, () => requests.length === 3)
-    assert.match(await h.page.locator('.search-results-state').innerText(), /Searching/)
+    const searching = h.page.getByRole('status', { name: 'Searching all entities', exact: true })
+    assert.equal(await searching.count(), 1)
     assert.match(await h.page.locator('.search-previous-results .search-results-title').innerText(), /alpha/)
     assert.equal(await bar(h).count(), 1)
     releasePending()
-    await h.page.getByRole('button', { name: 'Retry search', exact: true }).waitFor()
+    const retryButton = h.page.getByRole('button', { name: 'Retry search', exact: true })
+    await retryButton.waitFor()
+    assert.equal(await searching.count(), 0)
     assert.match(await h.page.locator('.search-previous-results .search-results-title').innerText(), /alpha/)
     assert.equal(await bar(h).count(), 1)
     retry = true
-    await h.page.getByRole('button', { name: 'Retry search', exact: true }).click()
+    await retryButton.focus()
+    await h.page.keyboard.press('Enter')
+    await searching.waitFor()
+    assert.equal(await retryButton.count(), 0)
+    await h.page.waitForFunction(() => document.activeElement?.id === 'unified-search-input')
+    assert.match(await h.page.locator('.search-previous-results .search-results-title').innerText(), /alpha/)
+    releaseRetry()
     await h.page.getByText('No results found', { exact: true }).waitFor()
+    assert.equal(await searching.count(), 0)
     assert.equal(await bar(h).count(), 1)
     await h.page.getByRole('button', { name: 'Clear all entities search', exact: true }).click()
     await h.page.waitForFunction(() => document.querySelector('.search-input')?.value === '')
@@ -167,7 +179,7 @@ test('global search is live and independent with persistent actor preferences th
     await enterSearch(h); await input(h).fill('first actor again'); await h.page.locator('.search-results-title').waitFor()
     assert.deepEqual(requests.at(-1).entity_types, ['task'], 'Each actor retains independent choices')
     assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
-  } finally { releasePending(); await h.close() }
+  } finally { releasePending(); releaseRetry(); await h.close() }
 })
 
 test('composition suppresses intermediate searches; late query and type replies cannot replace the current display', { timeout: 60000 }, async () => {

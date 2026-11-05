@@ -15,10 +15,12 @@ import Helpers exposing (beginTrackedMutation, buildFragment, flexibleStringDeco
 import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
+import Http
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
 import Ports
+import Spinner
 import Task
 import Toast exposing (addToast)
 import TimestampDisplay
@@ -30,6 +32,9 @@ init : AuditLogModel
 init =
     { entityHistory = Dict.empty
     , entityHistoryHasMore = Dict.empty
+    , entityHistoryRequests = Dict.empty
+    , entityHistoryFailures = Dict.empty
+    , nextEntityHistoryRequestId = 1
     , historyExpanded = Dict.empty
     , entries = []
     , entryBaseOffset = 0
@@ -114,26 +119,8 @@ update msg model =
                     Err _ ->
                         ( updateAuditLogModel (\al -> { al | loading = False, loadingFilters = Nothing, activeRequest = Nothing, error = Just "Failed to load audit entries for these filters." }) model, Cmd.none )
 
-        GotEntityHistory entityId result ->
-            case result of
-                Ok paginated ->
-                    ( updateAuditLogModel
-                        (\al ->
-                            { al
-                                | entityHistory = Dict.insert entityId paginated.items al.entityHistory
-                                , entityHistoryHasMore = Dict.insert entityId paginated.hasMore al.entityHistoryHasMore
-                            }
-                        )
-                        model
-                    , Cmd.none
-                    )
-
-                Err _ ->
-                    let
-                        ( m, cmd ) =
-                            addToast Error "Failed to load entity history" model
-                    in
-                    ( updateAuditLogModel (\al -> { al | entityHistory = Dict.insert entityId [] al.entityHistory }) m, cmd )
+        GotEntityHistory request result ->
+            settleEntityHistory request result model
 
         ToggleEntityHistory entityType entityId ->
             let
@@ -143,25 +130,30 @@ update msg model =
                 newExpanded =
                     not current
 
-                fetchCmd =
-                    if newExpanded && not (Dict.member entityId model.auditLog.entityHistory) then
-                        Api.fetchEntityHistory model.flags.apiUrl entityType entityId Nothing (GotEntityHistory entityId)
-
-                    else
-                        Cmd.none
+                expanded =
+                    updateAuditLogModel (\al -> { al | historyExpanded = Dict.insert entityId newExpanded al.historyExpanded }) model
             in
-            ( updateAuditLogModel (\al -> { al | historyExpanded = Dict.insert entityId newExpanded al.historyExpanded }) model
-            , fetchCmd
-            )
+            if newExpanded && not (Dict.member entityId model.auditLog.entityHistory || Dict.member entityId model.auditLog.entityHistoryFailures) then
+                startEntityHistory True entityType entityId Nothing expanded
+
+            else
+                ( expanded, Cmd.none )
 
         LoadMoreHistory entityType entityId ->
-            let
-                currentCount =
-                    Dict.get entityId model.auditLog.entityHistory |> Maybe.map List.length |> Maybe.withDefault 0
-            in
-            ( model
-            , Api.fetchEntityHistory model.flags.apiUrl entityType entityId (Just (currentCount + 20)) (GotEntityHistory entityId)
-            )
+            case Dict.get entityId model.auditLog.entityHistoryFailures of
+                Just limit ->
+                    startEntityHistory True entityType entityId limit model
+
+                Nothing ->
+                    if Dict.get entityId model.auditLog.entityHistoryHasMore == Just True then
+                        let
+                            currentCount =
+                                Dict.get entityId model.auditLog.entityHistory |> Maybe.map List.length |> Maybe.withDefault 0
+                        in
+                        startEntityHistory True entityType entityId (Just (currentCount + 20)) model
+
+                    else
+                        ( model, Cmd.none )
 
         SetAuditFilter filterName filterValue ->
             let
@@ -267,9 +259,6 @@ update msg model =
             case result of
                 Ok _ ->
                     let
-                        refreshHistoryCmd =
-                            Api.fetchEntityHistory model.flags.apiUrl entityType entityId Nothing (GotEntityHistory entityId)
-
                         refreshAuditFilters =
                             case model.page of
                                 AuditLogPage ->
@@ -336,8 +325,11 @@ update msg model =
 
                                 Nothing ->
                                     ( toastModel, Cmd.none )
+
+                        ( withHistory, refreshHistoryCmd ) =
+                            startEntityHistory False entityType entityId Nothing refreshedModel
                     in
-                    ( refreshedModel
+                    ( withHistory
                     , Cmd.batch [ toastCmd, refreshHistoryCmd, refreshAuditCmd ]
                     )
 
@@ -362,7 +354,7 @@ viewAuditLogPage model =
         div [ class "page audit-log-view" ]
             [ div [ class "page-header" ]
                 [ h2 [] [ span [ class "page-header-icon icon-audit" ] [], text "Audit Log" ] ]
-            , div [ class "loading-indicator" ] [ text "Loading audit permissions..." ]
+            , Spinner.block "Loading audit permissions"
             ]
 
     else if not (Permissions.canViewGlobalAudit model) then
@@ -385,7 +377,7 @@ viewWorkspaceAuditPanel : String -> Model -> Html Msg
 viewWorkspaceAuditPanel wsId model =
     if model.sessionContext == Nothing then
         div [ class "audit-log-view" ]
-            [ div [ class "loading-indicator" ] [ text "Loading audit permissions..." ] ]
+            [ Spinner.block "Loading audit permissions" ]
 
     else if not (Permissions.canViewCurrentWorkspaceAudit model) then
         div [ class "audit-log-view" ]
@@ -406,14 +398,14 @@ viewWorkspaceAuditPanel wsId model =
                 viewAuditEntries model "No workspace audit entries found."
 
               else
-                div [ class "loading-indicator" ] [ text "Loading workspace audit..." ]
+                Spinner.block "Loading workspace audit"
             ]
 
 
 viewAuditEntries : Model -> String -> Html Msg
 viewAuditEntries model emptyMessage =
     if model.auditLog.loading && List.isEmpty model.auditLog.entries then
-        div [ class "loading-indicator" ] [ text "Loading audit entries..." ]
+        Spinner.block "Loading audit entries"
 
     else if model.auditLog.error /= Nothing && List.isEmpty model.auditLog.entries then
         div [ class "error-message", attribute "role" "alert" ] [ text (Maybe.withDefault "Unable to load audit entries." model.auditLog.error) ]
@@ -422,16 +414,16 @@ viewAuditEntries model emptyMessage =
         div [ class "empty-state" ] [ text emptyMessage ]
 
     else
-        div [ class "audit-log-list audit-ledger", attribute "aria-label" "Audit ledger", attribute "data-audit-viewport" (String.fromInt model.sessionRequestEpoch ++ ":" ++ String.fromInt model.auditLog.nextRequestId) ]
+        div [ id "audit-entries", tabindex -1, class "audit-log-list audit-ledger", attribute "aria-label" "Audit ledger", attribute "data-audit-viewport" (String.fromInt model.sessionRequestEpoch ++ ":" ++ String.fromInt model.auditLog.nextRequestId) ]
             [ div [ class "audit-ledger-rows" ]
                 ([ div [ class "audit-ledger-head" ] [ span [] [ text "Time / actor" ], span [] [ text "Change" ] ] ]
                     ++ (model.auditLog.error |> Maybe.map (\message -> [ div [ class "error-message", attribute "role" "alert" ] [ text message ] ]) |> Maybe.withDefault [])
                     ++ List.map (viewAuditLogEntry model) model.auditLog.entries
                     ++ (if model.auditLog.hasMore && model.auditLog.loading then
-                            [ div [ class "loading-indicator" ] [ text "Loading more audit entries..." ] ]
+                            [ Spinner.block "Loading more audit entries" ]
 
                         else if model.auditLog.hasMore then
-                            [ button [ class "audit-log-load-more", onClick LoadMoreAuditLog ] [ text "Load more..." ] ]
+                            [ button [ class "audit-log-load-more", Spinner.preserveFocus "audit-entries", onClick LoadMoreAuditLog ] [ text "Load more..." ] ]
 
                         else
                             []
@@ -1523,6 +1515,83 @@ auditContextDetailItemsForView model entry =
 -- ENTITY HISTORY
 
 
+historyAuthorized : Model -> Bool
+historyAuthorized model =
+    model.auth.status == AuthReady && (Permissions.canReadCurrentWorkspace model || Permissions.canViewGlobalAudit model)
+
+
+startEntityHistory : Bool -> String -> String -> Maybe Int -> Model -> ( Model, Cmd Msg )
+startEntityHistory visible entityType entityId limit model =
+    let
+        audit =
+            model.auditLog
+
+        request =
+            { id = audit.nextEntityHistoryRequestId
+            , entityId = entityId
+            , limit = limit
+            , visible = visible
+            , workspaceId = model.selectedWorkspaceId
+            , sessionEpoch = model.sessionRequestEpoch
+            , audience = model.sessionContext
+            }
+    in
+    -- An explicit revert refresh supersedes the old snapshot. A visible page
+    -- action waits for the current read and never duplicates it.
+    if not (historyAuthorized model) || (visible && Dict.member entityId audit.entityHistoryRequests) then
+        ( model, Cmd.none )
+
+    else
+        ( { model | auditLog =
+            { audit
+                | entityHistoryRequests = Dict.insert entityId request audit.entityHistoryRequests
+                , entityHistoryFailures = Dict.remove entityId audit.entityHistoryFailures
+                , nextEntityHistoryRequestId = request.id + 1
+            }
+          }
+        , Api.fetchEntityHistory model.flags.apiUrl entityType entityId limit (GotEntityHistory request)
+        )
+
+
+settleEntityHistory : AuditEntityHistoryRequest -> Result Http.Error (Api.PaginatedResult Api.AuditLogEntry) -> Model -> ( Model, Cmd Msg )
+settleEntityHistory request result model =
+    let
+        audit =
+            model.auditLog
+
+        settled =
+            { audit | entityHistoryRequests = Dict.remove request.entityId audit.entityHistoryRequests }
+    in
+    if Dict.get request.entityId audit.entityHistoryRequests /= Just request then
+        ( model, Cmd.none )
+
+    else if not (historyAuthorized model) || request.workspaceId /= model.selectedWorkspaceId || request.sessionEpoch /= model.sessionRequestEpoch || request.audience /= model.sessionContext then
+        ( { model | auditLog = settled }, Cmd.none )
+
+    else
+        case result of
+            Ok page ->
+                ( { model | auditLog =
+                    { settled
+                        | entityHistory = Dict.insert request.entityId page.items settled.entityHistory
+                        , entityHistoryHasMore = Dict.insert request.entityId page.hasMore settled.entityHistoryHasMore
+                    }
+                  }
+                , Cmd.none
+                )
+
+            Err _ ->
+                let
+                    failed =
+                        { model | auditLog = { settled | entityHistoryFailures = Dict.insert request.entityId request.limit settled.entityHistoryFailures } }
+                in
+                if request.visible then
+                    ( failed, Cmd.none )
+
+                else
+                    addToast Error "Failed to load entity history" failed
+
+
 viewEntityHistory : Model -> String -> String -> Html Msg
 viewEntityHistory model entityType entityId =
     let
@@ -1548,29 +1617,56 @@ viewEntityHistory model entityType entityId =
 
 viewEntityHistoryContent : Model -> String -> String -> Html Msg
 viewEntityHistoryContent model entityType entityId =
-            case Dict.get entityId model.auditLog.entityHistory of
-                Just entries ->
-                    div [ class "entity-history-timeline" ]
-                        (List.map (viewHistoryEntry model) entries
-                            ++ (if Dict.get entityId model.auditLog.entityHistoryHasMore |> Maybe.withDefault False then
-                                    [ button [ class "entity-history-load-more", onClick (LoadMoreHistory entityType entityId) ]
-                                        [ text "Load more..." ]
-                                    ]
+    let
+        audit =
+            model.auditLog
 
-                                else
-                                    []
-                               )
-                            ++ (if List.isEmpty entries then
-                                    [ div [ class "entity-history-empty" ] [ text "No history entries" ] ]
+        entries =
+            Dict.get entityId audit.entityHistory
 
-                                else
-                                    []
-                               )
-                        )
+        request =
+            Dict.get entityId audit.entityHistoryRequests
 
-                Nothing ->
-                    div [ class "entity-history-timeline" ]
-                        [ div [ class "entity-history-loading" ] [ text "Loading..." ] ]
+        failure =
+            Dict.get entityId audit.entityHistoryFailures
+
+        anchor =
+            "entity-history-" ++ entityType ++ "-" ++ entityId
+
+        loadButton label inactive =
+            button [ type_ "button", class "entity-history-load-more", disabled inactive, Spinner.preserveFocus anchor, onClick (LoadMoreHistory entityType entityId) ]
+                [ text label ]
+    in
+    div [ id anchor, tabindex -1, class "entity-history-timeline" ]
+        (List.map (viewHistoryEntry model) (Maybe.withDefault [] entries)
+            ++ [ case request of
+                    Just active ->
+                        if active.visible || entries == Nothing then
+                            div [ class "entity-history-loading" ] [ Spinner.inline (if active.limit == Nothing then "Loading entity history" else "Loading more entity history") ]
+
+                        else
+                            text ""
+
+                    Nothing ->
+                        text ""
+               , case failure of
+                    Just limit ->
+                        div [ class "entity-history-error", attribute "role" "alert" ]
+                            [ text (if limit == Nothing then "Failed to load entity history." else "Failed to load more entity history.")
+                            , loadButton "Retry history" False
+                            ]
+
+                    Nothing ->
+                        if Dict.get entityId audit.entityHistoryHasMore == Just True then
+                            loadButton "Load more..." (request /= Nothing)
+
+                        else if entries == Just [] && request == Nothing then
+                            div [ class "entity-history-empty" ] [ text "No history entries" ]
+
+                        else
+                            text ""
+               ]
+        )
 
 viewHistoryEntry : Model -> Api.AuditLogEntry -> Html Msg
 viewHistoryEntry model entry =
@@ -1707,22 +1803,17 @@ viewRevertConfirmModal model =
             in
             div [ class "modal-overlay", onClick CancelRevert ]
                 [ div [ class "modal revert-confirm-modal", stopPropagationOn "click" (Decode.succeed ( NoOp, True )) ]
-                    [ h3 [ class "modal-title" ] [ text titleText ]
+                    [ h3 [ id "audit-revert-title", class "modal-title", tabindex -1 ] [ text titleText ]
                     , p [ class "revert-confirm-desc" ] [ text description ]
                     , div [ class "modal-actions" ]
-                        [ button
+                        [ if model.auditLog.revertInFlight then Spinner.inline "Reverting change" else text ""
+                        , button
                             [ class "btn btn-primary"
                             , onClick PerformRevert
                             , disabled model.auditLog.revertInFlight
+                            , Spinner.preserveFocus "audit-revert-title"
                             ]
-                            [ text
-                                (if model.auditLog.revertInFlight then
-                                    "Reverting..."
-
-                                 else
-                                    "Revert"
-                                 )
-                            ]
+                            [ text "Revert" ]
                         , button [ class "btn btn-secondary", onClick CancelRevert ] [ text "Cancel" ]
                         ]
                     ]

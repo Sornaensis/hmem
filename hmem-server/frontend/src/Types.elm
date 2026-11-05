@@ -1141,6 +1141,9 @@ type alias AuditDiffCurrent =
 type alias AuditLogModel =
     { entityHistory : Dict String (List Api.AuditLogEntry)
     , entityHistoryHasMore : Dict String Bool
+    , entityHistoryRequests : Dict String AuditEntityHistoryRequest
+    , entityHistoryFailures : Dict String (Maybe Int)
+    , nextEntityHistoryRequestId : Int
     , historyExpanded : Dict String Bool
     , entries : List Api.AuditLogEntry
     , entryBaseOffset : Int
@@ -1158,6 +1161,17 @@ type alias AuditLogModel =
     , expandedEntries : Dict String Bool
     , revertConfirmation : Maybe Api.AuditLogEntry
     , revertInFlight : Bool
+    }
+
+
+type alias AuditEntityHistoryRequest =
+    { id : Int
+    , entityId : String
+    , limit : Maybe Int
+    , visible : Bool
+    , workspaceId : Maybe String
+    , sessionEpoch : Int
+    , audience : Maybe Api.SessionContext
     }
 
 
@@ -1966,7 +1980,7 @@ type Msg
     | ClearPendingRequest String
       -- Audit log
     | GotAuditLog AuditRequestIdentity AuditLogFilters (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
-    | GotEntityHistory String (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
+    | GotEntityHistory AuditEntityHistoryRequest (Result Http.Error (Api.PaginatedResult Api.AuditLogEntry))
     | SetTimelineEntityFilter TimelineEntityFilter
     | SetTimelineEventFilter TimelineEventFilter
     | SetTimelineHistogramSince String

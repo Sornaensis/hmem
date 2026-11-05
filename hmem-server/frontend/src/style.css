@@ -2751,6 +2751,7 @@ textarea.observation-edit-content {
     flex-direction: column;
   }
 
+  .observation-pagination > .observation-spinner-control,
   .observation-load-more {
     width: 100%;
   }

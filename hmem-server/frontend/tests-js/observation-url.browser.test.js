@@ -53,7 +53,7 @@ test('incomplete SHA fields keep completed rows locally and completing or cleari
     assert.equal(h.receipts.length, before)
     assert.equal(await h.page.locator('.observation-card').count(), rows)
     assert.match(await applied(h.page), /Enter a full lowercase 40-character Git SHA/)
-    assert.ok(!(await h.page.locator('.observation-mode-navigation').innerText()).includes('Counting'))
+    assert.equal(await h.page.getByRole('status', { name: 'Counting matching Observations', exact: true }).count(), 0)
     await h.page.getByRole('button', { name: 'Files', exact: true }).click(); await ready(h)
     await h.page.locator('#observation-match-paths').fill('src/Main.elm')
     await h.page.getByRole('button', { name: 'Match files', exact: true }).click(); await ready(h)
@@ -149,7 +149,7 @@ test('terminal selection retires a still-pending text timer and exact results fi
     await h.page.waitForTimeout(350); await ready(h)
     assert.equal(await h.page.locator('.observation-filter-pending').count(), 0)
     assert.ok(resultReceipts(h).some(value => value.payload?.view==='tree' && predicates(h,value).subject_query === 'src'))
-    assert.ok(!String(await h.page.locator('.observation-mode-navigation').innerText()).includes('Counting'))
+    assert.equal(await h.page.getByRole('status', { name: 'Counting matching Observations', exact: true }).count(), 0)
   } finally { await h.close() }
 })
 

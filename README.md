@@ -3,7 +3,7 @@
 
 <img src="hmem-server/frontend/public/hmem-logo.svg" alt="hmem connected memory logo" width="366" height="96" />
 
-![hmem walkthrough showing tasks, observations, and the timeline](docs/media/hmem-walkthrough.gif)
+![hmem walkthrough showing a completed task and its attachments, observation search, the timeline, and active agents](docs/media/hmem-walkthrough.gif)
 
 hmem stores repository observations, projects, and tasks in PostgreSQL, with a web
 interface, HTTP API, and MCP tools.

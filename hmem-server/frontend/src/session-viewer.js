@@ -23,7 +23,7 @@ const string = value => typeof value === 'string' ? value : ''
 const printable = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2) || ''
 const short = value => string(value).replace(/^mcp__/, '').replaceAll('__', ' · ').replace(/\s+/g,' ').slice(0,96)
 const archiveBlocks=Symbol('archiveBlocks'),archiveVisible=Symbol('archiveVisible')
-const blocksFor=row=>row[archiveBlocks] || JSON.parse(row.text)
+export const blocksFor=row=>row[archiveBlocks] || JSON.parse(row.text)
 
 const jsonSpace=character=>character===' ' || character==='\n' || character==='\r' || character==='\t'
 const skipJsonSpace=(source,start)=>{while(jsonSpace(source[start]))start++;return start}
@@ -156,7 +156,8 @@ export function payloadTokens(text) {
 // Presentation never changes the stored record or its byte boundaries.
 export function presentation(value, raw, {archive=false,piVersion=null}={}) {
   const object = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
-  const rawValue=createRawJsonLocator(raw)
+  let rawLocator
+  const rawValue=path=>(rawLocator??=createRawJsonLocator(raw))(path)
   const sourceTime = string(object.timestamp || object.time)
   const time = parseInstant(sourceTime) ? sourceTime : ''
   const block = (kind, text, label = '') => ({kind, text:string(text), label:string(label).slice(0,256)})
@@ -167,13 +168,17 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
   const attachment = value => payload(value?.type || 'attachment',attachmentMetadata(value),null)
   const tool = (kind, value, name = '') => {
     const field=kind === 'result'?'output':'input'
-    let payload
+    let payload,preview
     if(archive) {
       let parsed=value
       if(typeof value==='string'){try{parsed=JSON.parse(value)}catch{parsed={[field]:value}}}
-      payload={text:JSON.stringify(parsed ?? null),tokens:[]}
-    }else payload=toolPayload(value,field)
-    const first = (archive ? prettyPayloadSlice(JSON.parse(payload.text)).text : payload.text).split('\n').map(line=>line.trim()).find(line=>line.includes(':')) || ''
+      parsed??=null
+      payload={text:JSON.stringify(parsed),tokens:[]}
+      // A parsed string or its fallback is already JSON data. Other callers
+      // can synthesize fields such as undefined, which serialization omits.
+      preview=prettyPayloadSlice(typeof value==='string'?parsed:JSON.parse(payload.text)).text
+    }else {payload=toolPayload(value,field);preview=payload.text}
+    const first=preview.split('\n').find(line=>line.includes(':'))?.trim() || ''
     return {...block(kind,payload.text,`${kind === 'result'?'Result':'Call'}${name?' · '+short(name):''}${first?' · '+short(first.replace(/,$/,'')):''}`),tokens:payload.tokens}
   }
   const contentBlocks = (content,path) => (Array.isArray(content) ? content : [{type:typeof content === 'string'?'text':'unknown',text:content}]).flatMap((part,index) => {
@@ -189,11 +194,11 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
     return [payload(part.type || 'content block',value,source)]
   })
   const conversation = (role,blocks,extra={}) => {
-    const row={type:'conversation',role:string(role).slice(0,256)||'assistant',time,text:JSON.stringify(blocks),...extra}
-    // Archive indexing keeps one bounded row and its adjacent occurrence. These
-    // private refs avoid reparsing normalized blocks and never enter JSON/IDB.
+    const row={type:'conversation',role:string(role).slice(0,256)||'assistant',time}
+    // Archive indexing and hydration use the structured blocks directly.
     if(archive)Object.defineProperty(row,archiveBlocks,{value:blocks})
-    return row
+    else row.text=JSON.stringify(blocks)
+    return Object.assign(row,extra)
   }
   const hidden=()=>({type:'unknown',role:'',time,text:''})
   if(object.ephemeral===true || ['assistant.message_delta','assistant.reasoning_delta','assistant.streaming_delta','tool.execution_partial_result','tool.execution_progress'].includes(object.type))return hidden()

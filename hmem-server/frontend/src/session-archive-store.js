@@ -4,8 +4,8 @@ export const BATCH_ROWS = 256
 export const BATCH_BYTES = 1048576
 export const PAGE_ROWS = 64
 export const PAGE_BYTES = 4194304
-export const INDEX_VERSION = 3
-const encoder = new TextEncoder()
+export const INDEX_VERSION = 7
+const encoder = new TextEncoder(),indexDecoder=new TextDecoder('utf-8',{fatal:true})
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const NAMESPACE='hmem-session-archives-v1'
 const DATABASE='hmem-session-archive-v1-'
@@ -21,6 +21,59 @@ export function fileOffset(value) {
 }
 export const positionKey = value => decimal(String(value)).toString().padStart(19,'0')
 export const pieceKey = (offset,index) => `${positionKey(offset)}:${String(index).padStart(7,'0')}`
+const INDEX_KEY=/^[0-9]{19}:[0-9]{7}$/
+const PAGE_OVERHEAD=serializedBytes({key:'',data:[]})-2
+const indexPageBytes=(key,payloadBytes)=>PAGE_OVERHEAD+key.length+payloadBytes
+
+function groupIndexKey(group) {
+  const match=/^(0|[1-9][0-9]*):(0|[1-9][0-9]{0,6})$/.exec(group)
+  if(!match)throw Error('invalid_archive_group')
+  return pieceKey(match[1],match[2])
+}
+function rowsInIndexPage(page) {
+  if(!page)return []
+  if(typeof page.key!=='string'||!INDEX_KEY.test(page.key))throw Error('invalid_index_page')
+  if(!Object.hasOwn(page,'data'))return [page]
+  const data=page.data
+  if(!(data instanceof Uint8Array)||data.byteLength<4||indexPageBytes(page.key,data.byteLength)>BATCH_BYTES)throw Error('invalid_index_page')
+  let rows
+  try{rows=JSON.parse(indexDecoder.decode(data))}catch{throw Error('invalid_index_page')}
+  if(!Array.isArray(rows)||!rows.length||rows.length>BATCH_ROWS)throw Error('invalid_index_page')
+  let previous=''
+  for(const row of rows){
+    if(typeof row?.key!=='string'||!INDEX_KEY.test(row.key)||row.key<=previous)throw Error('invalid_index_page')
+    previous=row.key
+  }
+  if(previous!==page.key)throw Error('invalid_index_page')
+  return rows
+}
+
+function readGroupSummaries(store,keys) {
+  if(!keys.length)return Promise.resolve(new Map())
+  const ordered=[...keys].sort(),summaries=new Map()
+  let index=0
+  return new Promise((resolve,reject)=>{
+    const operation=store.openCursor(IDBKeyRange.lowerBound(ordered[0]),'next')
+    operation.onerror=()=>reject(operation.error)
+    operation.onsuccess=()=>{
+      try{
+        const cursor=operation.result,rows=rowsInIndexPage(cursor?.value)
+        if(!rows.length)throw Error('archive_group_missing')
+        const last=rows.at(-1).key
+        let at=0
+        while(index<ordered.length&&ordered[index]<=last){
+          const key=ordered[index++]
+          while(rows[at]?.key<key)at++
+          const summary=rows[at]
+          if(summary?.key!==key)throw Error('archive_group_missing')
+          if(typeof summary.endTime!=='string'||decimal(summary.count)===0n)throw Error('invalid_archive_group')
+          summaries.set(key,{count:summary.count,endTime:summary.endTime})
+        }
+        if(index<ordered.length)cursor.continue(ordered[index]);else resolve(summaries)
+      }catch(error){reject(error)}
+    }
+  })
+}
 
 // Only a successfully published immutable raw file may populate these two slots.
 // Copying out keeps consumers from mutating either verified block.
@@ -155,6 +208,7 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
   const rawReads=createRawReadCache((bytes,options)=>raw.read(bytes,options))
   const database = DATABASE+name
   const pending = []; let pendingBytes=0
+  let encodingScratch
   const transactions = new Set();let pageRead=null
   async function flush() {
     if (!pending.length) return
@@ -164,35 +218,135 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
     for (const [table,value] of batch) tx.objectStore(table).put(value)
     try { await done } finally { transactions.delete(done) }
   }
-  function put(table,value) {
-    if(closed)throw Error('retired_store')
-    if(adoptManifest&&table!=='disclosures')throw Error('archive_read_only')
-    const bytes=serializedBytes(value)
-    if(bytes>BATCH_BYTES)throw Error('index_entry_limit')
+  function indexBytes(value) {
+    const json=JSON.stringify(value)
+    encodingScratch ??= new Uint8Array(BATCH_BYTES)
+    const {read,written:bytes}=encoder.encodeInto(json,encodingScratch)
+    if(read!==json.length)throw Error('index_entry_limit')
+    return bytes
+  }
+  function enqueue(table,value,bytes) {
     if(pending.length && (pending.length===BATCH_ROWS || pendingBytes+bytes>BATCH_BYTES)){
       return flush().then(()=>{if(closed)throw Error('retired_store');pending.push([table,value]);pendingBytes+=bytes})
     }
     pending.push([table,value]);pendingBytes+=bytes
   }
-  async function get(table,key) {
+  function orderedPages(table) {
+    let buffer,end=1,tailStart=1,lastKey='',single
+    const keys=[]
+    const clear=()=>{end=1;tailStart=1;keys.length=0;single=null}
+    function flushPage() {
+      if(single){
+        const {value,bytes}=single;clear()
+        return enqueue(table,value,bytes)
+      }
+      if(!keys.length)return
+      const key=keys.at(-1)
+      buffer[end]=93 // ]
+      const data=buffer.slice(0,end+1)
+      clear()
+      return enqueue(table,{key,data},indexPageBytes(key,data.byteLength))
+    }
+    return {
+      put(value,bytes){
+        const {key}=value
+        if(typeof key!=='string'||!INDEX_KEY.test(key))throw Error('invalid_index_key')
+        if(key<lastKey)throw Error('unordered_archive_index')
+        if(key===lastKey){
+          if(!keys.length&&!single)throw Error('unordered_archive_index')
+          // The current group can be extended, and one adjacent event can be
+          // replaced by its matching canonical record. Both update the tail.
+          if(single)single=null
+          else {keys.pop();end=tailStart}
+        }
+        const prospectiveBytes=indexPageBytes(key,end+(keys.length?1:0)+bytes+1)
+        const flushed=single||keys.length===BATCH_ROWS||(keys.length&&prospectiveBytes>BATCH_BYTES)?flushPage():undefined
+        // Keep an entry that fits the old bound but cannot fit a page envelope.
+        if(indexPageBytes(key,bytes+2)>BATCH_BYTES)single={value,bytes}
+        else{
+          if(!buffer){buffer=new Uint8Array(BATCH_BYTES);buffer[0]=91} // [
+          tailStart=end
+          if(keys.length)buffer[end++]=44 // ,
+          buffer.set(encodingScratch.subarray(0,bytes),end);end+=bytes;keys.push(key)
+        }
+        lastKey=key
+        return flushed
+      },
+      flush:flushPage,
+      clear(){clear();buffer=null;lastKey=''}
+    }
+  }
+  const piecePages=orderedPages('pieces'),groupPages=orderedPages('groups')
+  function put(table,value) {
+    if(closed)throw Error('retired_store')
+    if(adoptManifest&&table!=='disclosures')throw Error('archive_read_only')
+    if(table==='groups')value={...value,key:groupIndexKey(value.key)}
+    const bytes=indexBytes(value)
+    if(table==='pieces')return piecePages.put(value,bytes)
+    if(table==='groups')return groupPages.put(value,bytes)
+    return enqueue(table,value,bytes)
+  }
+  async function readIndex(table,action) {
     await flush()
-    const tx=db.transaction(table,'readonly'),done=completed(tx)
-    const result=await request(tx.objectStore(table).get(key));await done;return result
+    if(closed)throw Error('retired_store')
+    const tx=db.transaction(table,'readonly')
+    const terminal=completed(tx).then(()=>({}),error=>({error}))
+    transactions.add(terminal)
+    try{
+      let result,primary
+      try{result=await action(tx.objectStore(table))}catch(error){primary=error}
+      const ending=await terminal
+      if(primary&&ending.error&&primary!==ending.error)throw new AggregateError([primary,ending.error],'archive_index_read_failed')
+      if(primary||ending.error)throw primary||ending.error
+      if(closed)throw Error('retired_store')
+      return result
+    }finally{transactions.delete(terminal)}
+  }
+  async function get(table,key) {
+    if(table!=='pieces')return readIndex(table,store=>request(store.get(key)))
+    return readIndex(table,async store=>{
+      const cursor=await request(store.openCursor(IDBKeyRange.lowerBound(key),'next'))
+      return rowsInIndexPage(cursor?.value).find(piece=>piece.key===key)
+    })
   }
   async function scan(table,{after,before,limit=PAGE_ROWS}={}) {
-    await flush()
     if(limit<1 || limit>PAGE_ROWS)throw Error('page_limit')
-    const tx=db.transaction(table,'readonly'),done=completed(tx),rows=[]
-    const store=tx.objectStore(table)
-    const range=after?IDBKeyRange.lowerBound(after,true):before?IDBKeyRange.upperBound(before,true):undefined
-    const operation=store.openCursor(range,before?'prev':'next')
-    await new Promise((resolve,reject)=>{operation.onerror=()=>reject(operation.error);operation.onsuccess=()=>{
-      const cursor=operation.result
-      if(!cursor || rows.length===limit){resolve();return}
-      rows.push(cursor.value);cursor.continue()
-    }})
-    await done
-    return before?rows.reverse():rows
+    const backwards=!!before,rows=[]
+    await readIndex(table,store=>new Promise((resolve,reject)=>{
+      const collect=page=>{
+        const pieces=rowsInIndexPage(page)
+        for(let index=backwards?pieces.length-1:0;index>=0&&index<pieces.length&&rows.length<limit;index+=backwards?-1:1){
+          const piece=pieces[index]
+          if(after?piece.key>after:!before||piece.key<before)rows.push(piece)
+        }
+      }
+      const walk=range=>{
+        const operation=store.openCursor(range,backwards?'prev':'next')
+        operation.onerror=()=>reject(operation.error)
+        operation.onsuccess=()=>{
+          try{
+            const cursor=operation.result
+            if(!cursor){resolve();return}
+            collect(cursor.value)
+            if(rows.length===limit)resolve();else cursor.continue()
+          }catch(error){reject(error)}
+        }
+      }
+      if(!before||after||before==='\uffff'){walk(after?IDBKeyRange.lowerBound(after,true):undefined);return}
+      // The first page whose last key reaches the exclusive cursor may also
+      // contain earlier pieces. Read that page before walking older fences.
+      const crossing=store.openCursor(IDBKeyRange.lowerBound(before),'next')
+      crossing.onerror=()=>reject(crossing.error)
+      crossing.onsuccess=()=>{
+        try{
+          const cursor=crossing.result
+          if(cursor)collect(cursor.value)
+          if(rows.length===limit)resolve()
+          else walk(cursor?IDBKeyRange.upperBound(cursor.value.key,true):undefined)
+        }catch(error){reject(error)}
+      }
+    }))
+    return backwards?rows.reverse():rows
   }
   async function readPageMetadata(pieces) {
     if(!Array.isArray(pieces)||pieces.length>PAGE_ROWS||pieces.some(piece=>!piece||typeof piece.key!=='string'||typeof piece.group!=='string'))throw Error('page_limit')
@@ -201,18 +355,18 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
     if(closed)throw Error('retired_store')
     if(pageRead)throw Error('archive_page_read_busy')
     if(!pieces.length)return []
-    const groups=[...new Set(pieces.map(piece=>piece.group).filter(Boolean))]
+    const groups=new Map(pieces.filter(piece=>piece.group).map(piece=>[piece.group,groupIndexKey(piece.group)]))
     const tx=db.transaction(['disclosures','groups'],'readonly')
     const terminal=new Promise(resolve=>{tx.oncomplete=()=>resolve({});tx.onabort=()=>resolve({error:tx.error || Error('index_transaction_aborted')})})
     const owned={tx,terminal};pageRead=owned
-    let primary,values
+    let primary,values,summaries
     const operations=[]
     const get=(table,key)=>{const pending=request(tx.objectStore(table).get(key)).then(value=>value,error=>{primary ??= error});operations.push(pending)}
     try {
       try {
         for(const piece of pieces)get('disclosures',piece.key)
-        for(const group of groups)get('disclosures','group:'+group)
-        for(const group of groups)get('groups',group)
+        for(const group of groups.keys())get('disclosures','group:'+group)
+        operations.push(readGroupSummaries(tx.objectStore('groups'),[...groups.values()]).then(value=>{summaries=value},error=>{primary ??= error}))
       }catch(error){primary ??= error}
       values=await Promise.all(operations)
       const result=await terminal
@@ -220,12 +374,15 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
       if(primary)throw primary
       if(result.error)throw result.error
       if(closed)throw Error('retired_store')
-      const indexes=new Map(groups.map((key,index)=>[key,index]))
-      return pieces.map((piece,index)=>{const group=indexes.get(piece.group),summary=group===undefined?null:values[pieces.length+groups.length+group];return {open:values[index]?.open || false,groupOpen:group===undefined?false:values[pieces.length+group]?.open || false,count:summary?.count || '0',endTime:summary?.endTime || ''}})
+      const indexes=new Map([...groups.keys()].map((key,index)=>[key,index]))
+      return pieces.map((piece,index)=>{
+        const group=indexes.get(piece.group),summary=summaries.get(groups.get(piece.group))
+        return {open:values[index]?.open || false,groupOpen:group===undefined?false:values[pieces.length+group]?.open || false,count:summary?.count || '0',endTime:summary?.endTime || ''}
+      })
     }finally{await terminal;if(pageRead===owned)pageRead=null}
   }
   async function closeHandles() {
-    closed=true;rawReads.retire();pending.length=0;pendingBytes=0
+    closed=true;rawReads.retire();pending.length=0;pendingBytes=0;encodingScratch=null;piecePages.clear();groupPages.clear()
     if(pageRead)await pageRead.terminal
     await Promise.all([...transactions])
     const failures=[]
@@ -301,7 +458,14 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
       retireReads:()=>rawReads.retire(),
       async detach(){if(!custody||adoptManifest)throw Error('archive_custody_required');await closeHandles()},
       async releaseReader(){if(!custody||!adoptManifest)throw Error('archive_reader_required');await closeHandles()},
-      async publish(manifest){if(adoptManifest)throw Error('archive_read_only');if(closed)throw Error('retired_store');raw.flush();await put('meta',{key:'verified',manifest,indexVersion:INDEX_VERSION});await flush();if(closed)throw Error('retired_store');rawReads.publish(manifest.content_bytes??manifest.raw_bytes)},
+      async publish(manifest){
+        if(adoptManifest)throw Error('archive_read_only')
+        if(closed)throw Error('retired_store')
+        raw.flush();await piecePages.flush();await groupPages.flush()
+        await put('meta',{key:'verified',manifest,indexVersion:INDEX_VERSION});await flush()
+        if(closed)throw Error('retired_store')
+        rawReads.publish(manifest.content_bytes??manifest.raw_bytes)
+      },
       async disclosure(key,open){await put('disclosures',{key,open});await flush()},
       closeAndDelete
     }

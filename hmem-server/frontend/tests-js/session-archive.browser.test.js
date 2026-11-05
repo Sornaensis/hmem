@@ -825,9 +825,18 @@ async function nativeProbe(h,raw,bytes,{prelude='',manifest=makeManifest(h,raw,b
     const worker=new Worker(entry,{type:'module'}),stamp={workspace:manifest.workspace_id,session:manifest.session_id,generation:manifest.generation_id,load:1,authEpoch:1}
     let id=0;const pending=new Map(),progress=[]
     worker.onmessage=({data})=>{if(data.kind==='progress'){progress.push(data.phase);return}const waiter=pending.get(data.request);if(waiter){pending.delete(data.request);data.kind==='error'?waiter.reject(Error(data.code)):waiter.resolve(data)}}
-    const rpc=(kind,extra={})=>new Promise((resolve,reject)=>{const request=++id,timer=setTimeout(()=>reject(Error('browser_rpc_timeout')),15000);pending.set(request,{resolve:value=>{clearTimeout(timer);resolve(value)},reject:error=>{clearTimeout(timer);reject(error)}});worker.postMessage({kind,stamp,request,...extra})})
+    const rpc=(kind,extra={})=>new Promise((resolve,reject)=>{const request=++id,timer=setTimeout(()=>reject(Error('browser_rpc_timeout')),15000);pending.set(request,{resolve:value=>{clearTimeout(timer);resolve(value)},reject:error=>{clearTimeout(timer);reject(error)}});worker.postMessage({kind,stamp,request,...extra},extra.bytes?[extra.bytes]:[])})
     let error=null,result=null,cleanup=null;const cachePages=[]
-    try{await rpc('start',{name:crypto.randomUUID(),manifest});for(let at=0;at<bytes.length;at+=65536)await rpc('chunk',{bytes:new Uint8Array(bytes.slice(at,at+65536)).buffer});await rpc('finish');result=await rpc('page',{page});if(cacheReadControl){
+    try{
+      await rpc('start',{name:crypto.randomUUID(),manifest})
+      let buffer=new ArrayBuffer(65536)
+      for(let at=0;at<bytes.length;at+=65536){
+        const part=bytes.slice(at,at+65536);new Uint8Array(buffer).set(part)
+        const received=await rpc('chunk',{bytes:buffer,length:part.length})
+        if(received.kind!=='ack'||received.bytes?.byteLength!==65536)throw Error('browser_chunk_ack_mismatch')
+        buffer=received.bytes
+      }
+      await rpc('finish');result=await rpc('page',{page});if(cacheReadControl){
       const check=value=>{for(const row of value.rows)if(row.body?.text!==cacheReadControl.expected[Number(row.offset)/1024])throw Error('cache_body_fidelity');cachePages.push({first:value.first,last:value.last,rows:value.rows.length,wireBytes:new TextEncoder().encode(JSON.stringify(value)).length,...value.rawReadControl})}
       check(result);for(let index=0;index<21;index++){result=await rpc('page',{page:index%2===0?{last:true}:{}});check(result)}
     }}
@@ -927,7 +936,7 @@ function captureArchiveTelemetry(navigationDiagnostic=false) {
       }
     })}
     terminate(){if(this.epoch)this.epoch.terminated=true;if(nav?.worker===this){nav.worker=null;nav.stamp=null}return super.terminate()}
-    postMessage(message,transfer){if(['start','adopt'].includes(message.kind)){const epochs=window.archiveTelemetry.workerEpochs;if(epochs.length>=2)throw Error('archive_epoch_limit');this.epoch={phase:message.kind==='start'?'processor':'reader',incarnation:message.stamp.incarnation,targetURL:this.archiveURL,terminated:false,detached:false};epochs.push(this.epoch);if(nav)nav.stamp=message.stamp;}if(message.kind==='chunk')window.archiveTelemetry.maxChunk=Math.max(window.archiveTelemetry.maxChunk,message.bytes.byteLength);return super.postMessage(message,transfer)}
+    postMessage(message,transfer){if(['start','adopt'].includes(message.kind)){const epochs=window.archiveTelemetry.workerEpochs;if(epochs.length>=2)throw Error('archive_epoch_limit');this.epoch={phase:message.kind==='start'?'processor':'reader',incarnation:message.stamp.incarnation,targetURL:this.archiveURL,terminated:false,detached:false};epochs.push(this.epoch);if(nav)nav.stamp=message.stamp;}if(message.kind==='chunk'){if(message.bytes.byteLength!==65536||!Number.isInteger(message.length)||message.length<1||message.length>65536||transfer?.length!==1||transfer[0]!==message.bytes)throw Error('archive_chunk_transfer_bound');window.archiveTelemetry.maxChunk=Math.max(window.archiveTelemetry.maxChunk,message.length)}return super.postMessage(message,transfer)}
   }
 }
 
@@ -1413,8 +1422,49 @@ async function archiveDiskReceipt(page) {
     const opening=indexedDB.open('hmem-session-archive-v1-'+owner),db=await new Promise((yes,no)=>{opening.onsuccess=()=>yes(opening.result);opening.onerror=()=>no(opening.error)})
     try{
       const tx=db.transaction(['records','pieces'],'readonly'),terminal=new Promise((yes,no)=>{tx.oncomplete=yes;tx.onabort=()=>no(tx.error || Error('disk_verification_aborted'))});terminal.catch(()=>{})
-      const count=table=>new Promise((yes,no)=>{const operation=tx.objectStore(table).count();operation.onsuccess=()=>yes(operation.result);operation.onerror=()=>no(operation.error)})
-      let records,pieces,primary;try{[records,pieces]=await Promise.all([count('records'),count('pieces')])}catch(error){primary=error}
+      const verifyRecordPages=()=>new Promise((yes,no)=>{
+        const operation=tx.objectStore('records').openCursor()
+        let offset=0n,records=0,finished=false
+        operation.onerror=()=>no(operation.error)
+        operation.onsuccess=()=>{
+          try{
+            const cursor=operation.result
+            if(!cursor){
+              if(offset!==BigInt(files['raw.jsonl']))throw Error('record_pages_do_not_cover_raw_file')
+              yes(records);return
+            }
+            const {spans}=cursor.value
+            if(finished || cursor.key!==offset.toString().padStart(19,'0') || !Array.isArray(spans) || !spans.length || spans.length>256)throw Error('invalid_record_page')
+            for(let index=0;index<spans.length;index++){
+              const span=spans[index],delimiter=span%4,length=Math.floor(span/4)
+              if(!Number.isSafeInteger(span) || delimiter<0 || delimiter>2 || length<=delimiter || length>1048576+delimiter || (!delimiter && index!==spans.length-1))throw Error('invalid_record_span')
+              offset+=BigInt(length);records++
+            }
+            finished=spans.length<256 || spans.at(-1)%4===0
+            cursor.continue()
+          }catch(error){no(error)}
+        }
+      })
+      const verifyPiecePages=()=>new Promise((yes,no)=>{
+        const operation=tx.objectStore('pieces').openCursor()
+        let pieces=0,previous=''
+        operation.onerror=()=>no(operation.error)
+        operation.onsuccess=()=>{
+          try{
+            const cursor=operation.result
+            if(!cursor){yes(pieces);return}
+            const value=cursor.value
+            const rows=value.data?JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(value.data)):[value]
+            if(!Array.isArray(rows)||!rows.length||rows.length>256||rows.at(-1)?.key!==cursor.key)throw Error('invalid_piece_page')
+            for(const {key} of rows){
+              if(typeof key!=='string'||key<=previous)throw Error('unordered_piece_page')
+              previous=key;pieces++
+            }
+            cursor.continue()
+          }catch(error){no(error)}
+        }
+      })
+      let records,pieces,primary;try{[records,pieces]=await Promise.all([verifyRecordPages(),verifyPiecePages()])}catch(error){primary=error}
       try{await terminal}catch(error){throw primary || error}if(primary)throw primary
       return {files,records,pieces,estimate:await navigator.storage.estimate()}
     }finally{db.close()}
@@ -1678,29 +1728,42 @@ test('actual Chromium Worker verifies private OPFS/IDB and rejects empty second 
     await h.start();await h.idle()
     let seed=0x51a7
     const entropy=Array.from({length:32768},()=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return String.fromCharCode(33+(seed>>>0)%90)}).join('')
-    const asset=await workerAsset(),raw=Buffer.from(JSON.stringify({type:'metadata',entropy})+'\n{"text":"λ😀"}\r\n{"text":"final"}'),gzip=gzipSync(raw)
+    const call=(name,timestamp)=>JSON.stringify({type:'response_item',timestamp,payload:{type:'function_call',name,arguments:'{}'}})
+    const endTime='2026-01-01T00:00:01Z'
+    const records=[JSON.stringify({type:'metadata',entropy})+'\n','{"text":"λ😀"}\r\n',call('first','2026-01-01T00:00:00Z')+'\n',call('second',endTime)+'\n','{"text":"final"}']
+    const asset=await workerAsset(),raw=Buffer.from(records.join('')),gzip=gzipSync(raw)
     assert.ok(gzip.length>4096&&gzip.length<65536,'native integrity fixture must cross compressed writer quanta within one download chunk')
-    const cases=[['valid',gzip],['truncated',gzip.subarray(0,-2)],['empty-second',Buffer.concat([gzip,gzipSync(Buffer.alloc(0))])],['garbage',Buffer.concat([gzip,Buffer.from([1,2,3])])],['zero-padding',Buffer.concat([gzip,Buffer.from([0,0])])]]
+    const cases=[['valid',gzip],['truncated',gzip.subarray(0,-2)],['empty-second',Buffer.concat([gzip,gzipSync(Buffer.alloc(0))])],['garbage',Buffer.concat([gzip,Buffer.from([1,2,3])])],['zero-padding',Buffer.concat([gzip,Buffer.from([0,0])])],['invalid-chunk-length',gzip],['invalid-chunk-capacity',gzip]]
     for(const [name,bytes] of cases) {
       const manifest=makeManifest(h,raw,bytes)
       const result=await h.page.evaluate(async({asset,manifest,bytes,name})=>{
         const worker=new Worker(asset,{type:'module'}),stamp={workspace:manifest.workspace_id,session:manifest.session_id,generation:manifest.generation_id,load:1,authEpoch:1}
         let id=0;const pending=new Map(),progress=[]
         worker.onmessage=({data})=>{if(data.kind==='progress'){progress.push(data.phase);return}const waiter=pending.get(data.request);if(waiter){pending.delete(data.request);data.kind==='error'?waiter.reject(Error(data.code)):waiter.resolve(data)}}
-        const rpc=(kind,extra={})=>new Promise((resolve,reject)=>{const request=++id;const timeout=setTimeout(()=>reject(Error('browser_rpc_timeout')),15000);pending.set(request,{resolve:value=>{clearTimeout(timeout);resolve(value)},reject:error=>{clearTimeout(timeout);reject(error)}});worker.postMessage({kind,stamp,request,...extra})})
+        const rpc=(kind,extra={})=>new Promise((resolve,reject)=>{const request=++id;const timeout=setTimeout(()=>reject(Error('browser_rpc_timeout')),15000);pending.set(request,{resolve:value=>{clearTimeout(timeout);resolve(value)},reject:error=>{clearTimeout(timeout);reject(error)}});worker.postMessage({kind,stamp,request,...extra},extra.bytes?[extra.bytes]:[])})
         let error=null,page=null,cleanup=null,schema=null;const ownerName=crypto.randomUUID()
         try{
-          await rpc('start',{name:ownerName,manifest});await rpc('chunk',{bytes:new Uint8Array(bytes).buffer});await rpc('finish');page=await rpc('page',{page:{}})
+          await rpc('start',{name:ownerName,manifest})
+          const buffer=new Uint8Array(name==='invalid-chunk-capacity'?65535:65536).fill(231)
+          buffer.set(bytes)
+          const result=rpc('chunk',{bytes:buffer.buffer,length:name==='invalid-chunk-length'?65537:bytes.length})
+          if(buffer.byteLength!==0)throw Error('browser_chunk_not_transferred')
+          const receipt=await result
+          if(receipt.kind!=='ack'||receipt.bytes?.byteLength!==65536||new Uint8Array(receipt.bytes).at(-1)!==231)throw Error('browser_chunk_ack_mismatch')
+          await rpc('finish');page=await rpc('page',{page:{}})
           if(name==='valid'){
             const opening=indexedDB.open('hmem-session-archive-v1-'+ownerName),db=await new Promise((yes,no)=>{opening.onsuccess=()=>yes(opening.result);opening.onerror=()=>no(opening.error)})
             let terminal
             try{
-              const tx=db.transaction(['records','pieces'],'readonly')
+              const tx=db.transaction(['records','pieces','groups'],'readonly')
               terminal=new Promise(resolve=>{tx.oncomplete=()=>resolve({});tx.onabort=()=>resolve({error:tx.error || Error('inspection_aborted')})})
               const count=table=>new Promise((yes,no)=>{const request=tx.objectStore(table).count();request.onsuccess=()=>yes(request.result);request.onerror=()=>no(request.error)})
-              const indexNames=Array.from(tx.objectStore('pieces').indexNames),[records,pieces]=await Promise.all([count('records'),count('pieces')]),done=await terminal
+              const inspectRecords=new Promise((yes,no)=>{const request=tx.objectStore('records').get('0000000000000000000');request.onsuccess=()=>yes(request.result?.spans);request.onerror=()=>no(request.error)})
+              const inspectPieces=new Promise((yes,no)=>{const request=tx.objectStore('pieces').openCursor();request.onsuccess=()=>{try{yes(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(request.result?.value?.data)).map(piece=>piece.offset))}catch(error){no(error)}};request.onerror=()=>no(request.error)})
+              const inspectGroups=new Promise((yes,no)=>{const request=tx.objectStore('groups').openCursor();request.onsuccess=()=>{try{yes(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(request.result?.value?.data)))}catch(error){no(error)}};request.onerror=()=>no(request.error)})
+              const indexNames=Array.from(tx.objectStore('pieces').indexNames),[recordPages,spans,piecePages,pieceOffsets,groupPages,groups]=await Promise.all([count('records'),inspectRecords,count('pieces'),inspectPieces,count('groups'),inspectGroups]),done=await terminal
               if(done.error)throw done.error
-              schema={indexNames,records,pieces,transactionComplete:true}
+              schema={indexNames,recordPages,spans,piecePages,pieceOffsets,groupPages,groups,transactionComplete:true}
             }finally{if(terminal)await terminal;db.close();if(schema)schema.databaseClosed=true}
           }
         }catch(failure){error=failure.message}
@@ -1708,8 +1771,16 @@ test('actual Chromium Worker verifies private OPFS/IDB and rejects empty second 
         return {name,error,page,cleanup,progress,schema,browser:navigator.userAgent}
       },{asset,manifest,bytes:[...bytes],name})
       assert.equal(result.cleanup,true,JSON.stringify(result))
-      if(name==='valid'){assert.equal(result.error,null);assert.equal(result.page.rows[0].body.text,'λ😀');assert.equal(result.page.rows[1].body.text,'final');assert.deepEqual(result.schema,{indexNames:[],records:3,pieces:2,transactionComplete:true,databaseClosed:true})}
-      else {assert.ok(result.error,JSON.stringify(result));assert.ok(!result.progress.includes('ready'))}
+      if(name==='valid'){
+        assert.equal(result.error,null);assert.equal(result.page.rows[0].body.text,'λ😀');assert.equal(result.page.rows.at(-1).body.text,'final')
+        let offset=0
+        const offsets=records.map(record=>{const start=offset;offset+=Buffer.byteLength(record);return String(start)})
+        const spans=records.map(record=>Buffer.byteLength(record)*4+(record.endsWith('\r\n')?2:record.endsWith('\n')?1:0))
+        const [first,second]=result.page.rows.slice(1,3)
+        for(const row of [first,second]){assert.equal(row.group,offsets[2]+':0');assert.equal(row.count,'2');assert.equal(row.endTime,endTime)}
+        assert.deepEqual(result.schema,{indexNames:[],recordPages:1,spans,piecePages:1,pieceOffsets:offsets.slice(1),groupPages:1,groups:[{key:first.key,count:'2',endTime}],transactionComplete:true,databaseClosed:true})
+      }
+      else {assert.ok(result.error,JSON.stringify(result));assert.ok(!result.progress.includes('ready'));if(name.startsWith('invalid-chunk-'))assert.equal(result.error,'chunk_limit')}
       console.log(JSON.stringify({case:name,error:result.error,cleanup:result.cleanup,schema:result.schema,browser:result.browser}))
     }
     assert.deepEqual(h.errors,[])
@@ -1725,8 +1796,8 @@ for(const delivery of ['fast','slow'])test('production local navigation status c
     await h.page.addInitScript(()=>{
       const Native=Worker;window.navigationPageReplies=0
       window.Worker=class extends Native{
-        constructor(url,options){super(url,options);this.addEventListener('message',({data})=>{if(data.kind==='page'){window.navigationPageReplies++;window.navigationLastPageRows=data.rows.length}})}
-        postMessage(message,transfer){if(message.kind==='page'&&window.holdNavigationPage){window.holdNavigationPage=false;window.releaseNavigationPage=()=>{window.releaseNavigationPage=null;Native.prototype.postMessage.call(this,message,transfer)};return}return super.postMessage(message,transfer)}
+        constructor(url,options){super(url,options);this.addEventListener('message',({data})=>{if(data.kind==='page'){window.navigationPageReplies++;window.navigationLastPageRows=data.rows.length;if(window.navigationTiming?.request===data.request)window.navigationTiming.replied=performance.now()}})}
+        postMessage(message,transfer){if(message.kind==='page'&&window.holdNavigationPage){window.holdNavigationPage=false;window.navigationTiming={request:message.request,held:performance.now()};window.releaseNavigationPage=()=>{window.releaseNavigationPage=null;window.navigationTiming.released=performance.now();Native.prototype.postMessage.call(this,message,transfer)};return}return super.postMessage(message,transfer)}
       }
     })
     await h.page.route('**/sessions/**/archive**',phaseArchiveRoute(route=>new URL(route.request().url()).pathname.endsWith('/content')?route.fulfill({headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':hash(raw)},body:gzip}):route.fulfill({json:manifest})))
@@ -1747,8 +1818,8 @@ for(const delivery of ['fast','slow'])test('production local navigation status c
     await h.page.evaluate(()=>window.releaseNavigationPage())
     await h.page.waitForFunction(previous=>window.navigationPageReplies===previous+1,previous,{timeout:2000})
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:2000});await h.page.waitForTimeout(150)
-    const state=await h.page.evaluate(()=>{window.navigationStatusObserver.disconnect();return {statuses:window.navigationStatuses,status:document.querySelector('.session-sealed-viewer [role="status"]').textContent,rows:document.querySelectorAll('#session-records [data-offset]').length,acquiredRows:window.navigationLastPageRows}})
-    assert.equal(state.status,'Verified complete archive.');assert.ok(state.rows>0&&state.rows<=200);assert.equal(state.acquiredRows,64);assert.equal(state.statuses.filter(value=>value==='Reading local index…').length,delivery==='slow'?1:0)
+    const state=await h.page.evaluate(()=>{window.navigationStatusObserver.disconnect();const timing=window.navigationTiming;return {statuses:window.navigationStatuses,status:document.querySelector('.session-sealed-viewer [role="status"]').textContent,rows:document.querySelectorAll('#session-records [data-offset]').length,acquiredRows:window.navigationLastPageRows,holdMs:timing.released-timing.held,replyMs:timing.replied-timing.released}})
+    assert.equal(state.status,'Verified complete archive.');assert.ok(state.rows>0&&state.rows<=200);assert.equal(state.acquiredRows,64);assert.equal(state.statuses.filter(value=>value==='Reading local index…').length,delivery==='slow'?1:0,JSON.stringify(state))
     assert.deepEqual(h.errors,[]);console.log(JSON.stringify({localNavigationStatus:{delivery,...state}}))
   }finally{await h.close()}
 })
@@ -1875,10 +1946,14 @@ test('crashed private generations recover without deleting a second live tab own
     const raw=Buffer.from('{"text":"owned evidence"}\n'),gzip=gzipSync(raw),manifest=makeManifest(h,raw,gzip),asset=await workerAsset()
     const launch=async(page,label)=>page.evaluate(async({label,asset,manifest,bytes})=>{
       const name=crypto.randomUUID(),worker=new Worker(asset,{type:'module'}),stamp={workspace:manifest.workspace_id,session:manifest.session_id,generation:manifest.generation_id,load:1,authEpoch:1},pending=new Map();let request=0
-      worker.onmessage=({data})=>{const waiter=pending.get(data.request);if(waiter){pending.delete(data.request);data.kind==='error'?waiter.reject(Error(data.code)):waiter.resolve(data)}}
-      const rpc=(kind,extra={})=>new Promise((resolve,reject)=>{const id=++request,timer=setTimeout(()=>reject(Error('recovery_rpc_timeout')),10000);pending.set(id,{resolve:value=>{clearTimeout(timer);resolve(value)},reject:error=>{clearTimeout(timer);reject(error)}});worker.postMessage({kind,stamp,request:id,...extra})})
+      worker.onmessage=({data})=>{if(data.kind==='progress')return;const waiter=pending.get(data.request);if(waiter){pending.delete(data.request);data.kind==='error'?waiter.reject(Error(data.code)):waiter.resolve(data)}}
+      const rpc=(kind,extra={})=>new Promise((resolve,reject)=>{const id=++request,timer=setTimeout(()=>reject(Error('recovery_rpc_timeout')),10000);pending.set(id,{resolve:value=>{clearTimeout(timer);resolve(value)},reject:error=>{clearTimeout(timer);reject(error)}});worker.postMessage({kind,stamp,request:id,...extra},extra.bytes?[extra.bytes]:[])})
       const owned={worker,rpc,name};window[label]=owned
-      await rpc('start',{name,manifest});await rpc('chunk',{bytes:new Uint8Array(bytes).buffer});await rpc('finish');return name
+      await rpc('start',{name,manifest})
+      const buffer=new Uint8Array(65536);buffer.set(bytes)
+      const receipt=await rpc('chunk',{bytes:buffer.buffer,length:bytes.length})
+      if(receipt.kind!=='ack'||receipt.bytes?.byteLength!==65536)throw Error('browser_chunk_ack_mismatch')
+      await rpc('finish');return name
     },{label,asset,manifest,bytes:[...gzip]})
     const first=await launch(h.page,'crashed'),live=await launch(other,'live')
     await h.page.evaluate(()=>window.crashed.worker.terminate())

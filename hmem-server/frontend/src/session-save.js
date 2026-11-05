@@ -1,7 +1,7 @@
 import { createRecordFramer, decodeBase64 } from './session-viewer.js'
 import { sha256 } from '@noble/hashes/sha256'
 import { validateManifest } from './session-archive-worker.js'
-import {acquireArchiveCustody,deleteArchiveStage} from './session-archive-store.js'
+import {acquireArchiveCustody,deleteArchiveStage,IO_BYTES} from './session-archive-store.js'
 import {installEventPayload} from './session-event-json.js'
 
 const hex = bytes => Array.from(bytes,byte => byte.toString(16).padStart(2,'0')).join('')
@@ -541,8 +541,20 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
             || headers.get('Content-Length')!==value.compressed_bytes || headers.get('X-HMem-Archive-Generation')!==value.generation_id
             || headers.get('X-HMem-Archive-SHA256')!==value.compressed_sha256 || headers.get('X-HMem-Archive-Raw-Bytes')!==value.raw_bytes
             || headers.get('X-HMem-Archive-Raw-SHA256')!==value.raw_sha256 || !representationMatches(headers,value))throw Error(status===401||status===403?'archive_unauthorized':'archive_response_mismatch')
-          while(true){if(!current(owned)||!transport.isCurrent())throw Error('retired_archive');const part=await reader.read();if(part.done)break
-            for(let at=0;at<part.value.length;at+=65536){if(!current(owned)||!transport.isCurrent())throw Error('retired_archive');const bytes=part.value.slice(at,at+65536);await rpc(owned,'chunk',{bytes:bytes.buffer})}}
+          let buffer=new ArrayBuffer(IO_BYTES)
+          while(true){
+            if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
+            const part=await reader.read();if(part.done)break
+            for(let at=0;at<part.value.length;at+=IO_BYTES){
+              if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
+              const source=part.value.subarray(at,at+IO_BYTES)
+              new Uint8Array(buffer,0,source.length).set(source)
+              const receipt=await rpc(owned,'chunk',{bytes:buffer,length:source.length})
+              if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
+              if(receipt.kind!=='ack'||!(receipt.bytes instanceof ArrayBuffer)||receipt.bytes.byteLength!==IO_BYTES)throw Error('archive_chunk_receipt_mismatch')
+              buffer=receipt.bytes
+            }
+          }
           if(!current(owned)||!transport.isCurrent())throw Error('retired_archive')
           next=()=>{owned.phaseTransition=detachProcessor(owned).catch(error=>failure(owned,error))}
         }

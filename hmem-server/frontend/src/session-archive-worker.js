@@ -1,8 +1,9 @@
 import {sha256} from '@noble/hashes/sha256'
-import {MAX_RECORD_BYTES,presentation,semanticTransition,visibleBlocks,createPrettyPayloadReader,createRawPayloadReader,payloadTokens} from './session-viewer.js'
-import {openArchiveStore,decimal,fileOffset,pieceKey,positionKey,serializedBytes,IO_BYTES,PAGE_ROWS,PAGE_BYTES} from './session-archive-store.js'
+import {MAX_RECORD_BYTES,presentation,blocksFor,semanticTransition,visibleBlocks,createPrettyPayloadReader,createRawPayloadReader,payloadTokens} from './session-viewer.js'
+import {openArchiveStore,decimal,fileOffset,pieceKey,positionKey,serializedBytes,IO_BYTES,BATCH_ROWS,PAGE_ROWS,PAGE_BYTES} from './session-archive-store.js'
 
 const utf8=new TextDecoder('utf-8',{fatal:true}),encoder=new TextEncoder()
+const slabUtf8=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true})
 // One compressed write can enqueue many decoded chunks before backpressure.
 const GZIP_INPUT_BYTES=4096
 const hex=bytes=>Array.from(bytes,byte=>byte.toString(16).padStart(2,'0')).join('')
@@ -38,26 +39,55 @@ export function archiveChunkOffset(base,local) {
 export function createArchiveFramer() {
   let offset=0n,start=0n,size=0,piVersion=null
   const pending=new Uint8Array(MAX_RECORD_BYTES+2)
-  function record(end,delimiter) {
-    const length=size-(delimiter==='\r\n'?1:0)
-    if(length>MAX_RECORD_BYTES)throw Error('record_limit')
-    const raw=utf8.decode(pending.subarray(0,length))
+  function record(raw,recordBytes,delimiter) {
     let value;try{value=JSON.parse(raw)}catch{throw Error('invalid_json_record')}
     if(value?.type==='session')piVersion=Number.isInteger(value.version)?value.version:'invalid'
     const row=presentation(value,raw,{archive:true,piVersion})
-    Object.assign(row,{offset:start.toString(),presentationOffset:start.toString(),end:end.toString(),delimiter})
-    size=0;start=end;return row
+    const startText=start.toString()
+    Object.assign(row,{offset:startText,presentationOffset:startText,end:offset.toString(),delimiter,recordBytes})
+    size=0;start=offset;return row
+  }
+  function pendingRecord(delimiter) {
+    const length=size-(delimiter==='\r\n'?1:0)
+    if(length>MAX_RECORD_BYTES)throw Error('record_limit')
+    return record(utf8.decode(pending.subarray(0,length)),size+(delimiter?1:0),delimiter)
   }
   return { *push(input,final=false) {
     if(!(input instanceof Uint8Array) || input.length>IO_BYTES)throw Error('chunk_limit')
     const base=offset
-    for(let index=0;index<input.length;index++) {
-      const byte=input[index]
-      if(byte===10){offset=archiveChunkOffset(base,index+1);yield record(offset,size && pending[size-1]===13?'\r\n':'\n')}
-      else {if(size===pending.length)throw Error('record_limit');pending[size++]=byte}
+    let text,textAt=0
+    for(let at=0;at<input.length;){
+      const lf=input.indexOf(10,at)
+      if(size||lf<0){
+        const end=lf<0?input.length:lf
+        if(size+end-at>pending.length)throw Error('record_limit')
+        pending.set(input.subarray(at,end),size);size+=end-at
+        if(lf<0)break
+        offset=archiveChunkOffset(base,lf+1)
+        yield pendingRecord(pending[size-1]===13?'\r\n':'\n')
+      }else{
+        if(text===undefined){
+          // Decode one bounded run of complete records. On invalid UTF-8,
+          // isolate the failing record without losing the preceding frames.
+          try{text=slabUtf8.decode(input.subarray(at,input.lastIndexOf(10)+1))}
+          catch(error){if(!(error instanceof TypeError))throw error;text=null}
+        }
+        const cr=lf>at&&input[lf-1]===13,delimiter=cr?'\r\n':'\n'
+        offset=archiveChunkOffset(base,lf+1)
+        let raw
+        if(text===null)raw=utf8.decode(input.subarray(at,lf-(cr?1:0)))
+        else{
+          const textLf=text.indexOf('\n',textAt)
+          // TextDecoder strips a leading BOM for each individual record.
+          const first=textAt+(text.charCodeAt(textAt)===0xfeff?1:0)
+          raw=text.slice(first,textLf-(cr?1:0));textAt=textLf+1
+        }
+        yield record(raw,lf-at+1,delimiter)
+      }
+      at=lf+1
     }
     offset=archiveChunkOffset(base,input.length)
-    if(final && size)yield record(offset,'')
+    if(final && size)yield pendingRecord('')
   },get through(){return offset} }
 }
 
@@ -88,6 +118,7 @@ export function gzipPipeline(stream) {
 export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},storage=globalThis.navigator?.storage,decode=gzipPipeline}={}) {
   let store,manifest,stamp,downloadHash,downloadBytes=0n,rawHash,rawBytes=0n,records=0n,retired=false,published=false,reader
   let previous=null,anchor=null,group=null
+  let recordPage=null
   let pipelineCompletion,pipelineCleanup,pipelinePrimary
   let stageName,stageCustody,mode='processor',detached=false
   let formatter=null
@@ -100,11 +131,19 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
     const estimate=await storage?.estimate?.().catch(()=>null)
     if(estimate?.quota && estimate?.usage && estimate.usage>estimate.quota)storageEstimateLow=true
   }
-  // A bounded enqueue is synchronous; only an actual flush/group read yields.
+  function flushRecordPage() {
+    if(!recordPage)return
+    const page=recordPage;recordPage=null
+    return store.put('records',page)
+  }
+  // Record coverage includes hidden rows. A page's first offset and physical
+  // lengths recover all byte boundaries without one database entry per record.
   function index(row) {
     const transition=semanticTransition(row,previous,anchor)
     previous=transition.previous;anchor=transition.anchor
-    const pending=store.put('records',{key:positionKey(row.offset),offset:row.offset,end:row.end,delimiter:row.delimiter})
+    recordPage ??= {key:positionKey(row.offset),spans:[]}
+    recordPage.spans.push(row.recordBytes*4+row.delimiter.length)
+    const pending=recordPage.spans.length===BATCH_ROWS?flushRecordPage():null
     return pending?pending.then(()=>indexContent(row,transition)):indexContent(row,transition)
   }
   function indexContent(row,transition) {
@@ -125,12 +164,13 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
     for(;at<blocks.length;at++){
       current()
       const [index,block]=blocks[at],identity=row.activityAnchors[index] || ''
-      if(block.kind!=='text'){
+      if(identity){
         if(group?.key!==identity){
-          // Only an unpaired anchor minted at this record and block is new.
-          // Looking it up would flush the index batch before every tool group.
-          if(!transition.paired && identity===`${row.offset}:${index}`)group={key:identity,count:'0'}
-          else return store.get('groups',identity).then(value=>{current();group=value || {key:identity,count:'0'};return indexBlocks(row,transition,blocks,at)})
+          // An anchor carries until visible text resets it. Its first piece
+          // can follow a hidden event that established the anchor. A paired
+          // canonical replacement always belongs to the current group.
+          if(transition.paired)throw Error('unordered_archive_group')
+          group={key:identity,count:'0'}
         }
         group={...group,endTime:row.time,...(!transition.paired?{count:(BigInt(group.count)+1n).toString()}:{})}
         const pending=store.put('groups',group)
@@ -151,7 +191,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
     const bytes=store.readRaw(piece.offset,piece.end)
     const length=bytes.length-piece.delimiter.length
     const raw=utf8.decode(bytes.subarray(0,length)),value=JSON.parse(raw),row=presentation(value,raw,{archive:true,piVersion:piece.piVersion ?? null})
-    const block=row.type==='conversation'?JSON.parse(row.text)[piece.index]:{kind:'text',text:row.text,label:''}
+    const block=row.type==='conversation'?blocksFor(row)[piece.index]:{kind:'text',text:row.text,label:''}
     if(!block || block.kind!==piece.kind)throw Error('index_mismatch')
     if(['tool','result','event'].includes(block.kind) || block.pretty) {
       const parsed=block.kind==='event'?null:JSON.parse(block.text)
@@ -242,6 +282,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
           }
         }
         for(const row of framer.push(new Uint8Array(),true)){const pending=index(row);if(pending)await pending}
+        await flushRecordPage()
       }catch(error){primary=error;pipelinePrimary=error;throw error}
       finally{
         if(!eof){
@@ -322,7 +363,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
       await pipelineCompletion
       const result=await pipelineCleanup
       if(result?.error)throw Error('archive_cleanup_failed')
-      downloadHash?.destroy();rawHash?.destroy();formatter=null;if(store)await store.closeAndDelete()
+      downloadHash?.destroy();rawHash?.destroy();formatter=null;recordPage=null;if(store)await store.closeAndDelete()
     },
     snapshot:()=>({downloadBytes:downloadBytes.toString(),rawBytes:rawBytes.toString(),records:records.toString(),published,nativeOutputChunkBytes})
   }
@@ -339,7 +380,12 @@ if(typeof self!=='undefined' && typeof document==='undefined' && typeof self.pos
       currentRequest=data.request
       if(data.kind==='start'||data.kind==='adopt'){owner=data.stamp;engine=createArchiveEngine({emit:value=>self.postMessage({...value,request:currentRequest})});if(data.kind==='adopt')await engine.adopt(data);else await engine.start(data)}
       else if(JSON.stringify(data.stamp)!==JSON.stringify(owner))return
-      else if(data.kind==='chunk')await engine.chunk(new Uint8Array(data.bytes))
+      else if(data.kind==='chunk'){
+        const {bytes,length}=data
+        if(!(bytes instanceof ArrayBuffer)||bytes.byteLength!==IO_BYTES||!Number.isInteger(length)||length<1||length>IO_BYTES)throw Error('chunk_limit')
+        await engine.chunk(new Uint8Array(bytes,0,length))
+        self.postMessage({...owner,kind:'ack',request:data.request,bytes},[bytes]);return
+      }
       else if(data.kind==='finish')await engine.finish()
       else if(data.kind==='detach'){const stage=await engine.detach();self.postMessage({...owner,kind:'detached',request:data.request,stage});return}
       else if(data.kind==='release-reader'){const stage=await engine.releaseReader();self.postMessage({...owner,kind:'detached',request:data.request,stage});return}

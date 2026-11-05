@@ -583,9 +583,13 @@ logout/principal-switch invalidation described below.
 The sealed viewer waits for this object; it does not fall back to raw range
 viewing. A processor Worker stages the complete compressed download in private
 OPFS and verifies its generation, count and SHA-256 before reopening it for
-single-member native gzip decoding. It streams exact raw bytes into another
-OPFS file while hashing and building an IndexedDB semantic index. Decoder EOF,
-strict UTF-8/JSONL framing and the original 64-bit count/hash must all pass before
+single-member native gzip decoding. The browser and processor transfer one
+64 KiB buffer back and forth for staging, with an explicit byte count on each
+transfer. The processor writes and hashes only that prefix. It streams exact
+raw bytes into another OPFS file while hashing and building an IndexedDB
+semantic index. Complete records in each 64 KiB slab share a strict UTF-8 decode
+and retain individual byte positions. Decoder EOF, JSONL framing and the
+original 64-bit count/hash must all pass before
 any transcript is published. Transfer, decoding, parsing, integrity and actual
 quota failures publish nothing. Accepted download counts and decoding progress
 are coalesced to about one update per second; phase entry and terminal events
@@ -608,7 +612,15 @@ claim physical thread nonoverlap or immediate memory release.
 The shared framing/semantic transition preserves adjacent occurrence matching,
 activity anchors, disclosure identity and source order. Persist source/block
 references and bounded cursor indexes rather than all-session maps or growing
-group arrays. Index batches are at most 256 records/1 MiB. Each local acquisition
+group arrays. Record-boundary pages store one exact start offset and up to 256
+packed byte lengths and delimiters, including for hidden records. Semantic
+pieces and activity summaries use separate pages of up to 256 entries, encoded
+in bounded UTF-8 buffers. Their last source/block key supports exact seeks. An
+entry that needs the full 1 MiB budget stays in a single entry. An adjacent
+event and canonical record can replace the pending piece, and a carried
+activity can update its pending summary before the respective page is written.
+Metadata reads seek only the group pages needed for the current pieces.
+Index write batches hold at most 256 entries or 1 MiB. Each local acquisition
 admits at most 64 rows; ordered overlapping batches compose a continuous window
 bounded to 200 rows/4 MiB of retained serialized payload, including hydrated
 bodies and Markdown source. A newly selected archive starts at its verified end.

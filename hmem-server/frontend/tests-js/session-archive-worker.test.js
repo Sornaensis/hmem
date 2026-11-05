@@ -3,11 +3,16 @@ import assert from 'node:assert/strict'
 import {gzipSync} from 'node:zlib'
 import {createHash} from 'node:crypto'
 import {createArchiveFramer,archiveChunkOffset,createArchiveEngine,gzipPipeline} from '../src/session-archive-worker.js'
-import {createRecordFramer,semanticTransition,prettyPayloadSlice,presentation,visibleBlocks,payloadTokens} from '../src/session-viewer.js'
+import {BATCH_ROWS,IO_BYTES,positionKey} from '../src/session-archive-store.js'
+import {blocksFor,createRecordFramer,semanticTransition,prettyPayloadSlice,presentation,visibleBlocks,payloadTokens,MAX_RECORD_BYTES} from '../src/session-viewer.js'
 import {createSealedViewer} from '../src/session-save.js'
 import {copilotRecords,piRecords} from './support/native-session-fixtures.mjs'
 
 const phaseFixtureETag='"fixture-authority-bound-archive"'
+function fakeWorkerReply(worker,message,value){
+  const chunk=message.kind==='chunk'&&value.kind==='ack'?{bytes:message.bytes}:{}
+  worker.onmessage?.({data:{...message.stamp,request:message.request,...chunk,...value}})
+}
 // Fake transports still execute both production bridge incarnations. Disk and
 // decoder ownership is tested separately against the real store/native Worker.
 function createPhaseBridgeFixture(options) {
@@ -64,14 +69,51 @@ test('one native gzip context receives bounded compressed writes across input bo
     assert.equal(bytes,raw.length);assert.equal(hash.digest('hex'),digest(raw))
   }finally{reader?.releaseLock();globalThis.DecompressionStream=Native}
 })
-test('strict archive framing preserves UTF8/CRLF/final records across every cut',()=>{
-  const input=Buffer.from('{"text":"λ😀"}\r\n{"text":"last"}')
+test('strict archive framing preserves per-record BOM, UTF-8, CRLF, LF and final bytes across every cut',()=>{
+  const lexical='{"type": "future", "value": 9007199254740993, "λ": "😀"}'
+  const records=['\ufeff{"text":"λ😀"}\r\n','\ufeff{"type":"event_msg","payload": '+lexical+'}\n','{"text":"a\ufeffb"}\n','\ufeff{"text":"last λ😀"}']
+  const input=Buffer.from(records.join(''))
+  let offset=0
+  const coordinates=records.map((record,index)=>{
+    const length=Buffer.byteLength(record),start=offset;offset+=length
+    return [String(start),String(offset),['\r\n','\n','\n',''][index],length]
+  })
   for(let cut=0;cut<=input.length;cut++){
     const framer=createArchiveFramer(),rows=[...framer.push(input.subarray(0,cut)),...framer.push(input.subarray(cut),true)]
-    assert.equal(rows.length,2);assert.equal(rows[0].delimiter,'\r\n');assert.equal(rows[1].delimiter,'');assert.equal(framer.through,BigInt(input.length))
-    assert.equal(rows[1].offset,String(input.indexOf(10)+1))
+    assert.deepEqual(rows.map(row=>[row.offset,row.end,row.delimiter,row.recordBytes]),coordinates)
+    assert.equal(framer.through,BigInt(input.length))
+    assert.equal(rows[0].text,'λ😀');assert.equal(blocksFor(rows[1])[0].text,lexical)
+    assert.equal(rows[2].text,'a\ufeffb');assert.equal(rows[3].text,'last λ😀')
   }
-  for(const input of [Buffer.from('{'),Buffer.from([34,0xc3,34]),Buffer.from('\n')])assert.throws(()=>[...createArchiveFramer().push(input,true)])
+  for(const input of [Buffer.from('{'),Buffer.from([34,0xc3,34]),Buffer.from('\n'),Buffer.from('\ufeff\ufeff{"text":"twice"}\n')])assert.throws(()=>[...createArchiveFramer().push(input,true)])
+})
+
+test('a malformed record in a complete slab fails at its own exact frame after the valid prefix',()=>{
+  const prefix=Buffer.from('{"text":"λ😀"}\r\n')
+  const tail=Buffer.from('{"text":"never reaches this record"}\n')
+  for(const [invalid,error] of [[Buffer.from([34,0xc3,10]),TypeError],[Buffer.from('{\n'),/invalid_json_record/]]){
+    const framer=createArchiveFramer(),rows=framer.push(Buffer.concat([prefix,invalid,tail]),true)
+    assert.equal(rows.next().value.text,'λ😀')
+    assert.throws(()=>rows.next(),error)
+    assert.equal(framer.through,BigInt(prefix.length+invalid.length))
+    assert.equal(rows.next().done,true)
+  }
+})
+
+test('cross-slab CRLF and final records retain the exact raw byte limit',()=>{
+  const take=input=>{
+    const framer=createArchiveFramer(),rows=[]
+    for(let at=0;at<input.length;at+=IO_BYTES)rows.push(...framer.push(input.subarray(at,at+IO_BYTES),at+IO_BYTES>=input.length))
+    return rows
+  }
+  const body='x'.repeat(MAX_RECORD_BYTES-11)
+  for(const delimiter of ['', '\r\n']){
+    const exact=Buffer.from(JSON.stringify({text:body})+delimiter)
+    assert.equal(exact.length,MAX_RECORD_BYTES+delimiter.length)
+    const [row]=take(exact)
+    assert.equal(row.recordBytes,exact.length);assert.equal(row.end,String(exact.length));assert.equal(row.delimiter,delimiter)
+    assert.throws(()=>take(Buffer.from(JSON.stringify({text:body+'x'})+delimiter)),/record_limit/)
+  }
 })
 
 test('chunk-local framing retains exact absolute arithmetic across numeric boundaries',()=>{
@@ -104,9 +146,15 @@ test('archive block refs are per-row, stable and private while exact live semant
   const event={type:'event_msg',timestamp:'2026-01-01T00:00:00Z',payload:{type:'agent_message',text:'same λ😀'}}
   const canonical={type:'response_item',timestamp:'2026-01-01T00:00:00.050Z',payload:{type:'message',role:'assistant',content:[{type:'text',text:'same λ😀'}]}}
   const values=[event,canonical,...Array.from({length:30},(_,index)=>({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'text',text:'row '+index}]}}))]
-  for(const value of values){const raw=JSON.stringify(value);assert.equal(presentation(value,raw,{archive:true}).text,presentation(value,raw).text)}
-  const input=Buffer.from(values.map(value=>JSON.stringify(value)).join('\n')),rows=[...createArchiveFramer().push(input,true)]
-  const normalized=new Set(rows.map(row=>row.text)),parse=JSON.parse,arrays=new Set(),visible=[];let attempts=0,previous,anchor
+  for(const value of values){const raw=JSON.stringify(value);assert.equal(JSON.stringify(blocksFor(presentation(value,raw,{archive:true}))),presentation(value,raw).text)}
+  const input=Buffer.from(values.map(value=>JSON.stringify(value)).join('\n')),stringify=JSON.stringify
+  let rows
+  JSON.stringify=function(value,...rest){
+    if(Array.isArray(value)&&value[0]?.kind==='text')throw Error('archive_blocks_serialized')
+    return stringify(value,...rest)
+  }
+  try{rows=[...createArchiveFramer().push(input,true)]}finally{JSON.stringify=stringify}
+  const normalized=new Set(rows.map(row=>JSON.stringify(blocksFor(row)))),parse=JSON.parse,arrays=new Set(),visible=[];let attempts=0,previous,anchor
   JSON.parse=function(value,...rest){if(normalized.has(value)){attempts++;throw Error('normalized_blocks_reparsed')}return parse(value,...rest)}
   try{for(const row of rows){
     const pairs=visibleBlocks(row),symbols=Object.getOwnPropertySymbols(row)
@@ -114,7 +162,7 @@ test('archive block refs are per-row, stable and private while exact live semant
     assert.ok(!arrays.has(pairs));arrays.add(pairs)
     for(let repeat=0;repeat<100;repeat++)assert.equal(visibleBlocks(row),pairs)
     assert.equal(pairs.length,1);assert.equal(Object.getOwnPropertySymbols(row).length,2)
-    const clone=structuredClone(row);assert.deepEqual(Object.getOwnPropertySymbols(clone),[]);assert.equal(clone.text,row.text);assert.ok(!Object.values(clone).some(Array.isArray))
+    const clone=structuredClone(row);assert.deepEqual(Object.getOwnPropertySymbols(clone),[]);assert.ok(!('text' in clone));assert.ok(!Object.values(clone).some(Array.isArray))
     assert.equal(JSON.stringify(row),JSON.stringify(clone))
     const next=semanticTransition(row,previous,anchor);previous=next.previous;anchor=next.anchor
     if(next.retired!==null)visible.splice(visible.findIndex(value=>value.offset===next.retired),1)
@@ -122,11 +170,14 @@ test('archive block refs are per-row, stable and private while exact live semant
   }}finally{JSON.parse=parse}
   assert.equal(attempts,0)
   const live=createRecordFramer().push(0,input,true).rows
-  assert.deepEqual(visible.map(row=>[Number(row.offset),Number(row.presentationOffset),row.text,row.activityAnchors]),live.map(row=>[row.offset,row.presentationOffset,row.text,row.activityAnchors]))
+  assert.deepEqual(visible.map(row=>[Number(row.offset),Number(row.presentationOffset),JSON.stringify(blocksFor(row)),row.activityAnchors]),live.map(row=>[row.offset,row.presentationOffset,row.text,row.activityAnchors]))
   await indexed(values,async(engine,store)=>{
     for(const [table,entries]of Object.entries(store.tables))for(const value of entries.values()){
-      assert.deepEqual(Object.getOwnPropertySymbols(value),[]);assert.ok(!('text' in value));assert.ok(!Object.values(value).some(Array.isArray),table+' must not persist block arrays')
-      if(table==='records')assert.deepEqual(Object.keys(value).sort(),['delimiter','end','key','offset'])
+      assert.deepEqual(Object.getOwnPropertySymbols(value),[]);assert.ok(!('text' in value))
+      if(table==='records'){
+        assert.deepEqual(Object.keys(value).sort(),['key','spans'])
+        assert.ok(value.spans.length<=BATCH_ROWS&&value.spans.every(Number.isSafeInteger))
+      }else assert.ok(!Object.values(value).some(Array.isArray),table+' must not persist block arrays')
       if(table==='pieces')assert.deepEqual(Object.keys(value).sort(),['delimiter','end','group','index','key','kind','label','offset','role','time'])
     }
     const page=await engine.page();assert.ok(page.rows.length<=64)
@@ -146,10 +197,21 @@ test('lazy pretty output preserves exact formatting without expanding a 202MB va
   const input=Buffer.from(JSON.stringify({type:'response_item',payload:{type:'function_call',arguments:compact}})+'\n')
   const framer=createArchiveFramer();let row
   for(let at=0;at<input.length;at+=65536)for(const record of framer.push(input.subarray(at,at+65536),at+65536>=input.length))row=record
-  assert.ok(row.text.length<1048576);assert.equal(JSON.parse(row.text)[0].tokens.length,0)
+  const [block]=blocksFor(row)
+  assert.ok(block.text.length<1048576);assert.equal(block.tokens.length,0)
 })
 function memoryStore(){const tables=Object.fromEntries(['records','pieces','groups','meta','disclosures'].map(name=>[name,new Map()]));const compressed=[],raw=[];let published=false,closed=false
   return {tables,get published(){return published},get closed(){return closed},put(name,value){tables[name].set(value.key,structuredClone(value))},async get(name,key){return tables[name].get(key)},async flush(){},writeCompressed(_,bytes){compressed.push(bytes.slice())},writeRaw(_,bytes){raw.push(bytes.slice())},async detach(){closed=true},async compressedStream(){return new Blob(compressed).stream()},readRaw(start,end){return Buffer.concat(raw).subarray(Number(start),Number(end))},async publish(){published=true},async closeAndDelete(){closed=true},async scan(name,{after,before,limit}){let rows=[...tables[name].values()].sort((a,b)=>a.key.localeCompare(b.key));if(after)rows=rows.filter(row=>row.key>after);if(before)return rows.filter(row=>row.key<before).slice(-limit);return rows.slice(0,limit)},async readPageMetadata(pieces){return pieces.map(piece=>({open:tables.disclosures.get(piece.key)?.open || false,groupOpen:piece.group?tables.disclosures.get('group:'+piece.group)?.open || false:false,count:piece.group?tables.groups.get(piece.group)?.count || '0':'0',endTime:piece.group?tables.groups.get(piece.group)?.endTime || '':''}))},async disclosure(key,open){tables.disclosures.set(key,{key,open})}}
+}
+function indexedRecords(store) {
+  return [...store.tables.records.values()].flatMap(({key,spans})=>{
+    let offset=BigInt(key)
+    return spans.map(span=>{
+      const start=offset
+      offset+=BigInt(Math.floor(span/4))
+      return [start,offset,['','\n','\r\n'][span%4]]
+    })
+  })
 }
 async function stagedEngine(values,prepare,action){
   const prior=globalThis.Worker;globalThis.Worker=class{}
@@ -167,7 +229,7 @@ test('non-flush indexing completes a whole chunk without per-record promise turn
     const put=store.put;store.put=(...args)=>{if(++puts===1)queueMicrotask(()=>{atFirstMicrotask=puts});return put(...args)}
     return {decode:()=>({readable:new ReadableStream({start(controller){controller.enqueue(raw);controller.close()}}),completion:Promise.resolve(),cleanup:Promise.resolve()})}
   },async(engine,store)=>{
-    await engine.finish();assert.equal(atFirstMicrotask,128);assert.equal(puts,128)
+    await engine.finish();assert.equal(atFirstMicrotask,64);assert.equal(puts,65)
     assert.equal(engine.snapshot().records,'64');assert.equal(store.published,true);assert.equal(store.tables.pieces.size,64)
   })
 })
@@ -177,7 +239,8 @@ test('fresh activity groups batch without reads and keep carried and paired occu
   const message=text=>({type:'response_item',payload:{type:'message',role:'assistant',content:[{type:'output_text',text}]}})
   const call=name=>({type:'response_item',payload:{type:'function_call',name,arguments:'{}'}})
   const pairedEvent={type:'event_msg',timestamp,payload:{type:'agent_reasoning',text:'{\n  "a": 1\n}'}}
-  const pairedRecord={type:'response_item',timestamp,payload:{type:'reasoning',summary:{a:1}}}
+  const canonicalTime='2026-01-01T00:00:00.050Z'
+  const pairedRecord={type:'response_item',timestamp:canonicalTime,payload:{type:'reasoning',summary:{a:1}}}
   const values=[message('First'),call('one'),call('two'),message('Reset'),pairedEvent,pairedRecord,message('Reset again'),call('three')]
   let groupReads=0
   await stagedEngine(values,store=>{
@@ -188,10 +251,66 @@ test('fresh activity groups batch without reads and keep carried and paired occu
     assert.equal(groupReads,0,'fresh monotonic groups must not force an IndexedDB lookup and flush')
     const groups=[...store.tables.groups.values()]
     assert.deepEqual(groups.map(value=>value.count),['2','1','1'])
-    assert.equal(groups[1].endTime,timestamp)
+    assert.equal(groups[1].endTime,canonicalTime)
     const pieces=[...store.tables.pieces.values()].filter(piece=>piece.group)
     assert.deepEqual(pieces.map(piece=>piece.group),[groups[0].key,groups[0].key,groups[1].key,groups[2].key])
     assert.equal(store.published,true)
+  })
+})
+
+test('Pi context pieces preserve a carried activity anchor and visible text resets it inside a record',async()=>{
+  const thinking=text=>({type:'thinking',thinking:text})
+  const pi=(id,parentId,...content)=>({type:'message',id,parentId,message:{role:'assistant',content}})
+  const values=[{type:'session',version:3},pi('a',null,thinking('first')),
+    pi('b','a',thinking('carried'),{type:'text',text:'separator'},thinking('new')),
+    pi('c','b',thinking('last'))]
+  await indexed(values,async(engine,store)=>{
+    const {rows}=await engine.page(),groups=[...store.tables.groups.values()]
+    assert.deepEqual(rows.map(row=>row.group),['',groups[0].key,'',groups[0].key,'',groups[1].key,'',groups[1].key])
+    assert.deepEqual(rows.map(row=>row.count),['0','2','0','2','0','2','0','2'])
+    assert.deepEqual(groups.map(group=>group.count),['2','2'])
+  })
+})
+
+test('a hidden paired event may establish the anchor of a later visible activity group',async()=>{
+  const timestamp='2026-01-01T00:00:00Z',endTime='2026-01-01T00:00:01Z'
+  const canonical={type:'conversation',role:'assistant',timestamp,
+    text:JSON.stringify([{kind:'thinking',text:'reason',label:'',nativeContext:true}])}
+  const hidden={type:'event_msg',timestamp,payload:{type:'agent_reasoning',text:'reason'}}
+  const visible={type:'response_item',timestamp:endTime,payload:{type:'function_call',name:'next',arguments:'{}'}}
+  const group=Buffer.byteLength(JSON.stringify(canonical)+'\n')+':0'
+  await indexed([canonical,hidden,visible],async(engine,store)=>{
+    const {rows}=await engine.page()
+    assert.deepEqual(rows.map(row=>[row.kind,row.group,row.count,row.endTime]),[
+      ['thinking','','0',''],['tool',group,'1',endTime]
+    ])
+    assert.deepEqual([...store.tables.groups.values()],[{key:group,count:'1',endTime}])
+    assert.equal(indexedRecords(store).length,3)
+  })
+})
+
+test('adjacent envelope pairing can replace only the one tail key at a full piece page',async()=>{
+  const timestamp='2026-01-01T00:00:00Z'
+  const event={type:'event_msg',timestamp,payload:{type:'agent_message',text:'paired'}}
+  const canonical=(...texts)=>({type:'response_item',timestamp,payload:{type:'message',role:'assistant',content:texts.map(text=>({type:'text',text}))}})
+  const visible=Array.from({length:BATCH_ROWS-1},(_,index)=>({text:'filler '+index}))
+  const values=[...visible,event,canonical('paired'),{text:'separator'},canonical('paired'),event,{text:'separator'},event,canonical('paired','extra')]
+  const writes=[]
+  await stagedEngine(values,store=>{
+    const put=store.put
+    store.put=(table,value)=>{if(table==='pieces')writes.push(value);return put(table,value)}
+  },async(engine,store)=>{
+    await engine.finish()
+    const eventPiece=writes[BATCH_ROWS-1],replacement=writes[BATCH_ROWS]
+    assert.equal(replacement.key,eventPiece.key)
+    assert.notEqual(replacement.offset,eventPiece.offset)
+    assert.equal(store.tables.pieces.get(eventPiece.key).offset,replacement.offset)
+    assert.equal(writes.length,BATCH_ROWS+7,'canonical-first suppresses its later event; two-block canonical cannot pair')
+    assert.equal(store.tables.pieces.size,BATCH_ROWS+6)
+    assert.ok(writes.slice(BATCH_ROWS+1).every((piece,index)=>piece.key>writes[BATCH_ROWS+index].key))
+    const later=await engine.page({after:eventPiece.key})
+    assert.deepEqual(later.rows.map(row=>row.body.text),['separator','paired','separator','paired','paired','extra'])
+    assert.equal((await engine.hydrate(eventPiece.key,0)).body.text,'paired')
   })
 })
 
@@ -214,7 +333,7 @@ test('mid-group enqueue resumes once and publication waits for the terminal flus
       releaseTerminal();await finishing
       const first=await engine.page(),last=await engine.page({last:true})
       assert.equal(first.rows[0].count,'600');assert.equal(last.rows.at(-1).index,599)
-      assert.equal(first.rows[0].group,last.rows.at(-1).group);assert.equal(store.tables.records.size,1)
+      assert.equal(first.rows[0].group,last.rows.at(-1).group);assert.equal(indexedRecords(store).length,1)
       assert.equal(events.filter(value=>value.phase==='ready').length,1)
     }finally{releaseGroup();releaseTerminal();await finishing.catch(()=>{})}
   })
@@ -224,16 +343,16 @@ test('held enqueue retirement and failed enqueue preserve failure and never publ
   for(const retire of [true,false]){
     let release,reject,held=false
     const gate=new Promise((yes,no)=>{release=yes;reject=no}),failure=Error('injected_flush_failure')
-    await stagedEngine([{text:'first'},{text:'second'}],store=>{
+    await stagedEngine(Array.from({length:BATCH_ROWS+1},(_,index)=>({text:'row '+index})),store=>{
       const put=store.put
-      store.put=(name,value)=>{if(name==='records'&&value.offset!=='0'&&!held){held=true;return gate.then(()=>put(name,value))}return put(name,value)}
+      store.put=(name,value)=>{if(name==='records'&&value.key!==positionKey(0n)&&!held){held=true;return gate.then(()=>put(name,value))}return put(name,value)}
     },async(engine,store,events)=>{
       const finishing=engine.finish();finishing.catch(()=>{})
       try{
-        await untilStaged(()=>held);assert.equal(store.tables.pieces.size,1);assert.equal(store.published,false)
+        await untilStaged(()=>held);assert.equal(store.tables.pieces.size,BATCH_ROWS+1);assert.equal(store.published,false)
         if(retire){engine.retire();release();await assert.rejects(finishing,/retired_archive/)}
         else{reject(failure);await assert.rejects(finishing,error=>error===failure)}
-        assert.equal(store.tables.pieces.size,1);assert.equal(store.published,false);assert.ok(!events.some(value=>value.phase==='ready'))
+        assert.equal(store.tables.pieces.size,BATCH_ROWS+1);assert.equal(store.published,false);assert.ok(!events.some(value=>value.phase==='ready'))
       }finally{release();await finishing.catch(()=>{})}
     })
   }
@@ -245,6 +364,25 @@ async function indexed(values,action){
   try{await engine.start({name:'test',stamp:{workspace,session},manifest:manifest(raw,gzip)});for(let at=0;at<gzip.length;at+=65536)await engine.chunk(gzip.subarray(at,at+65536));await engine.finish();await action(engine,store)}
   finally{await engine.cleanup();globalThis.Worker=prior}
 }
+
+test('packed record pages cover every byte across the page boundary, including hidden and final records',async()=>{
+  const expected=[],parts=[]
+  let offset=0n
+  for(let index=0;index<BATCH_ROWS+3;index++){
+    const delimiter=index===BATCH_ROWS+2?'':index%2===0?'\r\n':'\n'
+    const bytes=Buffer.from(JSON.stringify(index%2===0?{type:'metadata'}:{text:'λ😀 '+index})+delimiter)
+    const end=offset+BigInt(bytes.length)
+    expected.push([offset,end,delimiter]);parts.push(bytes);offset=end
+  }
+  await indexed(Buffer.concat(parts),async(engine,store)=>{
+    const pages=[...store.tables.records.values()]
+    assert.deepEqual(pages.map(({key,spans})=>[key,spans.length]),[[positionKey(0n),BATCH_ROWS],[positionKey(expected[BATCH_ROWS][0]),3]])
+    assert.deepEqual(indexedRecords(store),expected)
+    assert.equal(engine.snapshot().records,String(expected.length))
+    assert.equal(engine.snapshot().rawBytes,String(offset))
+    assert.equal(store.tables.pieces.size,Math.floor(expected.length/2))
+  })
+})
 
 test('sanitized archive indexing verifies transformed receipts and content coordinates',async()=>{
   const prior=globalThis.Worker;globalThis.Worker=class{}
@@ -264,7 +402,7 @@ test('sanitized archive indexing verifies transformed receipts and content coord
           await engine.finish()
           assert.deepEqual(store.readRaw('0',String(content.length)),content)
           assert.equal(engine.snapshot().rawBytes,String(content.length))
-          assert.equal(store.tables.records.has(String(content.indexOf(10)+1).padStart(19,'0')),true)
+          assert.deepEqual(indexedRecords(store),[[0n,BigInt(content.indexOf(10)+1),'\r\n'],[BigInt(content.indexOf(10)+1),BigInt(content.length),'']])
         } else {
           await assert.rejects(engine.finish(),/raw_receipt_mismatch/)
           assert.equal(store.published,false)
@@ -289,7 +427,7 @@ test('native Copilot occurrences index and hydrate with the same visible blocks 
    if(['tool','result','event'].includes(want.kind))assert.deepEqual(JSON.parse(hydrated.body.text),JSON.parse(want.block.text))
    else assert.equal(hydrated.body.text,want.block.text)
   }
-  assert.equal(store.tables.records.size,values.length);assert.equal(page.more,false)
+  assert.equal(indexedRecords(store).length,values.length);assert.equal(page.more,false)
  })
 })
 
@@ -315,7 +453,7 @@ test('pi version context, parent history and hidden display flags agree in live,
 test('sealed known failure-without-error controls hydrate as explicit failures and successful counterparts remain hidden',async()=>{
  const values=['hook.end','command.completed','permission.completed'].flatMap(type=>[{type,data:{success:true}},{type,data:{success:false}}])
  await indexed(values,async(engine,store)=>{
-  const page=await engine.page();assert.equal(page.rows.length,3);assert.equal(store.tables.records.size,6)
+  const page=await engine.page();assert.equal(page.rows.length,3);assert.equal(indexedRecords(store).length,6)
   for(let at=0;at<page.rows.length;at++){const result=await engine.hydrate(page.rows[at].key,0);assert.match(result.body.text,/Transcript operation failed/);assert.ok(result.body.text.includes(values[at*2+1].type));assert.equal(result.body.more,false)}
  })
 })
@@ -331,13 +469,27 @@ test('accepted compressed progress crosses the real bridge before held EOF and s
     const config={active:true,stamp:'progress'+cancel,load:1,workspace,session,authority:'principal',apiUrl:''}
     class EngineWorker{
       constructor(){this.tail=Promise.resolve();this.phaseUsesEngine=true}
-      postMessage(message){
+      postMessage(message,transfer){
         this.stamp=message.stamp
         if(message.kind==='interrupt'){this.engine?.retire();return}
+        if(message.kind==='chunk'){
+          const sent=message.bytes
+          assert.deepEqual(transfer,[sent]);assert.equal(sent.byteLength,IO_BYTES)
+          message=structuredClone(message,{transfer})
+          assert.equal(sent.byteLength,0)
+        }
         this.tail=this.tail.then(async()=>{
           let result={kind:'ack'}
           if(message.kind==='start'||message.kind==='adopt'){this.engine=createArchiveEngine({openStore:async()=>store,emit:value=>this.onmessage?.({data:{...value,request:message.request}})});if(message.kind==='adopt')await this.engine.adopt(message);else await this.engine.start(message)}
-          else if(message.kind==='chunk')await this.engine.chunk(new Uint8Array(message.bytes))
+          else if(message.kind==='chunk'){
+            const view=new Uint8Array(message.bytes)
+            assert.equal(view.at(-1),this.chunks?231:0,'only one buffer is returned and reused')
+            this.chunks=(this.chunks??0)+1
+            await this.engine.chunk(view.subarray(0,message.length))
+            view[view.length-1]=231
+            result.bytes=structuredClone(message.bytes,{transfer:[message.bytes]})
+            assert.equal(view.byteLength,0)
+          }
           else if(message.kind==='finish')await this.engine.finish()
           else if(message.kind==='detach')result={kind:'detached',stage:await this.engine.detach()}
           else if(message.kind==='page')result={...await this.engine.page(message.page),kind:'page'}
@@ -409,6 +561,69 @@ test('decoding count progress is coalesced while phase entry, ready and retireme
     }finally{await engine.cleanup()}
     assert.equal(store.closed,true)
   }}finally{globalThis.Worker=priorWorker;Object.defineProperty(globalThis,'performance',priorPerformance)}
+})
+
+test('archive transfer waits for the current chunk receipt and releases a retired acquisition without reuse',async()=>{
+  const raw=Buffer.from('{"text":"transfer ownership"}\n'),gzip=gzipSync(raw),info=manifest(raw,gzip)
+  const headers={'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,
+    'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}
+  const config={active:true,stamp:'transfer-ownership',load:1,workspace,session,authority:'principal',apiUrl:''}
+  for(const failure of ['missing','wrong-size','retired']){
+    let viewer,worker,requestId=0
+    const events=[]
+    class HeldWorker {
+      commands=[]
+      postMessage(message,transfer){
+        this.commands.push(message.kind)
+        if(message.kind==='interrupt')return
+        if(message.kind==='chunk'){
+          assert.equal(message.bytes.byteLength,IO_BYTES)
+          this.chunk=structuredClone(message,{transfer})
+          assert.equal(message.bytes.byteLength,0)
+          return
+        }
+        queueMicrotask(()=>fakeWorkerReply(this,message,{kind:message.kind==='retire'?'cleaned':'ack'}))
+      }
+      reply(extra){
+        const {stamp,request}=this.chunk
+        this.onmessage({data:{...stamp,request,kind:'ack',...extra}})
+      }
+      terminate(){this.terminated=true}
+    }
+    viewer=createPhaseBridgeFixture({
+      document:{getElementById:()=>null,querySelectorAll:()=>[],addEventListener(){}},
+      window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){}},workerFactory:()=>{worker=new HeldWorker();return worker},
+      send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}))},
+      fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(info)):new Response(new ReadableStream({start(controller){
+        controller.enqueue(Uint8Array.from(gzip.subarray(0,8)))
+        controller.enqueue(Uint8Array.from(gzip.subarray(8)))
+        controller.close()
+      }}),{headers})})
+    })
+    try{
+      viewer.configure(config)
+      await untilStaged(()=>worker?.chunk)
+      const {chunk}=worker
+      assert.equal(chunk.length,8)
+      worker.reply({request:chunk.request+1,bytes:new ArrayBuffer(IO_BYTES)})
+      worker.reply({incarnation:'stale',bytes:new ArrayBuffer(IO_BYTES)})
+      await new Promise(resolve=>setImmediate(resolve))
+      assert.deepEqual(worker.commands,['start','chunk'])
+      if(failure==='retired'){
+        viewer.configure(null)
+        assert.equal(worker.terminated,undefined,'retirement still owns the pending transfer')
+        worker.reply({bytes:structuredClone(chunk.bytes,{transfer:[chunk.bytes]})})
+      }else worker.reply(failure==='missing'?{}:{bytes:new ArrayBuffer(IO_BYTES-1)})
+      await untilStaged(()=>worker.terminated)
+      assert.equal(worker.commands.filter(kind=>kind==='chunk').length,1)
+      assert.ok(!worker.commands.includes('finish'))
+      assert.equal(events.some(event=>event.kind==='sealed-error'&&event.code==='archive_chunk_receipt_mismatch'),failure!=='retired')
+    }finally{
+      viewer.configure(null)
+      if(worker?.onmessage&&worker.chunk?.bytes.byteLength)worker.reply({bytes:worker.chunk.bytes})
+      await untilStaged(()=>!worker||worker.terminated)
+    }
+  }
 })
 
 test('query continuation progresses across dense matches and the body byte budget',async()=>{
@@ -495,7 +710,7 @@ test('64-row pages preserve complete cursors, search, disclosure identity and ou
       postMessage(message){if(message.kind==='interrupt')return
         Promise.resolve().then(async()=>{
           const result=message.kind==='page'?{...check(await engine.page(message.page)),kind:'page'}:{kind:message.kind==='retire'?'cleaned':'ack'}
-          this.onmessage?.({data:{...message.stamp,request:message.request,...result}})
+          fakeWorkerReply(this,message,result)
         }).catch(()=>this.onerror())
       }
       terminate(){this.terminated=true}
@@ -555,7 +770,7 @@ test('raw deep and precision event evidence indexes and hydrates without lossy s
   '{"type":"event_msg","payload":'+'['.repeat(10000)+'0'+']'.repeat(10000)+'}\n')
  await indexed(raw,async(engine,store)=>{
   const first=await engine.page(),piece=first.rows[0]
-  assert.equal(first.rows.length,2);assert.equal(store.tables.records.size,2)
+  assert.equal(first.rows.length,2);assert.equal(indexedRecords(store).length,2)
   await engine.disclosure(piece.key,true)
   const opened=await engine.page({bodyKey:piece.key}),part=opened.rows[0].body
   const next=await engine.hydrate(piece.key,1),text=part.text+next.body.text
@@ -651,7 +866,7 @@ test('sealed bridge clears authority synchronously and retains one Worker throug
   class FakeWorker {
     postMessage(message){this.stamp=message.stamp;if(message.kind==='interrupt')return
       if(message.kind==='retire'){this.cleanup=()=>this.onmessage?.({data:{...message.stamp,kind:'cleaned',request:message.request}});return}
-      queueMicrotask(()=>this.onmessage?.({data:{...message.stamp,kind:'ack',request:message.request}}))}
+      queueMicrotask(()=>fakeWorkerReply(this,message,{kind:'ack'}))}
     terminate(){this.terminated=true}
   }
   const viewer=createPhaseBridgeFixture({send:value=>events.push(value),document,window,workerFactory:()=>{const worker=new FakeWorker();workers.push(worker);return worker},async fetchArchive(url,{signal}){
@@ -682,7 +897,7 @@ test('HTTP cleanup has a finite failure disposition while real streams and physi
   const document={getElementById:()=>({replaceChildren(){}}),addEventListener(){}}
   const window={setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){}}
   class FakeWorker {
-    postMessage(message){if(message.kind==='interrupt')return;queueMicrotask(()=>this.onmessage?.({data:{...message.stamp,kind:message.kind==='retire'?'cleaned':'ack',request:message.request}}))}
+    postMessage(message){if(message.kind==='interrupt')return;queueMicrotask(()=>fakeWorkerReply(this,message,{kind:message.kind==='retire'?'cleaned':'ack'}))}
     terminate(){this.terminated=true}
   }
   const viewer=createPhaseBridgeFixture({send:value=>events.push(value),document,window,cleanupMs:20,workerFactory:()=>{const worker=new FakeWorker();workers.push(worker);return worker},async fetchArchive(url){
@@ -712,7 +927,7 @@ test('local page progress is coalesced at100ms with one owned timer and immediat
     const document={getElementById:id=>id==='sealed-search'?{value:search}:{replaceChildren(){}},querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)}
     class HeldWorker{
       pages=[];retiring=null
-      reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}
+      reply(message,value){fakeWorkerReply(this,message,value)}
       postMessage(message){if(message.kind==='interrupt')return;if(message.kind==='page'){this.pages.push(message);return}if(message.kind==='retire'){this.retiring=message;return}queueMicrotask(()=>this.reply(message,{kind:'ack'}))}
       terminate(){this.terminated=true}
     }
@@ -750,7 +965,7 @@ for(const input of ['End','Shift','touchstart','summary pointer'])test(`new scop
  const key='0000000000000000000:0000000',config={active:true,stamp:'disclosure-transfer',load:1,workspace,session,authority:'principal',scope:'same-source',historical:true,apiUrl:''}
  const viewport={id:'session-records',scrollTop:0,scrollHeight:100,clientHeight:100,getAttribute:name=>name==='data-sealed-dom-owner'?config.stamp:name==='data-sealed-dom-load'?'1':null,getBoundingClientRect:()=>({top:0,bottom:100,height:100}),querySelectorAll:()=>[],replaceChildren(){}}
  class Worker{
-  reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}
+  reply(message,value){fakeWorkerReply(this,message,value)}
   postMessage(message){calls.push(message);if(message.kind==='interrupt')return
    if(message.kind==='page'&&calls.filter(call=>call.kind==='page').length>3){queueMicrotask(()=>this.reply(message,{kind:'error',error:'controlled_repeated_page_guard'}));return}
    if(message.kind==='disclosure'&&message.key==='group:run'){release=()=>this.reply(message,{kind:'ack'});return}
@@ -785,7 +1000,7 @@ test('sealed local intents retain only the latest page or Markdown demand throug
   const document={getElementById:id=>id==='sealed-search'?{value:search}:{replaceChildren(){}},querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)}
   class HeldWorker{
     messages=[];pages=[];bodies=[]
-    reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}
+    reply(message,value){fakeWorkerReply(this,message,value)}
     postMessage(message){this.messages.push(message);if(message.kind==='interrupt')return
       if(message.kind==='page'){this.pages.push(message);return}
       if(message.kind==='body'){this.bodies.push(message);return}
@@ -893,7 +1108,7 @@ test('retiring owner emits one clear through bounded reconcile feedback while ac
   const document={getElementById:()=>({getAttribute:name=>name==='data-sealed-dom-owner'?config.stamp:name==='data-sealed-dom-load'?'1':null,replaceChildren(){clears++}}),querySelectorAll:()=>[],addEventListener(){}}
   class Worker{
     postMessage(message){if(message.kind==='interrupt')return
-      const respond=()=>this.onmessage?.({data:{...message.stamp,request:message.request,kind:message.kind==='retire'?'cleaned':'ack'}})
+      const respond=()=>fakeWorkerReply(this,message,{kind:message.kind==='retire'?'cleaned':'ack'})
       if(message.kind==='retire'&&hold){this.cleanup=respond;return}queueMicrotask(respond)
     }
     terminate(){this.terminated=true}
@@ -938,7 +1153,7 @@ test('sequential processor reader handoff keeps custody, current authorization a
     const events=[],workers=[],order=[];let viewer,requests=0,physical=0,maxPhysical=0,locked=false,deleted=false,stage,revalidateRelease,revalidateEntered=false
     const raw=Buffer.from('{"text":"verified"}\n'),gzip=gzipSync(raw),info=manifest(raw,gzip),etag='"authority-generation-receipt"',config={active:true,stamp:'phase-'+scenario,load:1,workspace,session,authority:'principal',apiUrl:''}
     class PhaseWorker{
-      reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}
+      reply(message,value){fakeWorkerReply(this,message,value)}
       postMessage(message){
         order.push('worker:'+message.kind)
         if(message.kind==='interrupt')return
@@ -1001,7 +1216,7 @@ test('ordinary disclosure hydration waits for the accepted page and cancels an e
  const node=key=>({isConnected:true,open:true,getAttribute:name=>name==='data-sealed-key'?key:name==='data-sealed-owner'?config.stamp:null})
  const old=node(oldKey),fresh=node(newKey);currentNode=old
  const viewport={id:'session-records',scrollTop:0,scrollHeight:1000,clientHeight:100,replaceChildren(){},contains:node=>node===currentNode&&node.isConnected,getAttribute:name=>attrs[name]??null,setAttribute:(name,value)=>{attrs[name]=value},querySelectorAll:()=>[],getBoundingClientRect:()=>({top:0,bottom:100,height:100})}
- class Worker{messages=[];pages=[];bodies=[];reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}postMessage(message){this.messages.push(message);if(message.kind==='interrupt')return;if(message.kind==='page'){this.pages.push(message);return}if(message.kind==='body'){this.bodies.push(message);return}queueMicrotask(()=>this.reply(message,{kind:message.kind==='retire'?'cleaned':'ack'}))}terminate(){this.terminated=true}}
+ class Worker{messages=[];pages=[];bodies=[];reply(message,value){fakeWorkerReply(this,message,value)}postMessage(message){this.messages.push(message);if(message.kind==='interrupt')return;if(message.kind==='page'){this.pages.push(message);return}if(message.kind==='body'){this.bodies.push(message);return}queueMicrotask(()=>this.reply(message,{kind:message.kind==='retire'?'cleaned':'ack'}))}terminate(){this.terminated=true}}
  const toggle=target=>listeners.get('toggle')({target}),paint=()=>{for(let turn=0;turn<12&&frames.length;turn++)frames.splice(0).forEach(callback=>callback())},until=async predicate=>{for(let turn=0;turn<100&&!predicate();turn++)await new Promise(resolve=>setImmediate(resolve));assert.ok(predicate(),'bounded disclosure publication')}
  viewer=createPhaseBridgeFixture({document:{getElementById:()=>viewport,querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)},window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){},requestAnimationFrame:callback=>frames.push(callback)},workerFactory:()=>{const worker=new Worker();workers.push(worker);return worker},send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}));if(event.kind==='sealed-page'&&event.first===newKey)toggle(old);if(event.kind==='sealed-latest-render'){attrs['data-render-request']=String(event.request);queueMicrotask(()=>viewer.configure(config))}if(event.kind==='sealed-body')queueMicrotask(()=>viewer.configure(config,null,{stamp:config.stamp,load:config.load,request:event.request}))},fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})})
  try{
@@ -1023,7 +1238,7 @@ test('sealed continuous render admission retains manual intent and exact stamped
  let top=900
  const rawGap={dataset:{gapBefore:'0000000000000000100:0000000',gapAfter:'0000000000000000200:0000000'},getBoundingClientRect:()=>({top:120,bottom:220,height:100})}
  const viewport={id:'session-records',get scrollTop(){return top},set scrollTop(value){top=Math.max(0,Math.min(900,value))},scrollHeight:1000,clientHeight:100,getAttribute:name=>attrs[name] ?? null,setAttribute:(name,value)=>{attrs[name]=value},getBoundingClientRect:()=>({top:0,bottom:100,height:100}),replaceChildren(){},querySelectorAll(selector){return selector==='[data-fragment-from]'?[{dataset:{fragmentFrom:String(Number(attrs['data-render-part'])+1),fragmentTo:String(Number(attrs['data-render-part'])+1)},getBoundingClientRect:()=>({top:70,bottom:150,height:80}),closest:()=>null}]:selector==='[data-history-gap="source"]'?[rawGap]:[]}}
- class Worker{postMessage(message){if(message.kind==='interrupt')return;queueMicrotask(()=>this.onmessage?.({data:{...message.stamp,request:message.request,...(message.kind==='page'?{kind:'page',rows:[{key:'first'}],first:'first',last:'last',more:false}:{kind:message.kind==='retire'?'cleaned':'ack'})}}))}terminate(){this.terminated=true}}
+ class Worker{postMessage(message){if(message.kind==='interrupt')return;queueMicrotask(()=>fakeWorkerReply(this,message,message.kind==='page'?{kind:'page',rows:[{key:'first'}],first:'first',last:'last',more:false}:{kind:message.kind==='retire'?'cleaned':'ack'}))}terminate(){this.terminated=true}}
  viewer=createPhaseBridgeFixture({document:{getElementById:()=>viewport,querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)},window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){},requestAnimationFrame:callback=>frames.push(callback)},workerFactory:()=>{const worker=new Worker();workers.push(worker);return worker},send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}))},fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})})
  const until=async fn=>{for(let i=0;i<100&&!fn();i++)await new Promise(resolve=>setImmediate(resolve));assert.ok(fn(),'bounded render handoff')}
  const paint=()=>{for(let i=0;i<8&&frames.length;i++)frames.splice(0).forEach(callback=>callback())}
@@ -1052,7 +1267,7 @@ test('sealed latest waits for its final rendered part and retires pending jumps 
  const raw=Buffer.from('0\n'),gzip=gzipSync(raw),config={active:true,stamp:'latest-sealed',load:1,workspace,session,authority:'principal',apiUrl:'',latestRequest:7}
  const attrs={'data-sealed-dom-owner':config.stamp,'data-sealed-dom-load':'1','data-sealed-first':'end','data-sealed-last':'end','data-render-more':'false','data-last-prose-more':'false','data-latest-request':'6','data-render-request':'0'}
  const viewport={scrollTop:20,scrollHeight:1000,clientHeight:100,getAttribute:key=>attrs[key] ?? null,setAttribute:(key,value)=>{attrs[key]=value},replaceChildren(){}}
- class Worker{pages=[];postMessage(message){if(message.kind==='interrupt')return;if(message.kind==='page')this.pages.push(message);queueMicrotask(()=>this.onmessage?.({data:{...message.stamp,request:message.request,...(message.kind==='page'?{kind:'page',rows:[{key:'end',kind:'text'}],first:'end',last:'end',more:false}:{kind:message.kind==='retire'?'cleaned':'ack'})}}))}terminate(){this.terminated=true}}
+ class Worker{pages=[];postMessage(message){if(message.kind==='interrupt')return;if(message.kind==='page')this.pages.push(message);queueMicrotask(()=>fakeWorkerReply(this,message,message.kind==='page'?{kind:'page',rows:[{key:'end',kind:'text'}],first:'end',last:'end',more:false}:{kind:message.kind==='retire'?'cleaned':'ack'}))}terminate(){this.terminated=true}}
  viewer=createPhaseBridgeFixture({document:{getElementById:()=>viewport,querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)},window:{setTimeout,clearTimeout,crypto:globalThis.crypto,addEventListener(){},requestAnimationFrame:callback=>frames.push(callback)},workerFactory:()=>{const worker=new Worker();workers.push(worker);return worker},send:event=>{events.push(event);if(event.kind==='sealed-demand')queueMicrotask(()=>viewer.configure(config,{id:++requestId,sequence:event.sequence}))},fetchArchive:async url=>({isCurrent:()=>true,response:url.endsWith('/archive')?new Response(JSON.stringify(manifest(raw,gzip))):new Response(gzip,{headers:{'Content-Type':'application/gzip','Content-Length':String(gzip.length),'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':digest(gzip),'X-HMem-Archive-Raw-Bytes':String(raw.length),'X-HMem-Archive-Raw-SHA256':digest(raw)}})})})
  const until=async fn=>{for(let i=0;i<100&&!fn();i++)await new Promise(resolve=>setImmediate(resolve));assert.ok(fn(),'bounded sealed latest')}
  const paint=()=>{for(let turn=0;turn<8&&frames.length;turn++)frames.splice(0).forEach(callback=>callback())}
@@ -1071,7 +1286,7 @@ test('reader retry retains custody through held release, release failure and aut
   const raw=Buffer.from('0\n'),gzip=gzipSync(raw),config={active:true,stamp:'reader-retry-'+scenario,load:1,workspace,session,authority:'principal',apiUrl:''}
   class Worker{
    pages=[]
-   reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}
+   reply(message,value){fakeWorkerReply(this,message,value)}
    postMessage(message){
     if(message.kind==='interrupt')return
     if(message.kind==='release-reader'){this.release=()=>this.reply(message,scenario==='release-failure'?{kind:'error',code:'archive_cleanup_failed'}:{kind:'detached',stage:{name:this.stage.name,custody:this.stage.custody,manifest:this.stage.manifest}});return}
@@ -1103,7 +1318,7 @@ test('ordinary archive pages and fresh owners cannot inherit hidden search or of
  const document={getElementById:id=>id==='sealed-search'?{value:'needle'}:id==='sealed-position'?{value:'4096'}:{replaceChildren(){}},querySelectorAll:()=>[],addEventListener:(name,handler)=>listeners.set(name,handler)}
  class Worker{
   pages=[]
-  reply(message,value){this.onmessage?.({data:{...message.stamp,request:message.request,...value}})}
+  reply(message,value){fakeWorkerReply(this,message,value)}
   postMessage(message){if(message.kind==='interrupt')return;if(message.kind==='page'){this.pages.push(message);return}queueMicrotask(()=>this.reply(message,{kind:message.kind==='retire'?'cleaned':'ack'}))}
   terminate(){this.terminated=true}
  }

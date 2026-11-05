@@ -20,6 +20,12 @@ async function until(fn) {
   assert.fail('Document UI did not converge')
 }
 
+function hold() {
+  let release
+  const wait = new Promise(resolve => { release = resolve })
+  return { wait, release }
+}
+
 function item(task, number, role, filename, mediaType, original = png) {
   return { id: uuid(number + 100), task_id: task, role, created_at: stamp, document: {
     id: uuid(number), filename, title: filename, media_type: mediaType, raw_bytes: original.length,
@@ -81,6 +87,7 @@ test('Sources and paged evidence share derivatives and original downloads in the
   let releaseDelete = () => {}
   let releaseFrame = () => {}
   let releaseStalledFrame = () => {}
+  const sourcesRead = hold(), evidenceRead = hold(), pdfRead = hold(), pdfRaster = hold(), firstUpload = hold()
   let styledReads = 0
   let styledGrants = 0
   let styledNavigations = 0
@@ -132,15 +139,19 @@ test('Sources and paged evidence share derivatives and original downloads in the
       assert.equal(manifest.role, 'source')
       assert.equal(manifest.manifest.filename, 'diagram-😀.txt')
       assert.equal(manifest.manifest.raw_sha256, sha(request.postDataBuffer()))
-      if (uploads.length === 1) return route.fulfill({ status: 503, json: { error: 'temporary' } })
+      if (uploads.length === 1) {
+        await firstUpload.wait
+        return route.fulfill({ status: 503, json: { error: 'temporary' } })
+      }
       const upload = item(task, 4, 'source', manifest.manifest.filename, manifest.manifest.media_type, request.postDataBuffer())
-      upload.document.preview_state = 'unsupported'
+      upload.document.preview_state = 'queued'
       source = [upload, ...source]
       docs.push(upload)
       return route.fulfill({ status: 201, json: upload })
     }
     if (suffix === '') {
       const rows = url.searchParams.get('role') === 'source' ? source : evidence
+      await (rows === evidence ? evidenceRead.wait : sourcesRead.wait)
       if (rows === evidence && refreshBarrier) await refreshBarrier
       if (rows === evidence && rows.length > 2 && !url.searchParams.has('before_id')) {
         return route.fulfill({ json: { items: rows.slice(0, 2), next_cursor: { id: rows[1].id, created_at: stamp } } })
@@ -169,6 +180,7 @@ test('Sources and paged evidence share derivatives and original downloads in the
     }
     if (resource === 'previews' && variant === 'current') {
       if (selected === html) styledReads++
+      if (selected === pdf) await pdfRead.wait
       const outputs = selected === html ? [makeOutput('styled_html_preview', 0, 'text/html', styled)]
         : selected === pdf ? [1, 2].map(page => makeOutput('page', page, 'image/png', png))
         : [makeOutput('thumbnail', 0, 'image/png', png), makeOutput('page', 0, 'image/png', png)]
@@ -176,6 +188,7 @@ test('Sources and paged evidence share derivatives and original downloads in the
     }
     assert.equal(variant, generation)
     assert.ok(['page', 'thumbnail'].includes(pageIndex))
+    if (selected === pdf) await pdfRaster.wait
     return route.fulfill({ body: png, contentType: 'image/png' })
   })
   await page.route('**/api/v1/**/tasks/' + task + '/sessions?**', route => {
@@ -206,7 +219,12 @@ test('Sources and paged evidence share derivatives and original downloads in the
     assert.equal(await card.getByRole('button', { name: 'Work', exact: true }).getAttribute('aria-pressed'), 'true')
     await sourcesTab.click()
     const sourcePanel = card.locator('#task-' + task + '-sources')
+    const sourcePending = sourcePanel.getByRole('status', { name: 'Loading Sources', exact: true })
+    await sourcePending.waitFor()
+    assert.equal(await sourcePending.count(), 1)
+    sourcesRead.release()
     await sourcePanel.getByText('Fixture uploader', { exact: false }).first().waitFor()
+    assert.equal(await sourcePending.count(), 0)
     assert.deepEqual(await layout(), before)
     assert.deepEqual(await page.locator('#entity-' + h.fixture.projects[0].id + ' .card-local-sections button').allTextContents(), [])
     const thumb = sourcePanel.getByRole('button', { name: 'Preview screen.png' })
@@ -238,16 +256,26 @@ test('Sources and paged evidence share derivatives and original downloads in the
     assert.equal(await dialog.isVisible(), true, 'backdrop clicks leave the upload open')
     assert.equal(await dialog.locator('select').count(), 0)
     await dialog.getByLabel('File').setInputFiles({ name: 'diagram-😀.txt', mimeType: 'text/plain', buffer: Buffer.from('verified original') })
-    await dialog.getByRole('button', { name: 'Upload source', exact: true }).click()
+    const uploadSubmit = dialog.getByRole('button', { name: 'Upload source', exact: true })
+    await uploadSubmit.focus()
+    await page.keyboard.press('Enter')
+    const uploadPending = dialog.getByRole('status', { name: 'Uploading source', exact: true })
+    await uploadPending.waitFor()
+    assert.equal(await uploadSubmit.isDisabled(), true)
+    assert.equal(await dialog.getByRole('button', { name: 'Close', exact: true }).evaluate(node => node === document.activeElement), true)
+    firstUpload.release()
     await dialog.getByText('The document operation could not finish. Please retry.').waitFor()
+    assert.equal(await uploadPending.count(), 0)
     await dialog.getByRole('button', { name: 'Upload source', exact: true }).click()
     await dialog.waitFor({ state: 'detached' })
     assert.equal(uploads.length, 2)
     assert.equal(uploads[0].request_id, uploads[1].request_id)
     await sourcePanel.getByText('diagram-😀.txt', { exact: true }).waitFor()
+    await sourcePanel.getByRole('status', { name: 'Preparing preview for diagram-😀.txt', exact: true }).waitFor()
     await until(async () => (await evidenceTab.innerText()) === 'Evidence · 29')
     await sourcePanel.getByRole('heading', { name: 'Sources · 3' }).waitFor()
     assert.equal(await sourcesTab.innerText(), 'Sources · 3')
+    source[0].document.preview_state = 'unsupported'
     await sourcePanel.getByRole('button', { name: 'Remove from Sources: screen.png' }).click()
     await sourcePanel.getByText('screen.png', { exact: true }).waitFor({ state: 'detached' })
     await sourcePanel.getByText('Preview unavailable — export PNG or PDF').waitFor()
@@ -260,7 +288,12 @@ test('Sources and paged evidence share derivatives and original downloads in the
     assert.equal(await sourcesTab.innerText(), 'Sources · 2')
     await evidenceTab.click()
     const documents = card.locator('#task-' + task + '-evidence').getByRole('region', { name: 'Document evidence' })
+    const evidencePending = documents.getByRole('status', { name: 'Loading document evidence', exact: true })
+    await evidencePending.waitFor()
+    assert.equal(await evidencePending.count(), 1)
+    evidenceRead.release()
     await documents.getByText('screen.png', { exact: true }).waitFor()
+    assert.equal(await evidencePending.count(), 0)
     assert.equal(await card.getByRole('button', { name: /Upload evidence|Add to evidence/ }).count(), 0)
     const download = documents.locator('.task-document-row').filter({ hasText: 'screen.png' }).getByRole('button', { name: '↓ Download', exact: true })
     const sessionDownload = card.getByRole('region', { name: 'Agent sessions' }).getByRole('button', { name: /^Download session / }).first()
@@ -294,18 +327,26 @@ test('Sources and paged evidence share derivatives and original downloads in the
     const innerFrame = dialog.frameLocator('iframe').frameLocator('iframe')
     const frameContent = innerFrame.getByText('Sanitized styled wireframe')
     await until(() => styledNavigations === 1)
-    await dialog.getByText('Loading preview…', { exact: true }).waitFor()
+    const previewPending = dialog.getByRole('status', { name: 'Loading preview', exact: true })
+    await previewPending.waitFor()
+    assert.equal(await previewPending.count(), 1)
+    assert.equal(await dialog.getByRole('button', { name: 'Retry', exact: true }).count(), 0)
     assert.equal(await frame.isVisible(), false, 'the navigating frame cannot flash before content arrives')
     const stageBefore = await stage.boundingBox()
     releaseFrame()
     const retry = dialog.getByRole('button', { name: 'Retry', exact: true })
     await dialog.getByText('Preview could not be loaded.', { exact: true }).waitFor()
     await retry.waitFor()
+    assert.equal(await previewPending.count(), 0)
     assert.deepEqual(await stage.boundingBox(), stageBefore, 'a failed transfer keeps the loading geometry')
     await retry.focus()
     await page.keyboard.press('Enter')
     await until(() => styledNavigations === 2)
     assert.equal(await frame.isVisible(), false)
+    await previewPending.waitFor()
+    assert.equal(await previewPending.count(), 1)
+    assert.equal(await retry.count(), 0)
+    assert.equal(await dialog.getByRole('button', { name: 'Close', exact: true }).evaluate(node => node === document.activeElement), true)
     await page.clock.fastForward(30001)
     await dialog.getByText('Preview loading timed out.', { exact: true }).waitFor()
     releaseStalledFrame()
@@ -317,6 +358,7 @@ test('Sources and paged evidence share derivatives and original downloads in the
     assert.equal(styledGrants, 3, 'retry requests a fresh isolated grant')
     assert.equal(styledNavigations, 3)
     assert.equal(await retry.isVisible(), false)
+    assert.equal(await previewPending.count(), 0)
     assert.equal(await frame.getAttribute('sandbox'), '')
     assert.equal(await frame.getAttribute('referrerpolicy'), 'no-referrer')
     assert.equal(await dialog.frameLocator('iframe').locator('iframe').getAttribute('sandbox'), '')
@@ -382,9 +424,19 @@ test('Sources and paged evidence share derivatives and original downloads in the
     await documents.getByRole('button', { name: 'Older documents' }).click()
     await documents.getByRole('button', { name: 'Preview review.pdf' }).click()
     dialog = page.getByRole('dialog')
+    await previewPending.waitFor()
+    assert.equal(await previewPending.count(), 1)
+    assert.equal(await dialog.getByRole('button', { name: '↓ Download', exact: true }).isEnabled(), true)
+    pdfRead.release()
     await dialog.getByText('Page 1 of 2').waitFor()
+    await previewPending.waitFor()
+    assert.equal(await previewPending.count(), 1)
+    pdfRaster.release()
+    await dialog.getByRole('img', { name: 'Preview of review.pdf' }).waitFor()
+    assert.equal(await previewPending.count(), 0)
     await dialog.getByRole('button', { name: 'Next page' }).click()
     await dialog.getByText('Page 2 of 2').waitFor()
+    await dialog.getByRole('img', { name: 'Preview of review.pdf' }).waitFor()
     await dialog.getByRole('button', { name: 'Close', exact: true }).click()
     await card.getByRole('button', { name: 'Older sessions', exact: true }).click()
     await card.getByRole('heading', { name: 'Agent sessions · 27' }).waitFor()
@@ -432,10 +484,119 @@ test('Sources and paged evidence share derivatives and original downloads in the
     assert.deepEqual(h.errors, [])
     assert.deepEqual(h.unhandled, [])
   } finally {
+    for (const gate of [sourcesRead, evidenceRead, pdfRead, pdfRaster, firstUpload]) gate.release()
     releaseFrame()
     releaseStalledFrame()
     releaseRefresh()
     releaseDelete()
+    await h.close()
+  }
+})
+
+test('preview read and generation retries settle independently in the styled stage', { timeout: 45000 }, async () => {
+  const h = distinctTasks(await openSessionExplorer())
+  const { page } = h
+  const task = h.fixture.tasks[0].id
+  const html = item(task, 40, 'source', 'retry.html', 'text/html', Buffer.from('<p>Original</p>'))
+  html.document.preview_state = 'failed'
+  const readRetry = hold(), generationRetry = hold(), refresh = hold(), readyWrite = hold()
+  const generationId = uuid(940)
+  const altHost = 'http://localhost:' + new URL(h.origin).port
+  const readyText = 'Ready from the independent update'
+  await page.route(altHost + '/document-grants/**', route => route.fulfill({
+    contentType: 'text/html', body: `<iframe sandbox="" srcdoc="${readyText}"></iframe>`,
+  }))
+  let reads = 0, writes = 0, state = 'failed'
+  await page.route('**/tasks/' + task + '/documents**', async route => {
+    const path = new URL(route.request().url()).pathname
+    if (path.endsWith('/counts')) return route.fulfill({ json: counts(1, 0, 0) })
+    if (path.endsWith('/documents')) return route.fulfill({ json: { items: [html], next_cursor: null } })
+    if (path.endsWith('/previews/retry')) {
+      writes++
+      await (writes === 1 ? generationRetry.wait : readyWrite.wait)
+      return route.fulfill({ status: 202, json: { accepted: true } })
+    }
+    if (path.endsWith('/download-grants')) return route.fulfill({ json: {
+      ...route.request().postDataJSON(), url: altHost + '/document-grants/' + uuid(990) + '/styled_html_preview/0?token=fixture',
+    } })
+    assert.ok(path.endsWith('/previews/current'))
+    if (++reads === 1) return route.fulfill({ status: 503, json: { error: 'temporary' } })
+    if (reads === 2) await readRetry.wait
+    if (reads === 3) await refresh.wait
+    const ready = state === 'ready'
+    return route.fulfill({ json: {
+      state, retryable: state === 'failed', generation_id: ready ? generationId : null,
+      outputs: ready ? [{ variant: 'styled_html_preview', page: 0, media_type: 'text/html', raw_bytes: Buffer.byteLength(readyText), raw_sha256: sha(readyText) }] : [],
+    } })
+  })
+
+  try {
+    await h.start()
+    const card = page.locator('#entity-' + task)
+    await card.locator('.card-details-control').click()
+    await card.getByRole('button', { name: 'Sources', exact: true }).click()
+    await card.getByRole('button', { name: 'Preview retry.html' }).click()
+    const dialog = page.getByRole('dialog')
+    const stage = dialog.locator('.document-styled-stage')
+    const read = dialog.getByRole('button', { name: 'Retry', exact: true })
+    const generation = dialog.getByRole('button', { name: 'Retry preview', exact: true })
+    const loading = dialog.getByRole('status', { name: 'Loading preview', exact: true })
+    const preparing = dialog.getByRole('status', { name: 'Preparing preview', exact: true })
+    const close = dialog.getByRole('button', { name: 'Close', exact: true })
+
+    await read.waitFor()
+    const stageHeight = (await stage.boundingBox()).height
+    assert.equal(await generation.count(), 0)
+    await read.press('Enter')
+    await loading.waitFor()
+    await until(() => close.evaluate(node => node === document.activeElement))
+    assert.equal(await read.count(), 0)
+    assert.equal(writes, 0)
+    readRetry.release()
+
+    await generation.waitFor()
+    assert.equal(await loading.count(), 0)
+    assert.equal(await read.count(), 0)
+    await generation.press('Enter')
+    await preparing.waitFor()
+    await until(() => close.evaluate(node => node === document.activeElement))
+    assert.equal(await generation.count(), 0)
+    await until(() => writes === 1)
+    state = 'queued'
+    generationRetry.release()
+
+    await loading.waitFor()
+    assert.equal(await generation.count(), 0)
+    refresh.release()
+    await preparing.waitFor()
+    assert.equal(await generation.count(), 0)
+    assert.equal(await read.count(), 0)
+    assert.equal((await stage.boundingBox()).height, stageHeight)
+    assert.equal(await dialog.getByRole('button', { name: '↓ Download', exact: true }).isEnabled(), true)
+
+    state = 'failed'
+    await push(h, 'document', html.document.id, 'updated', taskHints(task))
+    await generation.press('Enter')
+    await until(() => writes === 2)
+    state = 'ready'
+    await push(h, 'document', html.document.id, 'updated', taskHints(task))
+    const frame = dialog.locator('iframe')
+    const readyContent = dialog.frameLocator('iframe').frameLocator('iframe').getByText(readyText)
+    await readyContent.waitFor()
+    assert.equal(await preparing.count(), 0)
+    assert.equal(await generation.count(), 0)
+    const acceptedFrame = await frame.elementHandle()
+    const acceptedReads = reads
+    const response = page.waitForResponse(reply => reply.url().endsWith('/previews/retry'))
+    readyWrite.release()
+    await response
+    await h.idle()
+    assert.equal(await acceptedFrame.evaluate(node => node.isConnected), true)
+    assert.equal(await readyContent.isVisible(), true)
+    assert.equal(reads, acceptedReads)
+    assert.deepEqual(h.errors, [])
+  } finally {
+    for (const gate of [readRetry, generationRetry, refresh, readyWrite]) gate.release()
     await h.close()
   }
 })
@@ -822,7 +983,8 @@ test('raster transport honors the authorized type and size and stale 401 cannot 
     mismatch = true
     await thumbnail.click()
     await dialog.getByText('Preview is unavailable. You can download the original.').waitFor()
-    assert.equal(await image.getAttribute('src'), null)
+    assert.equal(await dialog.locator('[data-document-raster]').getAttribute('src'), null)
+    assert.equal(await dialog.getByRole('status', { name: 'Loading preview', exact: true }).count(), 0)
     assert.equal(await dialog.getByRole('button', { name: '↓ Download', exact: true }).isEnabled(), true)
     assert.deepEqual(h.errors, [])
   } finally {

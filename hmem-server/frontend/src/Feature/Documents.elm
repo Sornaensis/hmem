@@ -18,6 +18,7 @@ import Json.Encode as Encode
 import Permissions
 import Ports
 import Set
+import Spinner
 import StartupAdmission
 import Types exposing (..)
 import Url
@@ -287,6 +288,20 @@ previewKey item =
     "preview:" ++ item.documentId
 
 
+currentPreview : ( String, String ) -> Model -> Maybe Api.DocumentPreview
+currentPreview key model =
+    currentEntry model key
+        |> Maybe.andThen .value
+        |> Maybe.andThen (\value -> case value of
+            DocumentPreviewValue preview -> Just preview
+            _ -> Nothing)
+
+
+previewReady : Maybe Api.DocumentPreview -> Bool
+previewReady preview =
+    preview |> Maybe.map (.state >> (==) "ready") |> Maybe.withDefault False
+
+
 dialogIdentity : Maybe DocumentDialog -> String
 dialogIdentity dialog =
     case dialog of
@@ -314,8 +329,12 @@ update msg source =
                         let
                             token = model.documents.nextOperation
                             url = Api.documentBase model.flags.apiUrl workspace item.taskId ++ "/" ++ Url.percentEncode item.documentId
+                            operation =
+                                { token = token
+                                , preview = if removedAssociation == Nothing then Just ( item.taskId, previewKey item ) else Nothing
+                                }
                         in
-                        ( setDocuments (\state -> { state | operation = Just token, nextOperation = token + 1, notice = "" }) model
+                        ( setDocuments (\state -> { state | operation = Just operation, nextOperation = token + 1, notice = "" }) model
                         , send url (DocumentWriteFinished owner token item.taskId removedAssociation >> TaskDocuments)
                         )
                     else
@@ -381,6 +400,7 @@ update msg source =
             modify (\state -> { state | dialog = case state.dialog of
                 Just (PreviewDocumentDialog item _ zoom) -> Just (PreviewDocumentDialog item page zoom)
                 other -> other
+            , notice = ""
             })
 
         ToggleDocumentZoom ->
@@ -396,19 +416,31 @@ update msg source =
             write item Nothing Api.retryDocumentPreview
 
         DocumentWriteFinished requestScope token task removedAssociation result ->
-            if requestScope /= owner || model.documents.operation /= Just token then
+            if requestScope /= owner || (model.documents.operation |> Maybe.map .token) /= Just token then
                 ( model, Cmd.none )
             else
+                let
+                    retriedPreview = model.documents.operation |> Maybe.andThen .preview
+                    acceptedPreviewReady = retriedPreview |> Maybe.andThen (\key -> currentPreview key model) |> previewReady
+                    clearRetriedPreview state =
+                        case retriedPreview of
+                            Just ( previewTask, kind ) -> retryRead previewTask kind state
+                            Nothing -> state
+                in
                 ( setDocuments (\state -> { state | operation = Nothing, notice = case result of
                     Ok () -> ""
-                    Err _ -> "Document change could not finish. Please retry."
+                    Err _ -> if acceptedPreviewReady then "" else "Document change could not finish. Please retry."
                   })
                     (case result of
                         Ok () ->
-                            removedAssociation
-                                |> Maybe.map (\association -> retireAssociation task association model)
-                                |> Maybe.withDefault model
-                                |> refreshTask task
+                            if acceptedPreviewReady then
+                                model
+                            else
+                                removedAssociation
+                                    |> Maybe.map (\association -> retireAssociation task association model)
+                                    |> Maybe.withDefault model
+                                    |> refreshTask task
+                                    |> setDocuments clearRetriedPreview
                         Err _ -> model
                     )
                 , Cmd.none
@@ -455,9 +487,10 @@ viewPanel role model task =
                 DocumentPageValue result -> Just result
                 _ -> Nothing)
         label = if role == "source" then "Sources" else "Document evidence"
+        panelId = "task-document-panel-" ++ task ++ "-" ++ role
         control = TaskDocuments
     in
-    Html.section [ class "task-documents", attribute "aria-label" label ]
+    Html.section [ id panelId, class "task-documents", attribute "aria-label" label, attribute "tabindex" "-1" ]
         [ div [ class "task-documents-heading" ]
             [ h4 [ class "card-section-heading" ] [ text (label ++ countSuffix (count role model task)) ]
             , if role == "source" && Permissions.canEditCurrentWorkspace model then
@@ -479,15 +512,15 @@ viewPanel role model task =
                 if entry |> Maybe.map .failed |> Maybe.withDefault False then
                     p [ class "card-meta", attribute "role" "status" ]
                         [ text "Documents could not be loaded. "
-                        , button [ class "btn btn-sm", type_ "button", onClick (control (RetryDocumentRead task role)) ] [ text "Retry" ] ]
+                        , button [ class "btn btn-sm", type_ "button", Spinner.preserveFocus panelId, onClick (control (RetryDocumentRead task role)) ] [ text "Retry" ] ]
                 else
-                    p [ class "card-meta", attribute "role" "status" ] [ text "Loading documents…" ]
+                    p [ class "card-meta" ] [ Spinner.inline ("Loading " ++ (if role == "source" then "Sources" else "document evidence")) ]
         , if entry |> Maybe.map .cursor |> Maybe.withDefault Nothing |> (/=) Nothing then
-            button [ class "btn btn-sm", type_ "button", onClick (control (DocumentPageChanged task role Nothing)) ] [ text "Newest documents" ]
+            button [ class "btn btn-sm", type_ "button", Spinner.preserveFocus panelId, onClick (control (DocumentPageChanged task role Nothing)) ] [ text "Newest documents" ]
           else
             text ""
         , page |> Maybe.andThen .next
-            |> Maybe.map (\cursor -> button [ class "btn btn-sm", type_ "button", onClick (control (DocumentPageChanged task role (Just cursor))) ] [ text "Older documents" ])
+            |> Maybe.map (\cursor -> button [ class "btn btn-sm", type_ "button", Spinner.preserveFocus panelId, onClick (control (DocumentPageChanged task role (Just cursor))) ] [ text "Older documents" ])
             |> Maybe.withDefault (text "")
         ]
 
@@ -521,15 +554,13 @@ viewRow model item =
                 contents
 
         thumbnail =
-            currentEntry model ( item.taskId, previewKey item )
-                |> Maybe.andThen .value
-                |> Maybe.andThen (\value -> case value of
-                    DocumentPreviewValue preview ->
-                        Maybe.map2
-                            (\generation output -> rasterAttributes (documentUrl model item) generation output)
-                            preview.generation
-                            (List.filter (\output -> output.variant == "thumbnail" && output.page == 0 && inertRaster output) preview.outputs |> List.head)
-                    _ -> Nothing)
+            currentPreview ( item.taskId, previewKey item ) model
+                |> Maybe.andThen (\preview ->
+                    Maybe.map2
+                        (\generation output -> rasterAttributes (documentUrl model item) generation output)
+                        preview.generation
+                        (List.filter (\output -> output.variant == "thumbnail" && output.page == 0 && inertRaster output) preview.outputs |> List.head)
+                )
     in
     div [ class "task-document-row" ]
         [ if thumbnailPreview then
@@ -555,7 +586,11 @@ viewRow model item =
                 , Html.time [ attribute "datetime" item.createdAt ] [ text item.createdAt ]
                 ]
             , p [ class "card-meta" ]
-                [ text (if videoPreview && item.previewState == "ready" then "Video thumbnail · first frame" else previewState item.previewState) ]
+                [ if previewPending item.previewState then
+                    Spinner.inline ("Preparing preview for " ++ item.filename)
+                  else
+                    text (if videoPreview && item.previewState == "ready" then "Video thumbnail · first frame" else previewState item.previewState)
+                ]
             , if item.role == "source" && Permissions.canEditCurrentWorkspace model then
                 button
                     [ type_ "button", class "task-document-remove", disabled (model.documents.operation /= Nothing)
@@ -591,11 +626,19 @@ download model item =
 previewState : String -> String
 previewState state =
     case state of
-        "queued" -> "Preview queued"
-        "processing" -> "Preparing preview…"
         "ready" -> "Preview ready"
         "failed" -> "Preview failed"
         _ -> "Preview unavailable — export PNG or PDF"
+
+
+previewPending : String -> Bool
+previewPending state =
+    state == "queued" || state == "processing"
+
+
+viewPreviewPending : String -> Html Msg
+viewPreviewPending label =
+    div [ class "document-preview-status" ] [ Spinner.inline label ]
 
 
 inertRaster : Api.DocumentOutput -> Bool
@@ -618,7 +661,7 @@ viewDialog model =
         ( Just workspace, Just dialog ) ->
             let
                 token = dialogIdentity (Just dialog)
-                close = button [ type_ "button", class "btn btn-sm", attribute "autofocus" "", attribute "data-document-preview-close" "", onClick (TaskDocuments CloseDocumentDialog) ] [ text "Close" ]
+                close = button [ id "task-document-dialog-close", type_ "button", class "btn btn-sm", attribute "autofocus" "", attribute "data-document-preview-close" "", onClick (TaskDocuments CloseDocumentDialog) ] [ text "Close" ]
                 heading label = h3 [ id "task-document-dialog-title" ] [ text label ]
                 ( origin, body, isPreview ) =
                     case dialog of
@@ -659,7 +702,13 @@ viewDialog model =
                 , Html.Events.preventDefaultOn "cancel" (Decode.succeed ( TaskDocuments CloseDocumentDialog, True ))
                  ] ++ (if isPreview then [ attribute "closedby" "any" ] else []))
                 (body ++
-                 [ p [ class "card-meta task-document-dialog-notice", attribute "role" "status", attribute "data-document-transfer-status" "" ] [ text model.documents.notice ] ])
+                 [ if isPreview then
+                    text ""
+                   else
+                    div [ class "card-meta task-document-dialog-notice", Html.Attributes.hidden True, attribute "data-document-upload-pending" "" ]
+                        [ Spinner.inline "Uploading source" ]
+                 , p [ class "card-meta task-document-dialog-notice", attribute "role" "status", attribute "data-document-transfer-status" "" ] [ text model.documents.notice ]
+                 ])
         _ ->
             text ""
 
@@ -667,18 +716,27 @@ viewDialog model =
 viewPreview : Html Msg -> Html Msg -> Model -> Api.DocumentItem -> Int -> Bool -> List (Html Msg)
 viewPreview heading close model item page zoom =
     let
-        entry = currentEntry model ( item.taskId, previewKey item )
-        preview = entry |> Maybe.andThen .value |> Maybe.andThen (\value -> case value of
-            DocumentPreviewValue result -> Just result
-            _ -> Nothing)
+        key = ( item.taskId, previewKey item )
+        entry = currentEntry model key
+        preview = currentPreview key model
         failed = entry |> Maybe.map .failed |> Maybe.withDefault False
         url = documentUrl model item
-        retryRead = button [ type_ "button", class "btn btn-sm", onClick (TaskDocuments (RetryDocumentRead item.taskId (previewKey item))) ] [ text "Retry" ]
+        styled = item.mediaType == "text/html"
+        keepFocus = Spinner.preserveFocus "task-document-dialog-close"
+        retryingGeneration = (model.documents.operation |> Maybe.andThen .preview) == Just key && not (previewReady preview)
+        retryRead = button [ type_ "button", class "btn btn-sm", keepFocus, onClick (TaskDocuments (RetryDocumentRead item.taskId (previewKey item))) ] [ text "Retry" ]
         readError =
             div [ class "document-preview-status" ]
                 [ p [ class "card-meta", attribute "role" "status" ] [ text "Preview information could not be loaded." ]
                 , retryRead
                 ]
+        styledStage content = div [ class "document-styled-stage" ] [ content ]
+        initialStage content = if styled then styledStage content else content
+        generationState state =
+            if previewPending state then
+                viewPreviewPending "Preparing preview"
+            else
+                p [ class "card-meta", attribute "role" "status" ] [ text (previewState state) ]
         styledPreview state =
             let
                 ready = state.state == "ready" && List.any (\output -> output.variant == "styled_html_preview" && output.page == 0 && output.mediaType == "text/html") state.outputs
@@ -696,7 +754,8 @@ viewPreview heading close model item page zoom =
                                 ]
                                 [ div [ class "document-styled-mount" ] []
                                 , div [ class "document-preview-status" ]
-                                    [ p [ class "card-meta", attribute "role" "status", attribute "data-document-frame-status" "" ] [ text "Loading preview…" ]
+                                    [ div [ attribute "data-document-frame-pending" "" ] [ Spinner.inline "Loading preview" ]
+                                    , p [ class "card-meta", attribute "role" "status", attribute "data-document-frame-status" "" ] []
                                     , button [ type_ "button", class "btn btn-sm", attribute "data-document-frame-retry" "" ] [ text "Retry" ]
                                     ]
                                 , span [ attribute "tabindex" "0", attribute "data-dialog-return" "" ] []
@@ -704,8 +763,7 @@ viewPreview heading close model item page zoom =
                           )
                         ]
                 _ ->
-                    div [ class "document-styled-stage" ]
-                        [ if state.state == "ready" then readError else p [ class "card-meta", attribute "role" "status" ] [ text (previewState state.state) ] ]
+                    styledStage (if state.state == "ready" then readError else generationState state.state)
         frame state =
             case state.generation of
                 Just generation ->
@@ -716,27 +774,36 @@ viewPreview heading close model item page zoom =
                     case raster of
                           Just output ->
                             div [ class ("document-raster-viewport" ++ (if zoom then " document-raster-zoom" else "")) ]
-                              [ Html.img
-                                ([ attribute "alt" ("Preview of " ++ item.filename)
-                                 , attribute "data-document-scope" model.documents.scope
-                                 ] ++ rasterAttributes url generation output) []
+                              [ Keyed.node "div" []
+                                    [ ( generation ++ ":" ++ String.fromInt page
+                                      , div [ attribute "data-document-raster-stage" "" ]
+                                            [ div [ class "document-preview-status", attribute "data-document-raster-pending" "" ] [ Spinner.inline "Loading preview" ]
+                                            , div [ Html.Attributes.hidden True, attribute "data-document-raster-image" "" ]
+                                                [ Html.img
+                                                    ([ attribute "alt" ("Preview of " ++ item.filename)
+                                                     , attribute "data-document-scope" model.documents.scope
+                                                     ] ++ rasterAttributes url generation output) []
+                                                ]
+                                            ]
+                                      )
+                                    ]
                             , div [ class "task-document-actions" ]
                                 [ if List.length outputs > 1 then
-                                    button [ type_ "button", class "btn btn-sm", disabled (page <= 1), onClick (TaskDocuments (DocumentPreviewPage (page - 1))) ] [ text "Previous page" ]
+                                    button [ type_ "button", class "btn btn-sm", keepFocus, disabled (page <= 1), onClick (TaskDocuments (DocumentPreviewPage (page - 1))) ] [ text "Previous page" ]
                                   else text ""
                                 , if List.length outputs > 1 then
                                     span [] [ text ("Page " ++ String.fromInt page ++ " of " ++ String.fromInt (List.length outputs)) ]
                                   else text ""
                                 , if List.length outputs > 1 then
-                                    button [ type_ "button", class "btn btn-sm", disabled (page >= List.length outputs), onClick (TaskDocuments (DocumentPreviewPage (page + 1))) ] [ text "Next page" ]
+                                    button [ type_ "button", class "btn btn-sm", keepFocus, disabled (page >= List.length outputs), onClick (TaskDocuments (DocumentPreviewPage (page + 1))) ] [ text "Next page" ]
                                   else text ""
                                 , button [ type_ "button", class "btn btn-sm", onClick (TaskDocuments ToggleDocumentZoom) ] [ text (if zoom then "Fit" else "Zoom") ]
                                 ]
                               ]
                           Nothing ->
-                            p [ class "card-meta" ] [ text "Preview is unavailable." ]
+                            p [ class "card-meta", attribute "role" "status" ] [ text "Preview is unavailable." ]
                 Nothing ->
-                    p [ class "card-meta" ] [ text (previewState state.state) ]
+                    generationState state.state
     in
     [ div [ class "task-document-dialog-head" ]
         [ div [ class "task-document-dialog-label" ]
@@ -747,27 +814,20 @@ viewPreview heading close model item page zoom =
         , close
         ]
     , div [ class "task-document-preview-body" ]
-        [ if item.mediaType == "video/mp4" && (preview |> Maybe.map (.state >> (==) "ready") |> Maybe.withDefault False) then
+        [ if item.mediaType == "video/mp4" && previewReady preview then
             p [ class "card-meta" ] [ text "Video preview · first frame shown" ]
           else if preview |> Maybe.map .animatedFirstFrame |> Maybe.withDefault False then
             p [ class "card-meta" ] [ text "Animated original · first frame shown" ]
           else
             text ""
-        , if item.mediaType == "text/html" then
-            if failed then
-                div [ class "document-styled-stage" ] [ readError ]
-            else
-                preview |> Maybe.map styledPreview |> Maybe.withDefault
-                    (div [ class "document-styled-stage" ] [ p [ class "card-meta", attribute "role" "status" ] [ text "Loading preview…" ] ])
+        , if retryingGeneration then
+            initialStage (viewPreviewPending "Preparing preview")
           else if failed then
-            p [ class "card-meta" ]
-                [ text "Preview information could not be loaded. "
-                , retryRead
-                ]
+            initialStage readError
           else
-            preview |> Maybe.map frame |> Maybe.withDefault (p [ class "card-meta" ] [ text "Loading preview…" ])
-        , if Permissions.canEditCurrentWorkspace model && (preview |> Maybe.map .retryable |> Maybe.withDefault False) then
-            button [ type_ "button", class "btn btn-sm", disabled (model.documents.operation /= Nothing), onClick (TaskDocuments (RetryDocumentPreview item)) ] [ text "Retry preview" ]
+            preview |> Maybe.map (if styled then styledPreview else frame) |> Maybe.withDefault (initialStage (viewPreviewPending "Loading preview"))
+        , if not retryingGeneration && Permissions.canEditCurrentWorkspace model && (preview |> Maybe.map (\state -> state.state == "failed" && state.retryable) |> Maybe.withDefault False) then
+            button [ type_ "button", class "btn btn-sm", keepFocus, disabled (model.documents.operation /= Nothing), onClick (TaskDocuments (RetryDocumentPreview item)) ] [ text "Retry preview" ]
           else
             text ""
         ]

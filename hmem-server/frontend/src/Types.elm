@@ -94,7 +94,7 @@ type alias DocumentsModel =
     , dialog : Maybe DocumentDialog
     , styledAttempt : Int
     , nextOperation : Int
-    , operation : Maybe Int
+    , operation : Maybe { token : Int, preview : Maybe ( String, String ) }
     , notice : String
     }
 

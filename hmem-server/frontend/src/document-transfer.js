@@ -179,9 +179,29 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
     if (task) send('status', task, message)
   }
 
-  function styledState(element, state, message) {
+  function styledState(element, state, message = '') {
     element.dataset.documentFrameState = state
+    element.querySelector('[data-document-frame-pending]').hidden = state !== 'loading'
     element.querySelector('[data-document-frame-status]').textContent = message
+  }
+
+  function rasterState(stage, state) {
+    stage.querySelector('[data-document-raster-pending]').hidden = state !== 'loading'
+    stage.querySelector('[data-document-raster-image]').hidden = state !== 'ready'
+  }
+
+  function decodeRaster(element, signal) {
+    signal.throwIfAborted()
+    return new Promise((resolve, reject) => {
+      const aborted = () => finish(signal.reason)
+      function finish(error) {
+        signal.removeEventListener('abort', aborted)
+        if (error) reject(error)
+        else resolve()
+      }
+      signal.addEventListener('abort', aborted, { once: true })
+      element.decode().then(() => finish(), finish)
+    })
   }
 
   function loadStyledFrame(element, record, url) {
@@ -228,11 +248,12 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
     const timer = setTimeout(() => record.controller.abort(), 30000)
     const currentAuth = authGuard()
     const same = () => currentAuth() && element.isConnected && assets.get(element) === record && assetKey(element) === key
+    const rasterStage = element.closest('[data-document-raster-stage]')
     try {
       const { signal } = record.controller
       const { documentStyled, documentGeneration, documentAssociation, documentRole, documentRaster, documentRasterType, documentRasterBytes } = element.dataset
       if (documentStyled) {
-        styledState(element, 'loading', 'Loading preview…')
+        styledState(element, 'loading')
         const response = await request(documentStyled, signal, same, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -260,6 +281,7 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
           styledState(element, 'ready', 'Preview loaded.')
         }
       } else {
+        if (rasterStage) rasterState(rasterStage, 'loading')
         const expected = Number(documentRasterBytes)
         if (!rasterTypes.has(documentRasterType) || !Number.isSafeInteger(expected) || expected < 1 || expected > maxRaster) {
           throw new Error('The inert image descriptor is unavailable.')
@@ -274,6 +296,11 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
         if (same()) {
           record.url = URL.createObjectURL(blob)
           element.src = record.url
+          if (rasterStage) {
+            await decodeRaster(element, signal)
+            signal.throwIfAborted()
+            if (same()) rasterState(rasterStage, 'ready')
+          }
         }
       }
     } catch (error) {
@@ -281,6 +308,12 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
         if (element.dataset.documentStyled) {
           styledState(element, 'failed', error.name === 'AbortError' ? 'Preview loading timed out.' : 'Preview could not be loaded.')
         } else {
+          if (record.url) {
+            URL.revokeObjectURL(record.url)
+            record.url = null
+            element.removeAttribute('src')
+          }
+          if (rasterStage) rasterState(rasterStage, 'failed')
           previewError(element, error.name === 'AbortError' ? 'Preview transfer timed out. Reopen the preview to retry.' : 'Preview is unavailable. You can download the original.')
         }
       }
@@ -330,8 +363,11 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
       }
       const attempt = upload
       const submit = form.querySelector('button[type="submit"]')
+      const pending = form.closest('[data-document-preview-task]').querySelector('[data-document-upload-pending]')
+      if (document.activeElement === submit) form.querySelector('[data-document-preview-close]').focus({ preventScroll: true })
       submit.disabled = true
-      send('status', task, 'Uploading source…')
+      pending.hidden = false
+      send('status', task, '')
       try {
         if (!attempt.hash) {
           const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
@@ -352,6 +388,7 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
           send('uploaded', task, '')
         }
       } finally {
+        pending.hidden = true
         if (form.isConnected) submit.disabled = false
       }
     })
@@ -365,7 +402,7 @@ export function installDocumentTransfer({ document, apiUrl, authHeaders, csrfHea
       if (record && element.dataset.documentFrameState === 'failed' && assetKey(element) === record.key) {
         const dialog = retry.closest('[data-document-preview-task]')
         if (document.activeElement === retry) dialog.querySelector('[data-document-preview-close]').focus({ preventScroll: true })
-        styledState(element, 'loading', 'Loading preview…')
+        styledState(element, 'loading')
         send('retry-styled', dialog.dataset.documentPreviewTask, '')
       }
       return

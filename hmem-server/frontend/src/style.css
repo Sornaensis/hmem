@@ -6181,7 +6181,7 @@ textarea.observation-edit-content {
   width: 100%;
   height: 100%;
 }
-.document-preview-status { text-align: center; }
+.document-preview-status { text-align: center; --app-spinner-size: 1.5rem; }
 .document-styled-mount { position: absolute; inset: 0; visibility: hidden; }
 .document-styled-transfer[data-document-frame-state="ready"] .document-styled-mount { visibility: visible; }
 .document-styled-transfer[data-document-frame-state="ready"] .document-preview-status,

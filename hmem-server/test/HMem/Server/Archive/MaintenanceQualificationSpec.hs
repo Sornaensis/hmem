@@ -7,7 +7,7 @@ import Codec.Compression.Zlib.Raw qualified as Z
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently)
 import Control.Exception
-import Control.Monad (foldM,forM_,unless,void,when)
+import Control.Monad (foldM,forM_,replicateM_,unless,void,when)
 import Crypto.Hash (Context,SHA256,Digest,hashInit,hashUpdate,hashFinalize,hashlazy)
 import Data.Aeson
 import Data.Aeson.KeyMap qualified as KM
@@ -36,7 +36,7 @@ import Network.HTTP.Types
 import Network.Wai qualified as Wai
 import Network.Wai.Test qualified as W
 import System.CPUTime (getCPUTime)
-import System.Directory (canonicalizePath,createDirectoryIfMissing,getFileSize,removeFile)
+import System.Directory (canonicalizePath,createDirectoryIfMissing,doesPathExist,getFileSize,removeFile)
 import System.Environment (getExecutablePath,lookupEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>),equalFilePath)
@@ -63,11 +63,13 @@ import HMem.Server.SessionPrefix (newPrefixRegistry,closePrefixRegistry)
 import HMem.Server.TestHarness (mkLocalSandboxConfig)
 import HMem.Server.WebSocket (newWSState)
 import HMem.SessionArchive.Codec qualified as C
+import HMem.SessionArchive.Replacement qualified as Replacement
 import HMem.Types qualified as Types
 
 spec :: Spec
 spec=describe "Archive maintenance qualification" $ do
   it "restores a bounded two MiB recovery smoke fixture" $ qualify "entropy" 2
+  it "restores sanitized evidence after guarded reclamation" qualifySanitizedRestore
   it "measures and restores one GiB of compressible valid JSONL" $ qualify "compressible" 1024
   it "measures and restores one hundred MiB of seeded poorly compressible valid JSONL" $ qualify "entropy" 100
 
@@ -280,6 +282,203 @@ qualify recipe chunkCount=do
       LBS.writeFile path (encode final)
     Right Nothing -> failureReceipt "Qualification exceeded 250-second case budget" >> retrySandboxLifetime life >> expectationFailure "Qualification exceeded 250-second case budget"
     Left failure -> failureReceipt (T.pack (displayException failure)) >> throwIO failure
+
+qualifySanitizedRestore :: IO ()
+qualifySanitizedRestore=do
+  life<-newSandboxLifetime
+  result<-timeout 250000000 $ withSandboxedTestEnvBorrowed life acquire drain $ \admin owned -> do
+    let pool=owned.runtimePool
+        env=admin {pool=pool}
+        policyBytes="{\"version\":1,\"eligible_from\":\"2000-01-01T00:00:00Z\",\"formats\":{\"codex_jsonl\":[{\"match\":{\"/type\":\"response_item\",\"/payload/type\":\"function_call\"},\"path\":\"/payload/encrypted_content\"}]}}"
+        tailRecord="{\"type\":\"session_end\"}"
+        batches=[unzip [sanitizedRestoreRecord n | n<-[base..base+127]] | base<-[0,128..1408]]
+        originals=map (BS.concat . fst) batches<>[tailRecord]
+        expected=BS.concat (concatMap snd batches<>[tailRecord])
+        source=BS.concat originals
+        sourceBytes=fromIntegral (BS.length source)::Int64
+        sourceSha=Core.sessionSha256 source
+        expectedBytes=fromIntegral (BS.length expected)::Int64
+        expectedSha=Core.sessionSha256 expected
+    expectedBytes `shouldSatisfy` (>1048576)
+    Right policy<-pure (Replacement.decodePolicy policyBytes)
+    M.configureMaintenance pool (M.InstallReplacement policy)
+    workspace<-(.id) <$> createTestWorkspace env "sanitized-archive-restore"
+    task<-Task.createTask pool (Types.CreateTask workspace Nothing Nothing "Sanitized restore fixture" Nothing Nothing Nothing)
+    execute env ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid task.id<>"'")
+    identifier<-UUID.nextRandom
+    initial<-DB.createSession pool (Core.CreateSession identifier workspace "codex_jsonl" "Sanitized restore fixture" Nothing Nothing task.id)
+    uploaded<-foldM (\row bytes -> (.session) <$> DB.appendSession pool workspace identifier
+      (Core.AppendSession row.committedBytes row.revision bytes True)) initial originals
+    sealed<-DB.terminateSession pool workspace identifier (Core.TerminateSession sourceBytes uploaded.revision sourceBytes sourceSha)
+    execute env ("UPDATE tasks SET status='done' WHERE id='"<>uuid task.id<>"'")
+    R.ensureArchive pool workspace identifier
+    M.configureMaintenance pool M.DisableReplacement
+    implementation<-C.codecImplementation
+    Just compression<-A.claimArchive pool implementation
+    qualificationDetail True "sanitized_restore_publish" (runArchiveLease pool compression)
+    Just published<-R.verifiedSanitizedManifest pool workspace identifier (Just compression.generationId)
+    let archive=published.archive
+        scope=" WHERE session_id='"<>uuid identifier<>"'"
+        rawRows e=number e ("SELECT count(*) FROM session_chunks"<>scope)
+        assertReclaimed e=do
+          rawRows e `shouldReturn` 0
+          number e ("SELECT coalesce(sum(deleted_bytes),0)::bigint FROM session_archive_reclamation"<>scope<>
+            " AND complete AND verified_at IS NOT NULL AND sanitized_attestation_sha256 IS NOT NULL") `shouldReturn` sourceBytes
+          M.verificationRecorded e.pool archive `shouldReturn` True
+    (archive.rawBytes,archive.rawRecords,archive.rawRevision,archive.rawSha256) `shouldBe` (sourceBytes,1537,sealed.revision,sourceSha)
+    (published.content.contentBytes,published.content.contentSha256,published.content.replacementCount) `shouldBe` (expectedBytes,expectedSha,384)
+    (published.originalAvailable,published.cleanupComplete) `shouldBe` (True,False)
+    rawRows env `shouldReturn` fromIntegral (length originals)
+    replicateM_ 2 (DB.deriveSessionOccurrence pool workspace identifier)
+    M.claimReclamation pool `shouldReturn` Nothing
+    M.configureMaintenance pool M.EnableSanitizedReclamation
+    qualificationDetail True "sanitized_restore_guarded_reclaim" $ do
+      let clean remaining=when (remaining>0) $ do
+            maintainArchive pool
+            after<-rawRows env
+            after `shouldSatisfy` (<remaining)
+            clean after
+      rawRows env >>= clean
+      assertReclaimed env
+    Just retired<-R.verifiedSanitizedManifest pool workspace identifier (Just archive.id)
+    (retired.archive,retired.content,retired.originalAvailable,retired.cleanupComplete)
+      `shouldBe` (archive,published.content,False,True)
+    let dump=admin.testSandbox.sandboxRoot </> "sanitized-after-reclaim.dump"
+    qualificationDetail True "sanitized_restore_dump" $
+      pgTool owned "pg_dump" ["--format=custom","--file",dump,"--dbname",T.unpack admin.testDb.testDbConnStr]
+    backupBytes<-getFileSize dump
+    backupBytes `shouldSatisfy` (>0)
+    replacementId<-UUID.nextRandom
+    let replacement="archive_restore_"<>T.filter (/='-') (T.pack (show replacementId))
+        adminConn=admin.testDb.testDbConnStr<>" dbname="<>replacement
+    mask_ $ rawExecute admin (TE.encodeUtf8 ("CREATE DATABASE "<>replacement<>" TEMPLATE template0")) >> writeIORef owned.replacement (Just replacement)
+    qualificationDetail True "sanitized_restore_empty_database" $
+      pgTool owned "pg_restore" ["--exit-on-error","--dbname",T.unpack adminConn,dump]
+    restored<-mask_ $ do
+      replacementPool<-P.createPool (adminConn<>" user="<>owned.runtimeRole) 6 30 30000
+      writeIORef owned.restoredPool (Just replacementPool)
+      pure replacementPool
+    let replacementEnv=env {pool=restored}
+    qualificationDetail True "sanitized_restore_http_verification" $ do
+      assertReclaimed replacementEnv
+      Just restoredSession<-DB.getSession restored workspace identifier
+      (restoredSession.state,restoredSession.finalBytes,restoredSession.finalSha256,restoredSession.revision,restoredSession.committedRecords)
+        `shouldBe` (Core.Terminated,Just sourceBytes,Just sourceSha,sealed.revision,archive.rawRecords)
+      R.verifiedSanitizedManifest restored workspace identifier (Just archive.id) `shouldReturn` Just retired
+      withApp replacementEnv $ \app -> assertSanitizedRestorePaths app retired (head originals) expected task.id
+    destroyAllResources restored
+    writeIORef owned.restoredPool Nothing
+    rawExecute admin (TE.encodeUtf8 ("DROP DATABASE "<>replacement))
+    writeIORef owned.replacement Nothing
+    removeFile dump
+    helpers<-readIORef owned.helperReceipts
+    pure (admin.testSandbox.sandboxRoot,
+         ["source_bytes".=sourceBytes,"source_records".=archive.rawRecords,"source_sha256".=sourceSha
+         ,"content_bytes".=expectedBytes,"content_sha256".=expectedSha,"replacement_count".=published.content.replacementCount
+         ,"generation".=archive.id,"gzip_bytes".=archive.compressedBytes,"gzip_sha256".=archive.compressedSha256
+         ,"deleted_original_bytes".=sourceBytes,"remaining_raw_rows".=(0::Int),"backup_bytes".=backupBytes,"native_helpers".=helpers])
+  case result of
+    Nothing -> retrySandboxLifetime life >> expectationFailure "Sanitized restore qualification exceeded 250 seconds"
+    Just (sandboxRoot,receipt) -> do
+      doesPathExist sandboxRoot `shouldReturn` False
+      LBS.hPut stdout (encode (object (["archive_sanitized_restore".=True,"owned_cleanup_complete".=True]<>receipt))<>"\n")
+      hFlush stdout
+
+sanitizedRestoreRecord :: Int -> (ByteString,ByteString)
+sanitizedRestoreRecord n
+  | n `mod` 4==1=(prefix<>entropy (fromIntegral n+1) 256<>suffix,prefix<>"Encrypted Payload"<>suffix)
+  | otherwise=(message,message)
+  where
+    row=B8.pack (show n)
+    prefix="{ \"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"call_id\":\"c"<>row<>"\",\"encrypted_content\":\""
+    suffix="\",\"arguments\":\"{\\\"scope\\\":\\\"unchanged\\\"}\"} }\r\n"
+    message="{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"row "<>row<>" "<>entropy (fromIntegral n+1) 1024<>"\"}]}}\r\n"
+
+assertSanitizedRestorePaths :: Wai.Application -> R.SanitizedManifest -> ByteString -> ByteString -> UUID -> IO ()
+assertSanitizedRestorePaths app retired firstOriginal expected task=do
+  let archive=retired.archive
+      content=retired.content
+      workspace="/api/v1/workspaces/"<>uuid archive.workspaceId
+      target=workspace<>"/sessions/"<>uuid archive.sessionId
+      selected=target<>"/archive/"<>uuid archive.id
+      zipPath=workspace<>"/tasks/"<>uuid task<>"/evidence.zip"
+      decimal=String . T.pack . show
+      originalUnavailable="original_evidence_unavailable"
+      assertConflict method path body code=do
+        response<-request app method path body
+        W.simpleStatus response `shouldBe` status409
+        Right (Object fields)<-pure (eitherDecode response.simpleBody)
+        KM.lookup "error" fields `shouldBe` Just (String code)
+  Object manifest<-request app methodGet (target<>"/archive?representation=available-v1") "" >>= decoded
+  forM_ [("state",String "ready"),("representation",String "sanitized-v1"),("generation_id",toJSON archive.id)
+        ,("raw_bytes",decimal archive.rawBytes),("raw_records",decimal archive.rawRecords),("raw_revision",decimal archive.rawRevision)
+        ,("raw_sha256",String archive.rawSha256),("content_bytes",decimal content.contentBytes),("content_sha256",String content.contentSha256)
+        ,("policy_sha256",String content.policySha256),("replacement_count",decimal content.replacementCount)
+        ,("compressed_bytes",decimal archive.compressedBytes),("compressed_sha256",String archive.compressedSha256)
+        ,("original_available",Bool False),("original_cleanup",String "complete")] $ \(key,value) ->
+    KM.lookup key manifest `shouldBe` Just value
+  gzip<-request app methodGet (selected<>"/sanitized-content") ""
+  W.simpleStatus gzip `shouldBe` status200
+  lookup "X-HMem-Archive-Content-SHA256" gzip.simpleHeaders `shouldBe` Just (TE.encodeUtf8 content.contentSha256)
+  (LBS.length gzip.simpleBody,T.pack (show (hashlazy gzip.simpleBody::Digest SHA256))) `shouldBe` (archive.compressedBytes,archive.compressedSha256)
+  input<-newIORef (LBS.toChunks gzip.simpleBody)
+  cursor<-newIORef 0
+  let pull=atomicModifyIORef' input $ \case []->([],Nothing); bytes:rest->(rest,Just bytes)
+  _<-C.verify content.contentBytes pull (\bytes -> do
+    offset<-readIORef cursor
+    bytes `shouldBe` BS.take (BS.length bytes) (BS.drop offset expected)
+    writeIORef cursor (offset+BS.length bytes)) (const (pure ()))
+  readIORef cursor `shouldReturn` BS.length expected
+  forM_ [0,1048575,content.contentBytes-1,content.contentBytes] $ \offset -> do
+    range<-request app methodGet (selected<>"/sanitized-evidence?offset="<>B8.pack (show offset)<>"&limit=64") "" >>= decoded @Wire.SanitizedRangeResponse
+    let wanted=BS.take 64 (BS.drop (fromIntegral offset) expected)
+        end=offset+fromIntegral (BS.length wanted)
+    (range.workspaceId,range.sessionId,range.generationId,range.representation) `shouldBe` (archive.workspaceId,archive.sessionId,archive.id,"sanitized-v1")
+    (range.contentBytes,range.policySha256) `shouldBe` (T.pack (show content.contentBytes),content.policySha256)
+    (range.offset,range.nextOffset,range.hasMore,range.contentSha256) `shouldBe` (offset,end,end<content.contentBytes,content.contentSha256)
+    Wire.decodeSessionBytes range.dataBase64 `shouldBe` Right wanted
+  assertConflict methodGet (target<>"/evidence?offset=0&limit=1") "" originalUnavailable
+  op<-UUID.nextRandom
+  assertConflict methodPost (target<>"/prefix-verifications")
+    (encode (Wire.PrefixProofRequest op archive.rawBytes (archive.rawRevision-1) archive.rawSha256)) originalUnavailable
+  assertConflict methodPost (target<>"/append") (encode (Wire.AppendSessionRequest 0 0 (Wire.encodeSessionBytes firstOriginal) True)) "session_state_conflict"
+  assertConflict methodGet zipPath "" originalUnavailable
+  zipped<-request app methodGet (zipPath<>"?representation=available-v1") ""
+  W.simpleStatus zipped `shouldBe` status200
+  lookup "X-HMem-Evidence-Zip" zipped.simpleHeaders `shouldBe` Just "representations-v2"
+  assertSanitizedZip retired expected zipped.simpleBody
+
+assertSanitizedZip :: R.SanitizedManifest -> ByteString -> LBS.ByteString -> IO ()
+assertSanitizedZip retired expected bytes=do
+  LBS.length bytes `shouldSatisfy` (>=198)
+  let little at width=foldr (\n acc -> acc `shiftL` 8 .|. fromIntegral (LBS.index bytes (at+n))) (0::Word64) [0..width-1]
+      footer=LBS.length bytes-98
+      central=fromIntegral (little (footer+48) 8)
+      localName=fromIntegral (little 26 2)
+      localExtra=30+localName
+      start=localExtra+fromIntegral (little 28 2)
+      descriptor=central-24
+      localPath=LBS.toStrict (LBS.take localName (LBS.drop 30 bytes))
+      receipt=BS.pack [0x4d,0x48,102,0,2,1]<>uuid retired.archive.id<>TE.encodeUtf8 retired.content.contentSha256
+      receiptBytes=fromIntegral (BS.length receipt)
+      boundReceipt at=LBS.toStrict (LBS.take (fromIntegral (BS.length receipt)) (LBS.drop at bytes))
+  (little 0 4,little footer 4,little (footer+32) 8) `shouldBe` (0x04034b50,0x06064b50,1)
+  central `shouldSatisfy` (\offset -> start<=descriptor && offset<=footer-46)
+  let centralName=fromIntegral (little (central+28) 2)
+      centralExtra=central+46+centralName
+      centralPath=LBS.toStrict (LBS.take centralName (LBS.drop (central+46) bytes))
+  (little descriptor 4,little central 4) `shouldBe` (0x08074b50,0x02014b50)
+  localPath `shouldSatisfy` BS.isSuffixOf ("-"<>uuid retired.archive.sessionId<>"-sanitized.jsonl")
+  centralPath `shouldBe` localPath
+  (little 28 2,little (central+30) 2) `shouldBe` (20+receiptBytes,28+receiptBytes)
+  (little (localExtra+4) 8,little (centralExtra+4) 8,little (descriptor+16) 8) `shouldBe` tripleLength
+  let zippedBytes=fromIntegral (descriptor-start)
+  (little (descriptor+8) 8,little (centralExtra+12) 8,little (centralExtra+20) 8) `shouldBe` (zippedBytes,zippedBytes,0)
+  (boundReceipt (localExtra+20),boundReceipt (centralExtra+28)) `shouldBe` (receipt,receipt)
+  Z.decompress (LBS.take (descriptor-start) (LBS.drop start bytes)) `shouldBe` LBS.fromStrict expected
+  where
+    size=fromIntegral (BS.length expected)::Word64
+    tripleLength=(size,size,size)
 
 fixture :: TestEnv -> Text -> Int -> IO (UUID,Core.AgentSession,UUID)
 fixture env recipe count=do

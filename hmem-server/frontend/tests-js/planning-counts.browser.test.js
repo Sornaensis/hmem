@@ -108,12 +108,15 @@ test('production live totals fail truthfully, retry, coalesce stale reads and re
     const old=h.gate(countRead,{hold:true}),before=h.requests.filter(countRead).length
     data.tasks.find(row=>row.id==='task-059').status='todo'
     await push(h,[event(data,'task-059','updated',2)])
-    await h.bounded(old.arrived,10000,'Held obsolete totals');await both(h,'Updating planning totals…')
+    await h.bounded(old.arrived,10000,'Held obsolete totals')
+    const pending = h.page.getByRole('status', { name: 'Updating planning totals', exact: true })
+    await pending.waitFor();await both(h,'61 open tasks')
     data.tasks=data.tasks.filter(row=>row.id!=='task-058')
     await push(h,[event(data,'task-058','deleted',3),event(data,'task-059','updated',4)])
     await h.page.waitForTimeout(100)
     assert.equal(h.requests.filter(countRead).length,before+1,'Outstanding read retains its single slot')
     old.release();await both(h,'61 open tasks');await h.idle()
+    assert.equal(await pending.count(),0,'The settled count removes its pending indicator')
     assert.equal(h.requests.filter(countRead).length,before+2,'Burst coalesces into one fresh read')
     data.tasks.push({...data.tasks[0],id:'restored',title:'Restored',project_id:null,parent_id:null})
     await push(h,[{schema_version:1,type:'resync_required'}])

@@ -24,6 +24,7 @@ import Html.Attributes exposing (..)
 import Html.Events exposing (onClick)
 import Icon
 import Permissions
+import Spinner
 import TimestampDisplay
 import Types exposing (..)
 
@@ -58,14 +59,23 @@ viewWorkspaceContent wsId model =
 
     else
         case AuditNavigation.destinationStatus model of
-            Just status ->
-                div [ class "empty-state audit-destination-status", attribute "role" "status" ] [ text status ]
+            Just AuditNavigation.DestinationPending ->
+                div [ class "audit-destination-status" ] [ Spinner.block "Loading entity destination" ]
+
+            Just AuditNavigation.DestinationUnavailable ->
+                div [ class "empty-state audit-destination-status", attribute "role" "status" ]
+                    [ text "Entity destination unavailable. It may no longer exist or be accessible." ]
 
             Nothing ->
                 case Dict.get wsId model.workspaces of
                     Nothing ->
                         div [ class "page" ]
-                            [ div [ class "loading-indicator" ] [ text "Loading..." ] ]
+                            [ if model.dataLoading.activeWorkspaceLoadToken /= Nothing || model.dataLoading.loadingWorkspaces then
+                                Spinner.block "Loading workspace"
+
+                              else
+                                div [ class "empty-state" ] [ text "Workspace unavailable." ]
+                            ]
 
                     Just ws ->
                         viewReadableWorkspacePage wsId model ws
@@ -115,13 +125,7 @@ viewReadableWorkspaceContext model ws =
             , div [ class "workspace-summary" ]
                 [ viewPlanningSummary model summaryParts
                 , if ws.workspaceType == Api.Repository then
-                    let counts = model.observations.workspaceCounts in
-                    span [ class "workspace-observation-total", attribute "aria-live" "polite" ]
-                        [ text ((if List.isEmpty summaryParts then "" else " · ") ++
-                            (if counts.current then counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " observations") |> Maybe.withDefault "Observation total unavailable"
-                             else if counts.error /= Nothing then "Observation total unavailable"
-                             else if counts.value /= Nothing then "Updating Observation total…" else "Loading Observation total…"))
-                        , if counts.error /= Nothing then button [ class "btn btn-sm", type_ "button", onClick RetryWorkspaceObservationCounts ] [ text "Retry counts" ] else text "" ]
+                    viewObservationTotal model
                   else text ""
                 , span [ class "workspace-summary-separator", attribute "aria-hidden" "true" ] [ text " · " ]
                 , button [ class "workspace-details-toggle", type_ "button", onClick ToggleWorkspaceDetails, attribute "aria-expanded" (if model.workspaceDetailsExpanded then "true" else "false"), attribute "aria-controls" "workspace-metadata" ]
@@ -178,7 +182,7 @@ viewReadableWorkspacePage wsId model ws =
                     (if model.activeTab == AdministrationTab || model.activeTab == SearchTab then
                         viewTabContent wsId model
                      else if model.dataLoading.loadingWorkspaceData then
-                        div [ class "loading-indicator" ] [ text "Loading..." ]
+                        Spinner.block "Loading workspace data"
                      else
                         viewTabContent wsId model)
 
@@ -188,35 +192,65 @@ viewReadableWorkspacePage wsId model ws =
 
 workspaceSummaryParts : PlanningCountState -> List String
 workspaceSummaryParts counts =
-    if counts.current then
+    if counts.error /= Nothing then
+        [ "Planning totals unavailable" ]
+
+    else
         case counts.value of
             Just value ->
                 [ String.fromInt value.openProjects ++ " open " ++ (if value.openProjects == 1 then "project" else "projects")
                 , String.fromInt value.openTasks ++ " open " ++ (if value.openTasks == 1 then "task" else "tasks")
                 ]
-            Nothing -> [ "Planning totals unavailable" ]
-    else if counts.error /= Nothing then
-        [ "Planning totals unavailable" ]
-    else if counts.value /= Nothing then
-        [ "Updating planning totals…" ]
-    else
-        [ "Loading planning totals…" ]
+
+            Nothing ->
+                if counts.current then [ "Planning totals unavailable" ] else []
 
 
 viewPlanningSummary : Model -> List String -> Html Msg
 viewPlanningSummary model parts =
-    span [ class "workspace-planning-total", attribute "aria-live" "polite" ]
-        [ text (String.join " · " parts)
-        , if model.dataLoading.planningCounts.error /= Nothing then
-            button [ class "btn btn-sm", type_ "button", onClick RetryWorkspacePlanningCounts ] [ text "Retry planning totals" ]
-          else text ""
+    let
+        counts = model.dataLoading.planningCounts
+    in
+    span [ class "workspace-planning-total", id "workspace-planning-total", tabindex -1, attribute "role" "group", attribute "aria-label" "Planning totals" ]
+        [ span [ attribute "aria-live" "polite" ] [ text (String.join " · " parts) ]
+        , if counts.error /= Nothing then
+            button [ class "btn btn-sm", type_ "button", Spinner.preserveFocus "workspace-planning-total", onClick RetryWorkspacePlanningCounts ] [ text "Retry planning totals" ]
+
+          else if not counts.current then
+            span [ class "workspace-total-pending" ]
+                [ Spinner.inline (if counts.value == Nothing then "Loading planning totals" else "Updating planning totals") ]
+
+          else
+            text ""
+        ]
+
+
+viewObservationTotal : Model -> Html Msg
+viewObservationTotal model =
+    let
+        counts = model.observations.workspaceCounts
+        label = counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " observations")
+    in
+    span [ class "workspace-observation-total", id "workspace-observation-total", tabindex -1, attribute "role" "group", attribute "aria-label" "Observation total" ]
+        [ text " · "
+        , span [ attribute "aria-live" "polite" ]
+            [ text (if counts.error /= Nothing || counts.current then Maybe.withDefault "Observation total unavailable" (if counts.error /= Nothing then Nothing else label) else Maybe.withDefault "" label) ]
+        , if counts.error /= Nothing then
+            button [ class "btn btn-sm", type_ "button", Spinner.preserveFocus "workspace-observation-total", onClick RetryWorkspaceObservationCounts ] [ text "Retry counts" ]
+
+          else if not counts.current then
+            span [ class "workspace-total-pending" ]
+                [ Spinner.inline (if counts.value == Nothing then "Loading Observation total" else "Updating Observation total") ]
+
+          else
+            text ""
         ]
 
 
 viewUnauthorizedWorkspace : Model -> Html Msg
 viewUnauthorizedWorkspace model =
     if model.sessionContext == Nothing then
-        div [ class "empty-state" ] [ text "Loading workspace permissions..." ]
+        Spinner.block "Loading workspace permissions"
 
     else
         div [ class "empty-state" ]
@@ -367,4 +401,4 @@ viewTabContent wsId model =
                     Feature.WorkspaceAdmin.viewWorkspaceAdminPanel workspace model
 
                 Nothing ->
-                    div [ class "loading-indicator" ] [ text "Loading workspace administration..." ]
+                    Spinner.block "Loading workspace administration"

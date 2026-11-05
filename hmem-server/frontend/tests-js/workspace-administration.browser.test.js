@@ -86,7 +86,8 @@ test('production dedicated Administration routes and responsive native controls 
     await h.start()
     assert.equal(await h.page.locator('.workspace-administration,.permission-summary,.workspace-memberships').count(), 0)
     assert.equal(h.adminRequests.length, 0)
-    assert.deepEqual(await h.page.locator('.workspace-tabs button').allTextContents(), ['Projects', 'Sessions', 'Observations', 'Timeline', 'Audit', 'Administration'])
+    const tabNames = ['Projects', 'Sessions', 'Observations', 'Timeline', 'Search', 'Audit', 'Administration']
+    assert.deepEqual(await h.page.locator('.workspace-tabs button').evaluateAll(buttons => buttons.map(button => button.getAttribute('aria-label'))), tabNames)
     for (const width of [1440, 320]) {
       await h.page.setViewportSize({ width, height: 900 }); await paint(h.page)
       await capture(h, width === 1440 ? 'workspace-observations-desktop' : 'workspace-observations-narrow')
@@ -105,7 +106,7 @@ test('production dedicated Administration routes and responsive native controls 
     }
     await h.page.addStyleTag({ content: 'html { font-size: 32px !important; }' }); await paint(h.page)
     await h.page.getByRole('button', { name: 'Projects', exact: true }).focus()
-    for (let i = 0; i < 5; i++) await h.page.keyboard.press('Tab')
+    for (let i = 1; i < tabNames.length; i++) await h.page.keyboard.press('Tab')
     assert.equal(await h.page.evaluate(() => document.activeElement.textContent), 'Administration')
     await h.page.keyboard.press('Enter'); await h.quiet()
     assert.ok(await h.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
@@ -157,14 +158,17 @@ test('production membership list Retry, failed writes, duplicate prevention and 
     assert.match(await h.page.locator('.workspace-memberships .form-error').innerText(), /Could not save membership/)
     assert.equal(h.sessionReads, sessions)
     const recheck = h.hold('SESSION')
-    await h.page.locator('#workspace-membership-submit').click(); await recheck.arrived
-    await h.page.waitForFunction(() => document.getElementById('workspace-membership-submit')?.textContent === 'Checking access...', null, { timeout: 5000 })
+    await h.page.getByLabel('User UUID', { exact: true }).focus()
+    await h.page.keyboard.press('Enter'); await recheck.arrived
+    await h.page.locator('.workspace-memberships').getByRole('status', { name: 'Checking current workspace access', exact: true }).waitFor()
     assert.equal(await h.page.locator('#workspace-membership-submit').isDisabled(), true)
-    assert.match(await h.page.locator('.workspace-memberships').innerText(), /Checking current workspace access/)
+    assert.equal(await h.page.getByRole('button', { name: 'Grant / update', exact: true }).isDisabled(), true)
+    await h.page.waitForFunction(() => document.activeElement.id === 'workspace-memberships-heading')
     const writeCount = h.adminRequests.filter(r => r.method === 'POST').length
     await h.page.locator('.membership-form').evaluate(form => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
     assert.equal(h.adminRequests.filter(r => r.method === 'POST').length, writeCount)
     recheck.release(); await h.quiet()
+    assert.equal(await h.page.evaluate(() => document.activeElement.id), 'workspace-memberships-heading')
     assert.equal(h.sessionReads, sessions + 1)
     assert.equal(await h.page.locator('#workspace-membership-submit').isDisabled(), false)
     assert.equal(await h.page.locator('.membership-row').count(), 2)
@@ -192,7 +196,7 @@ test('production direct unavailable and implicit Admin links emit no membership 
     h.authority('owner'); await h.page.goto(h.origin + '/'); await h.quiet(); await h.start()
     const held = h.hold('GET'), entering = tab(h).click()
     await held.arrived; await entering
-    assert.match(await h.page.locator('.workspace-memberships').innerText(), /Loading memberships/)
+    await h.page.locator('.workspace-memberships').getByRole('status', { name: 'Loading memberships', exact: true }).waitFor()
     h.authority('read'); await refreshAuthority(h)
     await h.page.waitForFunction(() => !document.getElementById('workspace-membership-user'), null, { timeout: 5000 })
     assert.equal(await tab(h).count(), 0)

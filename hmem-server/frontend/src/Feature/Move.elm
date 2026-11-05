@@ -14,6 +14,7 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Permissions
 import Set exposing (Set)
+import Spinner
 import Types exposing (..)
 import Url
 
@@ -627,7 +628,7 @@ settle model pending =
             Just destination ->
                 let
                     reason = destinationReason model dialog destination
-                    checking = reason == Just "Checking search match…"
+                    checking = reason == Just checkingMatch
                         || (destination |> Maybe.andThen (\id -> Dict.get id dialog.matchErrors) |> Maybe.map (\error -> reason == Just error) |> Maybe.withDefault False)
                 in
                 if reason /= Nothing && not checking && dialog.focusComplete
@@ -650,6 +651,11 @@ settle model pending =
         , revealTarget = if reveal then target else dialog.revealTarget
         , focusTarget = if reveal then Nothing else dialog.focusTarget
     }
+
+
+checkingMatch : String
+checkingMatch =
+    "Checking search match"
 
 
 destinationReason : Model -> MoveDialog -> Maybe String -> Maybe String
@@ -684,7 +690,7 @@ destinationReason model dialog destination =
                             case Dict.get id dialog.matches of
                                 Just True -> Nothing
                                 Just False -> Just "Ancestor context: expand to find matching projects."
-                                Nothing -> Just (Dict.get id dialog.matchErrors |> Maybe.withDefault "Checking search match…")
+                                Nothing -> Just (Dict.get id dialog.matchErrors |> Maybe.withDefault checkingMatch)
                         else Nothing
 
 
@@ -773,6 +779,8 @@ view model =
                         Just project ->
                             let
                                 reason = destinationReason model dialog (Just projectId)
+                                matching = reason == Just checkingMatch
+                                settledReason = if matching then Nothing else reason
                                 moving = dialog.entityType == "project" && isWithin dialog.projects dialog.entityId projectId
                                 current = Just projectId == dialog.currentProject
                                 rowClass = "move-project-row" ++ (if moving then " move-source" else "") ++ (if current then " move-current" else "") ++ (if destination == Just (Just projectId) then " move-selected" else "")
@@ -785,11 +793,12 @@ view model =
                                 , button [ Html.Attributes.id ("move-choice-" ++ projectId), class ("move-project-choice" ++ (if destination == Just (Just projectId) then " selected" else "")), disabled saving
                                     , attribute "aria-disabled" (if reason /= Nothing then "true" else "false")
                                     , title (Maybe.withDefault ("Select " ++ project.name) reason)
-                                    , attribute "aria-label" (project.name ++ (role projectId |> Maybe.map ((++) ", ") |> Maybe.withDefault "") ++ (reason |> Maybe.map ((++) ". ") |> Maybe.withDefault ""))
+                                    , attribute "aria-label" (project.name ++ (role projectId |> Maybe.map ((++) ", ") |> Maybe.withDefault "") ++ (settledReason |> Maybe.map ((++) ". ") |> Maybe.withDefault ""))
                                     , attribute "aria-pressed" (if destination == Just (Just projectId) then "true" else "false"), onClick (MoveSelect (Just projectId)), onFocus (MoveRowFocused projectId), custom "keydown" (keys index |> Decode.map (\( message, _ ) -> { message = message, stopPropagation = True, preventDefault = True })) ]
                                     [ span [ class "move-project-name", title project.name ] [ text project.name ]
                                     , span [ class "move-project-meta" ] [ span [ class ("entity-type-label entity-type-project" ++ (if role projectId /= Nothing then " move-role" else "")) ] [ text ("PRJ" ++ (role projectId |> Maybe.map ((++) " · ") |> Maybe.withDefault "")) ] ] ]
-                                , if Dict.member projectId dialog.matchErrors then button [ class "btn", disabled saving, onClick (MoveRetry ("@match:" ++ projectId)), title "Retry search match", attribute "aria-label" ("Retry search match for " ++ project.name) ] [ text "Retry" ] else text ""
+                                , if matching then Spinner.inline (checkingMatch ++ " for " ++ project.name)
+                                  else if Dict.member projectId dialog.matchErrors then button [ class "btn", disabled saving, Spinner.preserveFocus "move-tree", onClick (MoveRetry ("@match:" ++ projectId)), title "Retry search match", attribute "aria-label" ("Retry search match for " ++ project.name) ] [ text "Retry" ] else text ""
                                     ]
                                 ]
                 pieces =
@@ -806,9 +815,9 @@ view model =
                     if not (effectiveBranch dialog key) then text ""
                     else case branch.error of
                         Just message -> div [ class "move-load-error", attribute "role" "status" ]
-                            [ text (name ++ ": " ++ message), button [ disabled saving, onClick (MoveRetry key) ] [ text ("Retry " ++ name) ] ]
+                            [ text (name ++ ": " ++ message), button [ disabled saving, Spinner.preserveFocus "move-tree", onClick (MoveRetry key) ] [ text ("Retry " ++ name) ] ]
                         Nothing ->
-                            if not branch.complete then div [ class "move-loading", attribute "role" "status" ] [ text ("Loading " ++ name ++ "…") ]
+                            if not branch.complete && not (Set.isEmpty dialog.statuses) then div [ class "move-loading" ] [ Spinner.inline ("Loading " ++ name) ]
                             else text ""
                 keyDecoder =
                     Decode.map2 (\key tag ->
@@ -851,15 +860,24 @@ view model =
                     )
                 , div [] (List.map branchNotice (Dict.toList dialog.branches))
                 , if dialog.focusComplete then text "" else
-                    div [ class "move-loading", attribute "role" "status" ]
-                        [ text (Maybe.withDefault "Loading current location…" dialog.focusError)
-                        , if dialog.focusError /= Nothing then button [ disabled saving, onClick (MoveRetry "@focus") ] [ text "Retry current location" ] else text ""
-                        ]
-                , dialog.selectionValidation |> Maybe.andThen .error |> Maybe.map (\message -> div [ class "move-load-error", attribute "role" "status" ] [ text message, button [ disabled saving, onClick (MoveRetry "@selection") ] [ text "Retry destination" ] ]) |> Maybe.withDefault (text "")
+                    case dialog.focusError of
+                        Just message ->
+                            div [ class "move-load-error", attribute "role" "status" ]
+                                [ text message, button [ disabled saving, Spinner.preserveFocus "move-tree", onClick (MoveRetry "@focus") ] [ text "Retry current location" ] ]
+                        Nothing -> div [ class "move-loading" ] [ Spinner.inline "Loading current location" ]
+                , case dialog.selectionValidation of
+                    Just validation ->
+                        case validation.error of
+                            Just message ->
+                                div [ class "move-load-error", attribute "role" "status" ]
+                                    [ text message, button [ disabled saving, Spinner.preserveFocus "move-tree", onClick (MoveRetry "@selection") ] [ text "Retry destination" ] ]
+                            Nothing -> if validation.complete then text "" else div [ class "move-loading" ] [ Spinner.inline "Checking selected destination" ]
+                    Nothing -> text ""
                 , dialog.error |> Maybe.map (\message -> div [ class "move-load-error", attribute "role" "alert" ] [ text message ]) |> Maybe.withDefault (text "")
                 , div [ class "modal-actions" ]
                     [ button [ class "btn", onClick CloseMove ] [ text "Cancel" ]
-                    , button [ class "btn btn-primary", disabled (saving || not valid || not dialog.focusComplete || not (selectionReady dialog) || dialog.revalidating), onClick MoveConfirm ] [ text (if saving then "Moving…" else "Confirm") ]
+                    , if saving then Spinner.inline "Moving item" else text ""
+                    , button [ class "btn btn-primary", disabled (saving || not valid || not dialog.focusComplete || not (selectionReady dialog) || dialog.revalidating), Spinner.preserveFocus "move-tree", onClick MoveConfirm ] [ text "Confirm" ]
                     ]
                 ]
 

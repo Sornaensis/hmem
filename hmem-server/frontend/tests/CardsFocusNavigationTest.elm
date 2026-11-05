@@ -346,7 +346,7 @@ suite =
                         DataLoading.update (RetryCardDetail "project" summary.id) failed |> Tuple.first
                 in
                 Expect.all
-                    [ \_ -> pendingView |> Query.has [ Selector.text "Loading description…" ]
+                    [ \_ -> pendingView |> Query.has [ Selector.attribute (Html.Attributes.attribute "role" "status"), Selector.attribute (Html.Attributes.attribute "aria-label" "Loading description") ]
                     , \_ -> pendingView |> Query.findAll [ Selector.text "Click to add description..." ] |> Query.count (Expect.equal 0)
                     , \_ -> failedView |> Query.has [ Selector.text "Description unavailable.", Selector.text "Retry" ]
                     , \_ ->

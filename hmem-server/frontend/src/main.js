@@ -20,6 +20,32 @@ import { installDocumentTransfer } from './document-transfer.js'
 installNativeDialog({ document, id: 'audit-diff-dialog' })
 installNativeDialog({ document, id: 'task-document-dialog' })
 
+// A pending transition can remove or disable the control that started it.
+// Leave focus alone when a control survives or the user has moved elsewhere.
+function retainPendingFocus(control, anchorId) {
+  const anchor = document.getElementById(anchorId)
+  if (!anchor) return
+
+  const restore = () => {
+    const active = document.activeElement
+    if (anchor.isConnected && (!control.isConnected || control.disabled) && (active === document.body || active === control)) {
+      anchor.focus({ preventScroll: true })
+    }
+  }
+  // Marked clicks are captured before Elm's handler, including inside modals.
+  requestAnimationFrame(() => requestAnimationFrame(restore))
+}
+
+document.addEventListener('click', event => {
+  const control = event.target.closest?.('button[data-pending-focus]')
+  if (control && control === document.activeElement) retainPendingFocus(control, control.dataset.pendingFocus)
+}, true)
+
+document.addEventListener('submit', event => {
+  const form = event.target, active = document.activeElement
+  if (form.matches?.('form[data-pending-focus]') && form.contains(active)) retainPendingFocus(active, form.dataset.pendingFocus)
+})
+
 // Native modal semantics contain keyboard focus and make the background inert.
 // Elm owns lifetime and actions; this bridge only manages native DOM focus.
 let activeMoveDialog = null

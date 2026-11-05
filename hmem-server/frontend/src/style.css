@@ -783,6 +783,35 @@ a:hover {
   text-align: center;
   color: var(--text-muted);
   font-size: 0.875rem;
+  --app-spinner-size: 1.5rem;
+}
+
+.app-spinner {
+  display: inline-block;
+  inline-size: var(--app-spinner-size, 1rem);
+  block-size: var(--app-spinner-size, 1rem);
+  vertical-align: middle;
+  flex: none;
+}
+
+.app-spinner::before {
+  content: "";
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  box-sizing: border-box;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent-hover);
+  border-radius: 50%;
+  animation: app-spinner-turn 750ms linear infinite;
+}
+
+@keyframes app-spinner-turn {
+  to { transform: rotate(1turn); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-spinner::before { animation: none; }
 }
 
 /* Page header with create button */
@@ -5883,6 +5912,7 @@ textarea.observation-edit-content {
 .workspace-details-toggle .hm-icon { width: 12px; height: 12px; }
 .workspace-metadata[hidden] { display: none !important; }
 .workspace-summary-separator { opacity: .45; }
+.workspace-total-pending:not(:first-child) { margin-inline-start: 0.25em; }
 .hierarchy-content-section { width: 100%; }
 .hierarchy-content-section > .project-filter-panel { width: 100%; max-width: 78rem; }
 .hierarchy-action-pair { display: inline-flex; }

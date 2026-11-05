@@ -1,4 +1,4 @@
-module AuditNavigation exposing (destinationStatus, destinationType, destinationUrl, related, resolve, snapshotId, validId)
+module AuditNavigation exposing (DestinationStatus(..), destinationStatus, destinationType, destinationUrl, related, resolve, snapshotId, validId)
 
 import Api
 import Dict
@@ -8,18 +8,23 @@ import Types exposing (..)
 import Url
 
 
-destinationStatus : Model -> Maybe String
+type DestinationStatus
+    = DestinationPending
+    | DestinationUnavailable
+
+
+destinationStatus : Model -> Maybe DestinationStatus
 destinationStatus model =
     model.focus.returnContext |> Maybe.andThen (\context ->
         if context.source /= ReturnFromTimeline && List.member context.entityType [ "project", "task" ] then
             case Dict.get (context.entityType ++ ":" ++ context.entityId) model.dataLoading.navigationFocuses of
                 Just request ->
-                    if request.inFlight then Just "Loading entity destination..."
-                    else if not request.succeeded then Just "Entity destination unavailable. It may no longer exist or be accessible."
+                    if request.inFlight then Just DestinationPending
+                    else if not request.succeeded then Just DestinationUnavailable
                     else Nothing
-                Nothing -> Just "Loading entity destination..."
+                Nothing -> Just DestinationPending
         else if context.source /= ReturnFromTimeline && context.entityType == "observation" && model.observations.detailError /= Nothing then
-            Just "Entity destination unavailable. It may no longer exist or be accessible."
+            Just DestinationUnavailable
         else Nothing)
 
 

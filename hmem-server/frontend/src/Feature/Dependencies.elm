@@ -22,6 +22,7 @@ import Html.Events exposing (..)
 import Http
 import Json.Decode as Decode
 import Permissions
+import Spinner
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -596,6 +597,18 @@ viewTaskDependencies model taskId deps =
         closedDeps =
             List.filter (\dep -> not (isOpenTaskCardStatus dep.status)) deps
 
+        loading =
+            Dict.get taskId model.dependencies.taskDependencyLoading |> Maybe.withDefault False
+
+        hasMore =
+            Dict.get taskId model.dependencies.taskDependencyHasMore |> Maybe.withDefault False
+
+        error =
+            Dict.get taskId model.dependencies.taskDependencyErrors
+
+        headingId =
+            "dependencies-heading-" ++ taskId
+
         selectorOpen =
             case model.dependencies.addingDependencyFor of
                 Just st ->
@@ -606,10 +619,12 @@ viewTaskDependencies model taskId deps =
     in
     div [ class "task-dependencies-section" ]
         [ div [ class "task-dependencies-header" ]
-            [ span [ class "task-dependencies-title" ] [ text ("Dependencies (" ++ String.fromInt (List.length deps) ++ ")") ]
+            [ span [ class "task-dependencies-title", id headingId, tabindex -1 ]
+                [ text (if List.isEmpty deps && (loading || error /= Nothing) then "Dependencies" else "Dependencies (" ++ String.fromInt (List.length deps) ++ ")") ]
             ]
         , if List.isEmpty openDeps then
-            div [ class "task-dependencies-empty" ] [ text "No open dependencies" ]
+            if loading || error /= Nothing then text ""
+            else div [ class "task-dependencies-empty" ] [ text "No open dependencies" ]
 
           else
             div [ class "task-dependencies-list" ]
@@ -618,34 +633,28 @@ viewTaskDependencies model taskId deps =
             text ""
           else
             details [ class "task-closed-dependencies card-disclosure" ]
-                [ summary [] [ text (String.fromInt (List.length closedDeps) ++ (if List.length closedDeps == 1 then " closed dependency" else " closed dependencies") ++ (if Dict.get taskId model.dependencies.taskDependencyHasMore == Just True || Dict.get taskId model.dependencies.taskDependencyLoading == Just True then " (loaded so far)" else if Dict.member taskId model.dependencies.taskDependencyErrors then " (refresh incomplete)" else "")) ]
+                [ summary [] [ text (String.fromInt (List.length closedDeps) ++ (if List.length closedDeps == 1 then " closed dependency" else " closed dependencies") ++ (if hasMore || loading then " (loaded so far)" else if error /= Nothing then " (refresh incomplete)" else "")) ]
                 , div [ class "task-dependencies-list" ] (List.map (viewDependencyItem model taskId) closedDeps)
                 ]
-        , if Dict.get taskId model.dependencies.taskDependencyLoading |> Maybe.withDefault False then
-            div [ attribute "role" "status" ] [ text "Loading dependencies…" ]
+        , if loading then
+            div [] [ Spinner.inline "Loading dependencies" ]
           else
             text ""
-        , if Dict.get taskId model.dependencies.taskDependencyHasMore |> Maybe.withDefault False then
+        , if hasMore then
             button
                 [ class "btn-small btn-ghost"
-                , disabled (Dict.get taskId model.dependencies.taskDependencyLoading |> Maybe.withDefault False)
+                , disabled loading
+                , Spinner.preserveFocus headingId
                 , onClick (LoadTaskDependencyPage taskId)
                 ]
-                [ text
-                    (if Dict.get taskId model.dependencies.taskDependencyLoading |> Maybe.withDefault False then
-                        "Loading dependencies…"
-
-                     else
-                        "Load more dependencies"
-                    )
-                ]
+                [ text "Load more dependencies" ]
 
           else
             text ""
-        , case Dict.get taskId model.dependencies.taskDependencyErrors of
+        , case error of
             Just message ->
                 div [ attribute "role" "status" ]
-                    [ text message, button [ onClick (RefreshTaskDependencies taskId) ] [ text "Retry" ] ]
+                    [ text message, button [ Spinner.preserveFocus headingId, onClick (RefreshTaskDependencies taskId) ] [ text "Retry" ] ]
             Nothing ->
                 text ""
         , if Permissions.canEditCurrentWorkspace model then

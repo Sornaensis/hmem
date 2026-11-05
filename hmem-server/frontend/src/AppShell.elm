@@ -40,6 +40,7 @@ import Page.Home
 import Page.Workspace
 import Permissions
 import Ports exposing (authSessionError, authTokenChanged, authUnauthorized, clearChangeStreamScope, disconnectChangeStreamScope, disconnectWebSocket, localStorageReceived, loginAuth, logoutAuth, onMainContentScroll)
+import Spinner
 import Toast
 import TimestampDisplay
 import Types exposing (..)
@@ -1136,15 +1137,13 @@ viewAuthBootstrapPage model =
     let
         loadingText =
             if Permissions.isLocalMode model then
-                "Starting configured local session..."
+                "Starting configured local session"
 
             else
-                "Checking " ++ Permissions.authModeLabel model ++ " auth session..."
+                "Checking " ++ Permissions.authModeLabel model ++ " auth session"
     in
     div [ class "page auth-page" ]
-        [ h2 [] [ text "Loading session" ]
-        , div [ class "loading-indicator" ] [ text loadingText ]
-        ]
+        [ Spinner.block loadingText ]
 
 
 viewAuthRequiredPage : Model -> Html Msg

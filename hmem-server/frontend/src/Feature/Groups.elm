@@ -13,6 +13,7 @@ import Set
 import Ports
 import Json.Encode
 import Permissions
+import Spinner
 import Toast exposing (addToast)
 import Types exposing (..)
 
@@ -270,13 +271,22 @@ viewWorkspaceRail model =
 
         groups =
             model.groups.workspaceGroups |> Dict.values |> List.sortBy .name
+
+        cataloguePending =
+            model.dataLoading.loadingWorkspaces && List.isEmpty groups && List.isEmpty allWs
+
+        pageShowsCataloguePending =
+            case model.page of
+                HomePage -> True
+                WorkspacePage workspaceId -> not (Dict.member workspaceId model.workspaces)
+                _ -> False
     in
     nav [ class "sidebar" ]
         [ a [ class "sidebar-workspaces-header", href "/" ] [ span [ class "workspace-heading-icon" ] [ Icon.view "panels-top-left" ], text "Workspaces" ]
-        , if model.dataLoading.loadingWorkspaces then
+        , if cataloguePending && not pageShowsCataloguePending then
             div [ class "sidebar-section" ]
                 [ div [ class "sidebar-section-title" ] [ text "Unassigned" ]
-                , div [ class "sidebar-loading" ] [ text "Loading..." ]
+                , div [ class "sidebar-loading" ] [ Spinner.inline "Loading workspaces" ]
                 ]
 
           else if not (List.isEmpty groups) then
@@ -285,7 +295,7 @@ viewWorkspaceRail model =
 
           else
             text ""
-        , if model.dataLoading.loadingWorkspaces then
+        , if cataloguePending then
             text ""
 
           else if not (List.isEmpty ungroupedWs) then
@@ -469,8 +479,8 @@ viewHomePage model =
                 ]
             ]
         , viewLocalModeNotice model
-        , if model.dataLoading.loadingWorkspaces then
-            div [ class "loading-indicator" ] [ text "Loading workspaces..." ]
+        , if model.dataLoading.loadingWorkspaces && List.isEmpty groups && List.isEmpty ungroupedWs then
+            Spinner.block "Loading workspaces"
 
           else
             if List.isEmpty groups && List.isEmpty ungroupedWs then

@@ -297,7 +297,7 @@ suite =
                         List.map transitions (List.drop 1 cases) |> Expect.equal (List.repeat 6 ( True, False, False ))
                     ]
                     ()
-        , test "empty root completion removes cached feedback rows and their geometry without membership changes" <|
+        , test "empty root completion removes the shared feedback row and its geometry without membership changes" <|
             \_ ->
                 let
                     loading = lifecycleModel.dataLoading
@@ -305,7 +305,7 @@ suite =
                         { workspaceId = "workspace-a", readRevision = 0, sessionEpoch = 0, generation = 0, filterFingerprint = ""
                         , projectOffset = 0, taskOffset = 0, inFlight = True, succeeded = False
                         , projectHasMore = True, taskHasMore = True, projectCardCount = 0, taskCardCount = 0
-                        , projectRequestPending = False, taskRequestPending = False
+                        , projectRequestPending = True, taskRequestPending = True
                         }
                     empty = { lifecycleModel | projects = Dict.empty, tasks = Dict.empty, dataLoading = { loading | rootNavigationRequest = Just request } }
                     waiting = Feature.Cards.refreshViewport empty ( empty, Cmd.none ) |> Tuple.first
@@ -313,12 +313,46 @@ suite =
                     completed = { waiting | dataLoading = { completedLoading | rootNavigationRequest = Just { request | inFlight = False, succeeded = True, projectHasMore = False, taskHasMore = False } } }
                     finished = Feature.Cards.refreshViewport waiting ( completed, Cmd.none ) |> Tuple.first
                 in
-                Expect.equal [ True, True, True, True ]
+                Expect.equal [ True, False, True, True ]
                     [ Dict.member "root-status:project" waiting.cards.viewport.rows
                     , Dict.member "root-status:task" waiting.cards.viewport.rows
                     , Dict.isEmpty finished.cards.viewport.rows
                     , Dict.isEmpty finished.cards.viewport.index.positions
                     ]
+        , test "root feedback distinguishes an incomplete stream from a healthy continuation and an admitted retry" <|
+            \_ ->
+                let
+                    loading = lifecycleModel.dataLoading
+                    request =
+                        { workspaceId = "workspace-a", readRevision = 0, sessionEpoch = 0, generation = 0, filterFingerprint = ""
+                        , projectOffset = 0, taskOffset = 0, inFlight = False, succeeded = False
+                        , projectHasMore = True, taskHasMore = True, projectCardCount = 0, taskCardCount = 0
+                        , projectRequestPending = False, taskRequestPending = False
+                        }
+                    failed =
+                        { refreshing = True, rootDemand = Just ( 50, 50 ), projects = Dict.empty, tasks = Dict.empty
+                        , projectError = Just "Project roots are incomplete", taskError = Nothing
+                        }
+                    render current progress =
+                        let
+                            staged = { lifecycleModel | projects = Dict.empty, tasks = Dict.empty, dataLoading = { loading | rootNavigationRequest = Just current, navigationPasses = Dict.singleton "workspace_root:root" progress } }
+                        in
+                        Feature.Cards.refreshViewport staged ( staged, Cmd.none ) |> Tuple.first |> Feature.Cards.viewProjectsTree "workspace-a" |> Query.fromHtml
+                    settled = render request failed
+                    siblingPending = render { request | inFlight = True, taskRequestPending = True } failed
+                    retryPending = render { request | inFlight = True, projectRequestPending = True } failed
+                    retryProjects = [ Selector.tag "button", Selector.containing [ Selector.text "Retry loading projects" ] ]
+                    spinner = [ Selector.attribute (Attributes.attribute "role" "status"), Selector.attribute (Attributes.attribute "aria-label" "Loading Planning hierarchy") ]
+                in
+                Expect.all
+                    [ \_ -> settled |> Query.has retryProjects
+                    , \_ -> settled |> Query.has [ Selector.tag "button", Selector.containing [ Selector.text "Load more tasks" ] ]
+                    , \_ -> settled |> Query.hasNot [ Selector.text "Retry loading tasks" ]
+                    , \_ -> siblingPending |> Query.find retryProjects |> Query.has [ Selector.attribute (Attributes.disabled True) ]
+                    , \_ -> siblingPending |> Query.has spinner
+                    , \_ -> retryPending |> Query.has spinner
+                    , \_ -> retryPending |> Query.hasNot retryProjects
+                    ] ()
         , test "subtask modal denies unfinished moves to cancelled parents and actual execution stays inert" <|
             \_ ->
                 let
@@ -440,7 +474,7 @@ suite =
                 [ Page.Workspace.workspaceSummaryParts empty
                 , Page.Workspace.workspaceSummaryParts { empty | current = True, value = Just { openProjects = 1, openTasks = 60 } }
                 ]
-                    |> Expect.equal [ [ "Loading planning totals…" ], [ "1 open project", "60 open tasks" ] ]
+                    |> Expect.equal [ [], [ "1 open project", "60 open tasks" ] ]
         , test "timeline tab fragment round-trips and exposes a workspace tab label" <|
             \_ ->
                 [ (Helpers.parseFragment (Just "tab=timeline")).tab == TimelineTab
@@ -1243,7 +1277,7 @@ suite =
                 , Feature.Cards.noReadyNextTaskMessage [ waitingSubtask ] [] False
                 ]
                     |> Expect.equal
-                        [ "No ready tasks found. Checking blocked diagnostics…"
+                        [ "No ready tasks found."
                         , "No ready tasks found. Blocked candidates are listed below with their blocking rationale."
                         , "No ready tasks found. Resolve parent blockers, then any remaining subtask blockers."
                         ]

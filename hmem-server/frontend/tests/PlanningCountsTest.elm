@@ -64,7 +64,7 @@ tests =
                 failedRefresh = Main.update (GotWorkspacePlanningCounts (guard refreshing) (Err Http.NetworkError)) refreshing |> Tuple.first
             in
             Expect.equal
-                [ [ "Loading planning totals…" ], [ "Planning totals unavailable" ], [ "0 open projects", "0 open tasks" ], [ "Updating planning totals…" ], [ "Planning totals unavailable" ] ]
+                [ [], [ "Planning totals unavailable" ], [ "0 open projects", "0 open tasks" ], [ "0 open projects", "0 open tasks" ], [ "Planning totals unavailable" ] ]
                 (List.map (.dataLoading >> .planningCounts >> Workspace.workspaceSummaryParts) [ initial, failed, zero, refreshing, failedRefresh ])
         , test "retired workspace and session successes/errors release only their own physical slot" <| \_ ->
             let

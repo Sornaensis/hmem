@@ -6,6 +6,7 @@ import Dict
 import Expect
 import Feature.Cards as Cards
 import Feature.DataLoading as DataLoading
+import Html.Attributes
 import Test exposing (Test, describe, test)
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
@@ -136,7 +137,7 @@ suite =
             in
             Expect.all
                 [ \_ -> cardSummary counted.id requested |> Query.has [ Selector.text "12 tasks" ]
-                , \_ -> Cards.viewProjectsTree workspaceId requested |> Query.fromHtml |> Query.has [ Selector.text "Loading more…" ]
+                , \_ -> Cards.viewProjectsTree workspaceId requested |> Query.fromHtml |> Query.has [ Selector.attribute (Html.Attributes.attribute "role" "status"), Selector.attribute (Html.Attributes.attribute "aria-label" "Loading more hierarchy items") ]
                 ] ()
         ]
 

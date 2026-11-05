@@ -60,6 +60,7 @@ import Json.Encode as Encode
 import Json.Decode as Decode
 import Ports exposing (copyToClipboard)
 import Set
+import Spinner
 import Toast exposing (addToast)
 import TimestampDisplay
 import Types exposing (..)
@@ -1408,7 +1409,7 @@ viewCardDescription model entityType entityId description =
         pending =
             case retained of
                 Just previous -> readOnly previous
-                Nothing -> div [ class "card-description-state", attribute "role" "status" ] [ text "Loading description…" ]
+                Nothing -> div [ class "card-description-state" ] [ Spinner.inline "Loading description" ]
     in
     if Helpers.editingValue model entityId "description" /= Nothing then
         Feature.Editing.viewEditableTextarea model entityType entityId "description" (Maybe.withDefault "" description)
@@ -1428,7 +1429,7 @@ viewCardDescription model entityType entityId description =
                 else
                     div [ class "card-description-state card-description-error" ]
                         [ span [] [ text "Description unavailable." ]
-                        , button [ class "btn-small btn-ghost", onClick (RetryCardDetail entityType entityId) ] [ text "Retry" ]
+                        , button [ class "btn-small btn-ghost", Spinner.preserveFocus (CardSections.detailsId entityType entityId ++ "-toggle"), onClick (RetryCardDetail entityType entityId) ] [ text "Retry" ]
                         ]
 
             Nothing ->
@@ -1437,7 +1438,7 @@ viewCardDescription model entityType entityId description =
                     Nothing ->
                         div [ class "card-description-state card-description-error" ]
                             [ span [] [ text "Description not loaded." ]
-                            , button [ class "btn-small btn-ghost", onClick (RetryCardDetail entityType entityId) ] [ text "Retry" ]
+                            , button [ class "btn-small btn-ghost", Spinner.preserveFocus (CardSections.detailsId entityType entityId ++ "-toggle"), onClick (RetryCardDetail entityType entityId) ] [ text "Retry" ]
                             ]
 
 
@@ -1469,8 +1470,21 @@ refreshingKnownEligibility model task =
 
 viewProjectsTree : String -> Model -> Html Msg
 viewProjectsTree wsId model =
+    let
+        focusPending =
+            model.dataLoading.activeNavigationFocus
+                |> Maybe.map (\request ->
+                    request.inFlight && request.workspaceId == wsId && request.sessionEpoch == model.sessionRequestEpoch
+                        && model.focus.focusedEntity == Just ( request.entityType, request.entityId )
+                        && (if request.entityType == "project" then not (Dict.member request.entityId model.projects) else not (Dict.member request.entityId model.tasks)))
+                |> Maybe.withDefault False
+    in
     div [class "workspace-tree-layout"]
-        [ div [class "workspace-tree-content"] [viewHierarchyViewport wsId model] ]
+        [ div [class "workspace-tree-content"]
+            [ if focusPending then Spinner.block "Loading focused item" else text ""
+            , viewHierarchyViewport wsId model
+            ]
+        ]
 
 
 viewProjectsTreeLegacy : String -> Model -> Html Msg
@@ -1955,20 +1969,24 @@ viewProjectNextTasksPanel projection model project =
         blockedDiagnosticViews =
             blockedDiagnostics
                 |> List.map (viewNextTaskCandidate model)
+
+        headingId =
+            "next-tasks-heading-" ++ project.id
     in
     div [ class "project-next-tasks-section" ]
         [ div [ class "project-next-tasks-header" ]
             [ div []
-                [ div [ class "project-next-tasks-title" ] [ text "Next tasks" ]
+                [ div [ class "project-next-tasks-title", id headingId, tabindex -1 ] [ text "Next tasks" ]
                 , div [ class "project-next-tasks-subtitle" ]
                     [ text "Project priority first, then task priority; blocked diagnostics are separated below." ]
                 ]
             , button
                 [ class "btn-inline-create"
                 , disabled loading
+                , Spinner.preserveFocus headingId
                 , onClick (RefreshProjectNextTasks project.id)
                 ]
-                [ text (if loading then "Loading…" else "Refresh") ]
+                [ text "Refresh" ]
             ]
         , case errorMessage of
             Just message ->
@@ -1982,17 +2000,13 @@ viewProjectNextTasksPanel projection model project =
 
             Nothing ->
                 text ""
+        , if loading then
+            div [ class "project-next-tasks-empty" ] [ Spinner.inline "Loading next tasks" ]
+          else text ""
         , case candidates of
             Nothing ->
-                div [ class "project-next-tasks-empty" ]
-                    [ text
-                        (if loading then
-                            "Loading next tasks…"
-
-                         else
-                            "Expand or refresh to load next tasks."
-                        )
-                    ]
+                if loading then text ""
+                else div [ class "project-next-tasks-empty" ] [ text "Expand or refresh to load next tasks." ]
 
             Just [] ->
                 div [ class "project-next-tasks-empty" ]
@@ -2001,12 +2015,12 @@ viewProjectNextTasksPanel projection model project =
             Just _ ->
                 div [ class "project-next-tasks-list" ] candidateViews
         , if diagnosticsLoading then
-            div [ class "project-next-tasks-empty", attribute "role" "status" ] [ text "Loading blocked tasks/subtasks…" ]
+            div [ class "project-next-tasks-empty" ] [ Spinner.inline "Loading blocked tasks and subtasks" ]
           else
             text ""
         , if not (List.isEmpty blockedDiagnostics) then
             details [ class "project-next-tasks-diagnostics card-disclosure" ]
-                [ summary [ class "project-next-tasks-diagnostics-title" ] [ text (countPhrase (List.length blockedDiagnostics) "blocked task/subtask" "blocked tasks/subtasks" ++ (if diagnosticsLoading then " (refreshing…)" else if diagnosticsErrorMessage /= Nothing then " (refresh incomplete)" else "")) ]
+                [ summary [ class "project-next-tasks-diagnostics-title" ] [ text (countPhrase (List.length blockedDiagnostics) "blocked task/subtask" "blocked tasks/subtasks" ++ (if diagnosticsErrorMessage /= Nothing then " (refresh incomplete)" else "")) ]
                 , div [ class "project-next-tasks-list" ] blockedDiagnosticViews
                 ]
 
@@ -2210,7 +2224,7 @@ viewWaitingSubtasksNote waitingSubtasks =
 noReadyNextTaskMessage : List Api.Task -> List Api.NextTaskCandidate -> Bool -> String
 noReadyNextTaskMessage waitingSubtasks blockedDiagnostics diagnosticsLoading =
     if diagnosticsLoading then
-        "No ready tasks found. Checking blocked diagnostics…"
+        "No ready tasks found."
 
     else if not (List.isEmpty blockedDiagnostics) then
         "No ready tasks found. Blocked candidates are listed below with their blocking rationale."
@@ -2602,17 +2616,7 @@ viewBranchLoadMore model parentKind parentId entityKind identify pinned cachedVa
                 , disabled loading
                 , onClick (LoadNavigationBranchPage parentKind parentId entityKind)
                 ]
-                [ text
-                    (if loading then
-                        "Loading more…"
-
-                     else if entityKind == "project" then
-                        "Load more projects"
-
-                     else
-                        "Load more tasks"
-                    )
-                ]
+                [ text ("Load more " ++ entityKind ++ "s") ]
                   )
                 ]
 
@@ -2836,14 +2840,7 @@ viewRootLoadMore model entityKind identify pinned cachedValues =
                 , disabled loading
                 , onClick (LoadRootNavigationPage entityKind)
                 ]
-                [ text
-                    (if loading then
-                        "Loading..."
-
-                     else
-                        "Load more " ++ entityKind ++ "s"
-                    )
-                ]
+                [ text ("Load more " ++ entityKind ++ "s") ]
                   )
                 ]
 
@@ -3857,7 +3854,7 @@ viewHierarchyViewport ws incoming =
     in
     div [ class "tree-view" ]
         [ text ""
-        , Keyed.node "div" [ class "hierarchy-viewport", id "hierarchy-viewport", attribute "data-hierarchy-context" config
+        , Keyed.node "div" [ class "hierarchy-viewport", id "hierarchy-viewport", tabindex -1, attribute "role" "region", attribute "aria-label" "Planning hierarchy", attribute "data-hierarchy-context" config
             , style "min-height" (String.fromFloat (if pendingFilterMembership then viewport.filterExtent else 0) ++ "px")
             ]
             [ segment "before" segments.before, segment "editor" segments.pivot, segment "after" segments.after ]
@@ -3902,8 +3899,48 @@ feedbackRowsChanged previous model =
 rootStatusVisible : Model -> String -> Bool
 rootStatusVisible model kind =
     model.dataLoading.rootNavigationRequest
-        |> Maybe.map (\request -> request.inFlight || not request.succeeded || (if kind == "project" then request.projectHasMore else request.taskHasMore))
+        |> Maybe.map (\request ->
+            if request.inFlight then
+                kind == rootPendingKind model request || rootStreamNeedsRetry model kind request
+            else
+                rootStreamNeedsRetry model kind request || rootStreamCanLoadMore model kind request)
         |> Maybe.withDefault False
+
+
+rootPendingKind : Model -> NavigationBranchState -> String
+rootPendingKind model request =
+    case model.search.filterShowOnly of
+        ShowTasksOnly -> "task"
+        ShowProjectsOnly -> "project"
+        _ -> if request.projectRequestPending || not request.taskRequestPending then "project" else "task"
+
+
+rootStreamPending : String -> NavigationBranchState -> Bool
+rootStreamPending kind request =
+    if kind == "project" then request.projectRequestPending else request.taskRequestPending
+
+
+rootStreamCanLoadMore : Model -> String -> NavigationBranchState -> Bool
+rootStreamCanLoadMore model kind request =
+    let
+        hasMore = if kind == "project" then request.projectHasMore else request.taskHasMore
+        stagedRefresh = Dict.get "workspace_root:root" model.dataLoading.navigationPasses |> Maybe.map .refreshing |> Maybe.withDefault False
+    in
+    not request.inFlight && hasMore && (request.succeeded || stagedRefresh && not (rootStreamNeedsRetry model kind request))
+
+
+rootStreamError : Model -> String -> Maybe String
+rootStreamError model kind =
+    Dict.get "workspace_root:root" model.dataLoading.navigationPasses
+        |> Maybe.andThen (if kind == "project" then .projectError else .taskError)
+
+
+rootStreamNeedsRetry : Model -> String -> NavigationBranchState -> Bool
+rootStreamNeedsRetry model kind request =
+    if request.inFlight then
+        not (rootStreamPending kind request) && rootStreamError model kind /= Nothing
+    else
+        rootStreamError model kind /= Nothing || (not request.succeeded && rootStreamPending kind request)
 
 
 branchStatusVisible : Model -> String -> String -> Bool
@@ -3924,12 +3961,15 @@ viewViewportRootStatus : Model -> String -> Html Msg
 viewViewportRootStatus model kind =
     case ( rootStatusVisible model kind, model.dataLoading.rootNavigationRequest ) of
         ( True, Just request ) ->
-            let
-                more = if kind == "project" then request.projectHasMore else request.taskHasMore
-            in
-            if request.inFlight then div [ attribute "role" "status" ] [ text "Loading…" ]
-            else if more || not request.succeeded then
-                button [ class "navigation-load-more", onClick (LoadRootNavigationPage kind) ] [ text (if request.succeeded then "Load more " ++ kind ++ "s" else "Retry loading " ++ kind ++ "s") ]
+            if request.inFlight && kind == rootPendingKind model request then
+                Spinner.inline "Loading Planning hierarchy"
+            else if rootStreamNeedsRetry model kind request then
+                div []
+                    [ rootStreamError model kind |> Maybe.map (\message -> div [ class "card-description-error", attribute "role" "status" ] [ text message ]) |> Maybe.withDefault (text "")
+                    , button [ class "navigation-load-more", disabled request.inFlight, Spinner.preserveFocus "hierarchy-viewport", onClick (LoadRootNavigationPage kind) ] [ text ("Retry loading " ++ kind ++ "s") ]
+                    ]
+            else if rootStreamCanLoadMore model kind request then
+                button [ class "navigation-load-more", Spinner.preserveFocus "hierarchy-viewport", onClick (LoadRootNavigationPage kind) ] [ text ("Load more " ++ kind ++ "s") ]
             else text ""
         _ -> text ""
 
@@ -3939,24 +3979,25 @@ viewViewportBranchStatus model kind id =
     let
         key = kind ++ ":" ++ id
         pass = Dict.get key model.dataLoading.navigationPasses
+        branch = Dict.get key model.dataLoading.loadedNavigationBranches
+        inFlight = branch |> Maybe.map .inFlight |> Maybe.withDefault False
         error stream = pass |> Maybe.andThen (if stream == "project" then .projectError else .taskError)
         viewError stream = error stream |> Maybe.map (\message -> div [ class "card-description-error", attribute "role" "status" ]
-            [ text message, button [ class "btn-small btn-ghost", onClick (LoadNavigationBranchPage kind id stream) ] [ text "Retry" ] ]) |> Maybe.withDefault (text "")
-        loading = List.member key model.dataLoading.navigationQueue
-            || (Dict.get key model.dataLoading.loadedNavigationBranches |> Maybe.map .inFlight |> Maybe.withDefault False)
+            [ text message, button [ class "btn-small btn-ghost", disabled inFlight, Spinner.preserveFocus "hierarchy-viewport", onClick (LoadNavigationBranchPage kind id stream) ] [ text "Retry" ] ]) |> Maybe.withDefault (text "")
+        loading = List.member key model.dataLoading.navigationQueue || inFlight
         viewMore stream =
             let
-                more = Dict.get key model.dataLoading.loadedNavigationBranches
+                more = branch
                     |> Maybe.map (if stream == "project" then .projectHasMore else .taskHasMore)
                     |> Maybe.withDefault False
             in
             if more && not loading && error stream == Nothing then
-                button [ class "navigation-load-more", onClick (LoadNavigationBranchPage kind id stream) ] [ text ("Load more " ++ stream ++ "s") ]
+                button [ class "navigation-load-more", Spinner.preserveFocus "hierarchy-viewport", onClick (LoadNavigationBranchPage kind id stream) ] [ text ("Load more " ++ stream ++ "s") ]
             else text ""
     in
     if branchStatusVisible model kind id then
         div [ class "hierarchy-branch-status" ]
-            [ if loading then span [ attribute "role" "status" ] [ text "Loading more…" ] else text ""
+            [ if loading then Spinner.inline "Loading more hierarchy items" else text ""
             , viewError "project", viewError "task"
             , viewMore "project", viewMore "task"
             ]

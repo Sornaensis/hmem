@@ -24,6 +24,7 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Set
 import Permissions
+import Spinner
 import Toast exposing (addToast)
 import TimestampDisplay
 import Types exposing (..)
@@ -406,7 +407,7 @@ viewPermissionSummary : Model -> Html Msg
 viewPermissionSummary model =
     case model.sessionContext of
         Nothing ->
-            p [ class "form-help", attribute "role" "status" ] [ text "Loading permissions..." ]
+            p [ class "form-help" ] [ Spinner.inline "Loading permissions" ]
 
         Just session ->
             div [ class "card workspace-admin-context" ]
@@ -428,7 +429,7 @@ viewWorkspaceAdminPanel ws model =
     section [ class "workspace-administration", attribute "aria-labelledby" "workspace-administration-heading" ]
         [ h2 [ id "workspace-administration-heading" ] [ text "Administration" ]
         , if model.auth.status /= AuthReady || model.sessionContext == Nothing then
-            p [ class "form-help", attribute "role" "status" ] [ text "Loading workspace permissions..." ]
+            p [ class "form-help" ] [ Spinner.inline "Loading workspace permissions" ]
           else if not (canManageTarget ws.id model) then
             div [ class "card empty-state", attribute "role" "status" ]
                 [ text "Administration is unavailable for your current workspace access." ]
@@ -456,25 +457,25 @@ viewMembershipManager ws model =
         removing = admin.activeMutation |> Maybe.map .removing |> Maybe.withDefault False
     in
     div [ class "card workspace-memberships" ]
-        [ h3 [] [ text "Memberships" ]
+        [ h3 [ id "workspace-memberships-heading", tabindex -1 ] [ text "Memberships" ]
         , p [ class "form-help" ] [ text "Grant a user read, edit, or admin access to this workspace." ]
         , if loading then
-            p [ class "form-help", attribute "role" "status" ] [ text "Loading memberships..." ]
+            p [ class "form-help" ] [ Spinner.inline "Loading memberships" ]
           else text ""
         , case Dict.get ws.id admin.membershipErrors of
             Just message ->
                 div [ class "workspace-admin-feedback", attribute "role" "alert" ]
                     [ p [] [ text message ]
-                    , button [ class "btn btn-secondary", type_ "button", onClick (RetryWorkspaceMemberships ws.id), disabled (loading || busy) ] [ text "Retry memberships" ]
+                    , button [ class "btn btn-secondary", type_ "button", Spinner.preserveFocus "workspace-memberships-heading", onClick (RetryWorkspaceMemberships ws.id), disabled (loading || busy) ] [ text "Retry memberships" ]
                     ]
             Nothing -> text ""
         , if List.isEmpty memberships then
-            if Dict.member ws.id admin.memberships then
+            if Dict.member ws.id admin.memberships && not loading then
                 p [ class "form-help", attribute "role" "status" ] [ text "No explicit memberships. Superadmins may still have access." ]
             else text ""
           else
             div [ class "membership-list" ] (List.map (viewMembershipRow model.timestamps ws.id busy) memberships)
-        , Html.form [ class "membership-form", onSubmit (SubmitWorkspaceMembership ws.id) ]
+        , Html.form [ class "membership-form", Spinner.preserveFocus "workspace-memberships-heading", onSubmit (SubmitWorkspaceMembership ws.id) ]
             [ div [ class "filter-group membership-user-field" ]
                 [ label [ class "filter-label", for "workspace-membership-user" ] [ text "User UUID" ]
                 , input [ id "workspace-membership-user", class "form-input", placeholder "Enter user UUID"
@@ -489,10 +490,13 @@ viewMembershipManager ws model =
                     ]
                 ]
             , button [ id "workspace-membership-submit", class "btn btn-primary", type_ "submit", disabled busy ]
-                [ text (if admin.authorizationPending /= Nothing then "Checking access..." else if busy && not removing then "Saving..." else "Grant / update") ]
+                [ text "Grant / update" ]
             ]
-        , if removing then p [ class "form-help", attribute "role" "status" ] [ text "Removing membership..." ] else text ""
-        , if admin.authorizationPending /= Nothing then p [ class "form-help", attribute "role" "status" ] [ text "Checking current workspace access..." ] else text ""
+        , if admin.authorizationPending /= Nothing then
+            p [ class "form-help" ] [ Spinner.inline "Checking current workspace access" ]
+          else if admin.activeMutation /= Nothing then
+            p [ class "form-help" ] [ Spinner.inline (if removing then "Removing membership" else "Saving membership") ]
+          else text ""
         , case admin.mutationError of
             Just message -> p [ class "form-error", attribute "role" "alert" ] [ text message ]
             Nothing -> text ""
@@ -504,7 +508,7 @@ viewMembershipRow display wsId busy membership =
         [ Helpers.copyableValue "membership-user" "user ID" membership.userId membership.userId
         , span [ class ("badge badge-" ++ membership.role) ] [ text membership.role ]
         , span [ class "membership-updated" ] [ text ("Updated " ++ TimestampDisplay.lookup display membership.updatedAt) ]
-        , button [ class "btn-small btn-danger-subtle", type_ "button", disabled busy, onClick (RemoveWorkspaceMembership wsId membership.userId) ] [ text "Remove" ]
+        , button [ class "btn-small btn-danger-subtle", type_ "button", disabled busy, Spinner.preserveFocus "workspace-memberships-heading", onClick (RemoveWorkspaceMembership wsId membership.userId) ] [ text "Remove" ]
         ]
 
 
@@ -559,14 +563,15 @@ viewDeleteConfirmModal model =
         Just deletion ->
             div [ class "modal-overlay", onClick CancelWorkspaceDelete ]
                 [ div [ class "modal", attribute "role" "dialog", attribute "aria-modal" "true", attribute "aria-labelledby" "workspace-delete-title", stopPropagationOn "click" (Decode.succeed ( NoOp, True )) ]
-                    [ h3 [ id "workspace-delete-title", class "modal-title" ] [ text "Delete workspace?" ]
+                    [ h3 [ id "workspace-delete-title", class "modal-title", tabindex -1 ] [ text "Delete workspace?" ]
                     , p [] [ text ("Delete \"" ++ (Dict.get deletion.workspaceId model.workspaces |> Maybe.map .name |> Maybe.withDefault "this workspace") ++ "\" from the active workspace list? Its contents will be retained; this does not purge them.") ]
                     , case deletion.error of
                         Just message -> p [ class "form-error", attribute "role" "alert" ] [ text message ]
                         Nothing -> text ""
                     , div [ class "modal-actions" ]
                         [ button [ id "workspace-delete-cancel", class "btn btn-secondary", disabled deletion.pending, onClick CancelWorkspaceDelete ] [ text "Cancel" ]
-                        , button [ class "btn btn-danger", disabled (deletion.pending || not (canDeleteWorkspace deletion.workspaceId model)), onClick PerformWorkspaceDelete ] [ text (if deletion.pending then "Deleting..." else "Delete workspace") ]
+                        , if deletion.pending then Spinner.inline "Deleting workspace" else text ""
+                        , button [ class "btn btn-danger", disabled (deletion.pending || not (canDeleteWorkspace deletion.workspaceId model)), Spinner.preserveFocus "workspace-delete-title", onClick PerformWorkspaceDelete ] [ text "Delete workspace" ]
                         ]
                     ]
                 ]

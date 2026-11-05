@@ -512,6 +512,17 @@ suite =
             in
             Expect.equal (Just Nothing,Just (Just cursor),Nothing)
                 (Dict.get "active:one" back.sessions.taskCursors,Dict.get "terminated:two" back.sessions.taskCursors,Dict.get "active:two" back.sessions.taskCursors)
+        , test "retrying a rotated-out task section retires only its current cached failure" <| \_ ->
+            let
+                entered = Sessions.reconcile (associationFixture,Cmd.none) |> Tuple.first
+                state = entered.sessions
+                failure = {result=Err "session read failed",epoch=entered.sessionDelivery.listInvalidation,cursor=Nothing}
+                pages = Dict.fromList [("terminated:one",failure),("active:one",failure),("terminated:two",failure)]
+                failed = {entered | sessions={state | taskPages=pages}}
+                retried = Sessions.update (SessionsRetryTaskSection workspace True "one") failed |> Tuple.first
+            in
+            Expect.equal {pages=["active:one","terminated:two"],generation=state.generation,delivery=failed.sessionDelivery}
+                {pages=Dict.keys retried.sessions.taskPages,generation=retried.sessions.generation,delivery=retried.sessionDelivery}
         , test "versioned history permits Sessions and preserves task/session context" <| \_ ->
             let
                 base=sessionModel
@@ -1048,7 +1059,7 @@ associationTests =
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.text "Hide Agents"]
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace checking "one") |> Query.has [Selector.attribute (Html.Attributes.title "Hide Agents · checking associations and activity")]
             , \_ -> Query.fromHtml (Sessions.viewTaskActiveChoices workspace checking "one") |> Query.hasNot [Selector.text "No active sessions for this task."]
-            , \_ -> Query.fromHtml (Sessions.viewTaskActiveChoices workspace checking "one") |> Query.has [Selector.text "Loading active sessions…"]
+            , \_ -> Query.fromHtml (Sessions.viewTaskActiveChoices workspace checking "one") |> Query.has [Selector.attribute (Html.Attributes.attribute "role" "status"), Selector.attribute (Html.Attributes.attribute "aria-label" "Loading active sessions")]
             , \_ -> Query.fromHtml (Sessions.viewTaskIcon workspace confirmed "one") |> Query.has [Selector.class "session-state-inactive"]
             , \_ -> Query.fromHtml (Sessions.viewTaskActiveChoices workspace confirmed "one") |> Query.has [Selector.text "No active sessions for this task."]
             ] ())
@@ -1288,7 +1299,8 @@ completedReaderTests =
             , \_ -> workspaceView "ready" |> Query.hasNot [Selector.text "Retry"]
             , \_ -> workspaceView "downloading" |> Query.has [Selector.text "Cancel"]
             , \_ -> workspaceView "downloading" |> Query.hasNot [Selector.text "Retry"]
-            , \_ -> workspaceView "cancelled" |> Query.has [Selector.text "Retry"]
+            , \_ -> workspaceView "cancelled" |> Query.has [Selector.text "Load archive again"]
+            , \_ -> workspaceView "cancelled" |> Query.hasNot [Selector.text "Retry"]
             , \_ -> workspaceView "error" |> Query.has [Selector.text "Retry"]
             ] ()
     ]

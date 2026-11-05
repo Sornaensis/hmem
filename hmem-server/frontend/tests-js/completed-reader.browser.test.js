@@ -57,15 +57,92 @@ test('completed recovery controls are contextual and cancelled/error states publ
  const h=await openSessionExplorer(),{page}=h;let mode='preparing'
  try{
   await archive(h,()=>mode);await open(h);await page.getByRole('button',{name:'Cancel',exact:true}).waitFor()
+  await page.getByRole('status',{name:'Preparing complete archive',exact:true}).waitFor()
   assert.equal(await page.locator('#session-records .session-record').count(),0)
   await page.getByRole('button',{name:'Cancel',exact:true}).click();await page.getByText('Archive loading cancelled.',{exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'Cancel',exact:true}).count(),0)
-  mode='error';await page.locator('.session-archive-footer').getByRole('button',{name:'Retry',exact:true}).click();await page.getByRole('alert').filter({hasText:'archive_unavailable'}).waitFor();assert.equal(await page.locator('#session-records .session-record').count(),0)
+  assert.equal(await page.locator('.session-archive-footer').getByRole('button',{name:'Retry',exact:true}).count(),0)
+  mode='error';await page.locator('.session-archive-footer').getByRole('button',{name:'Load archive again',exact:true}).click();await page.getByRole('alert').filter({hasText:'archive_unavailable'}).waitFor();assert.equal(await page.locator('#session-records .session-record').count(),0)
   mode='ready';await page.locator('.session-archive-footer').getByRole('button',{name:'Retry',exact:true}).click();await page.getByText('Verified complete archive.',{exact:true}).waitFor();await page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
   assert.equal(await page.getByRole('button',{name:'Cancel',exact:true}).count(),0);assert.equal(await page.locator('.session-archive-footer').getByRole('button',{name:'Retry',exact:true}).count(),0)
   const activity=page.locator('.session-activity-group').first();await activity.locator(':scope > summary').click();const tool=activity.locator('.session-content-tool').first();await tool.locator(':scope > summary').click();await tool.locator('pre').waitFor()
   const downloadReady=page.waitForEvent('download');await page.getByRole('button',{name:/Download session/}).click();const download=await downloadReady,parts=[]
   for await(const part of await download.createReadStream())parts.push(part)
   assert.deepEqual(Buffer.concat(parts),h.content.get(h.saved.id))
+  assert.deepEqual(h.errors,[])
+ }finally{await h.close()}
+})
+
+
+test('linked task Retry leaves the verified archive and its admitted records in place', {timeout:45000}, async()=>{
+ const h=await openSessionExplorer(),{page}=h
+ let reads=0, manifests=0, releaseRetry
+ const heldRetry=new Promise(resolve=>{releaseRetry=resolve})
+ try{
+  await archive(h)
+  page.on('request',request=>{if(new URL(request.url()).pathname.endsWith('/archive'))manifests++})
+  await page.route('**/sessions/'+h.saved.id+'/tasks?*',async route=>{
+   if(++reads===1)return route.fulfill({status:503,json:{error:'controlled linked task failure'}})
+   await heldRetry
+   return route.fallback()
+  })
+  await open(h)
+  await page.getByText('Verified complete archive.',{exact:true}).waitFor()
+  await page.locator('#session-records').evaluate(node=>{window.verifiedReader=node})
+  const before=manifests,linked=page.locator('.session-linked-tasks')
+  await linked.locator(':scope > summary').press('Enter')
+  await linked.getByRole('alert').getByRole('button',{name:'Retry',exact:true}).press('Enter')
+  await linked.getByRole('status',{name:'Loading linked tasks',exact:true}).waitFor()
+  assert.equal(await linked.getByRole('button',{name:'Retry',exact:true}).count(),0)
+  assert.equal(await page.getByText('Verified complete archive.',{exact:true}).isVisible(),true)
+  assert.equal(await page.locator('#session-records').evaluate(node=>node===window.verifiedReader),true)
+  assert.equal(manifests,before)
+  releaseRetry()
+  await linked.locator('.dep-item.popover-card').first().waitFor()
+  assert.equal(reads,2)
+  assert.deepEqual(h.errors,[])
+ }finally{releaseRetry();await h.close()}
+})
+
+
+test('completed body read Retry restarts a retired archive worker and leaves failed linked tasks alone', {timeout:45000}, async()=>{
+ const toolRecord={type:'response_item',payload:{type:'function_call',name:'Read',arguments:JSON.stringify({marker:'deferred body recovered'})}}
+ const h=await openSessionExplorer({transcriptBytes:Buffer.from(JSON.stringify(toolRecord)+'\n')}),{page}=h
+ let linkedReads=0
+ try{
+  await page.addInitScript(()=>{
+   const nativePost=Worker.prototype.postMessage
+   Worker.prototype.postMessage=function(request,...rest){
+    if(request.kind!=='body'||!window.failNextArchiveBody)return nativePost.call(this,request,...rest)
+    window.failNextArchiveBody=false
+    setTimeout(()=>this.dispatchEvent(new MessageEvent('message',{data:{...request.stamp,request:request.request,kind:'error',code:'fixture_archive_read_failed'}})),0)
+   }
+  })
+  await page.route('**/sessions/'+h.saved.id+'/tasks?*',route=>{
+   linkedReads++
+   return route.fulfill({status:503,json:{error:'controlled linked task failure'}})
+  })
+  await archive(h);await open(h);await page.getByText('Verified complete archive.',{exact:true}).waitFor();await h.idle()
+  const linked=page.locator('.session-linked-tasks')
+  await linked.locator(':scope > summary').press('Enter')
+  const linkedRetry=linked.getByRole('alert').getByRole('button',{name:'Retry',exact:true})
+  await linkedRetry.waitFor()
+  const tool=page.locator('.session-content-tool'),revealBody=async()=>{
+   await page.locator('.session-activity-group > summary').click()
+   await tool.locator(':scope > summary').click()
+  }
+  await page.evaluate(()=>{window.failNextArchiveBody=true})
+  await revealBody()
+  await page.getByRole('alert').filter({hasText:'fixture_archive_read_failed'}).waitFor()
+  assert.equal(await page.getByRole('status',{name:'Loading message',exact:true}).count(),0)
+  const retry=page.locator('.session-archive-footer').getByRole('button',{name:'Retry',exact:true})
+  assert.equal(await retry.getAttribute('data-sealed-action'),null)
+  await retry.press('Enter')
+  assert.equal(await linkedRetry.isVisible(),true)
+  await page.getByText('Verified complete archive.',{exact:true}).waitFor()
+  await revealBody()
+  await tool.locator('pre').filter({hasText:'deferred body recovered'}).waitFor()
+  assert.equal(await linkedRetry.isVisible(),true)
+  assert.equal(linkedReads,1)
   assert.deepEqual(h.errors,[])
  }finally{await h.close()}
 })

@@ -72,7 +72,12 @@ for(const dock of [false,true])test(`canonical refresh keeps ${dock?'dock':'Sess
    if(dock)assert.equal(pending.owner.height,before.owner.height,pendingKind+' changed dock height')
    for(const key of (dock?['owner','card','ancestor','viewer','prose']:['viewer','prose']))assert.ok(Math.abs(pending[key].y-before[key].y)<=1,pendingKind+' moved absolute '+key)
    assert.equal(pending.scroll,before.scroll,pendingKind+' moved the outer reading position')
-   assert.equal(await page.getByText(/Loading sessions|Loading session…|Loading linked tasks|Refreshing active sessions/).count(),0)
+   assert.equal(await page.getByRole('status',{name:/^(Loading sessions|Loading session details|Loading linked tasks|Loading active sessions)$/}).count(),0)
+   if(dock&&pendingKind==='list'){
+    const picker=page.locator('.task-session-picker')
+    assert.equal(await picker.getAttribute('aria-busy'),'true')
+    assert.equal(await picker.locator('.task-session-choice button').first().isDisabled(),true)
+   }
    assert.equal(await page.evaluate(()=>window.chromeLost),false)
    heldKind=null;for(const release of releases.splice(0))release();await h.idle()
   }

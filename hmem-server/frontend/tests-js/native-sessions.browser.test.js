@@ -200,7 +200,7 @@ for(const [scenario,bytes,expected]of[
   if(scenario==='unfamiliar-only'){
    const event=page.locator('.session-content-event').first();await event.locator('summary').click();const json=event.locator('session-event-json');await json.locator('pre').waitFor();assert.deepEqual(JSON.parse(await payloadPrefix(page,json,bytes.toString().trim(),true,true)),JSON.parse(bytes.toString()));assert.equal(await page.getByText(/Unsupported transcript content/).count(),0)
   }
-  await h.idle();const reads=h.reads.filter(value=>value.path.endsWith('/transcript')).length;await delay(500);assert.equal(h.reads.filter(value=>value.path.endsWith('/transcript')).length,reads,'settled input does not request-loop');assert.equal(await page.getByText('Reading transcript…',{exact:true}).count(),0);assert.equal(await page.getByText('Loading transcript metadata…',{exact:true}).count(),0)
+  await h.idle();const reads=h.reads.filter(value=>value.path.endsWith('/transcript')).length;await delay(500);assert.equal(h.reads.filter(value=>value.path.endsWith('/transcript')).length,reads,'settled input does not request-loop');assert.equal(await page.getByRole('status',{name:/^(Reading transcript|Loading transcript metadata|Loading session details)$/}).count(),0)
   if(scenario==='partial'){
    await h.appendBytes(Buffer.from('"text","text":"Completed partial source"}\n'))
    await page.getByText('Completed partial source',{exact:true}).waitFor();await until(()=>page.locator('#session-records').evaluate(node=>node.dataset.historyLoading==='false'))

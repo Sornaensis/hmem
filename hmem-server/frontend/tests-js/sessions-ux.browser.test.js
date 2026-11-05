@@ -208,14 +208,18 @@ test('active hints converge beyond sixteen mounted tasks and refresh after an as
 
 test('card metadata download failures abort staging and permit retry', {timeout:60000},async()=>{
  const h=await openSessionExplorer();const {page}=h
+ let releaseMetadata
+ const heldMetadata=new Promise(resolve=>{releaseMetadata=resolve})
  try{
   await h.start();await h.idle()
   const card=page.locator('#entity-'+h.fixture.tasks[0].id)
   await card.locator('.btn-extras-toggle').click();await h.idle();await card.getByRole('button',{name:'Evidence',exact:true}).click();await card.locator('.task-session-evidence').waitFor()
   const button=card.getByRole('button',{name:/Download session/})
   const metadataPattern='**/sessions/'+h.saved.id
-  await page.route(metadataPattern,route=>route.fulfill({status:503,json:{error:'controlled metadata failure'}}))
-  await button.click();await card.getByText('Download could not finish. Please retry.',{exact:true}).waitFor()
+  await page.route(metadataPattern,async route=>{await heldMetadata;return route.fulfill({status:503,json:{error:'controlled metadata failure'}})})
+  await button.click();await card.getByRole('status',{name:'Saving verified evidence',exact:true}).waitFor()
+  assert.equal(await page.getByRole('status',{name:'Saving verified evidence',exact:true}).count(),1)
+  releaseMetadata();await card.getByText('Download could not finish. Please retry.',{exact:true}).waitFor()
   await until(async()=>await button.isEnabled())
   await page.waitForFunction(async()=>{try{const root=await (await navigator.storage.getDirectory()).getDirectoryHandle('hmem-downloads');for await(const key of root.keys())if(key.startsWith('hmem-download-'))return false;return true}catch{return true}})
   await page.unroute(metadataPattern)
@@ -223,7 +227,7 @@ test('card metadata download failures abort staging and permit retry', {timeout:
   const parts=[];for await(const part of await retry.createReadStream())parts.push(part)
   assert.deepEqual(Buffer.concat(parts),h.bytes)
   assert.deepEqual(h.errors,[])
- }finally{await h.close()}
+ }finally{releaseMetadata();await h.close()}
 })
 
 test('zero-byte evidence completes when writer acquisition outlives card collapse', {timeout:60000},async()=>{

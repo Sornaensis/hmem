@@ -345,7 +345,7 @@ test('production Sessions uses canonical authenticated resources and direct task
     })
     await activityOnly('Live')
     await until(()=>heldStarted,'controlled canonical list request')
-    await page.getByText('Loading sessions…',{exact:true}).waitFor()
+    await page.getByRole('status',{name:'Loading sessions',exact:true}).waitFor()
     await activityOnly('Quiet')
     await page.getByText('No sessions match these filters.',{exact:true}).waitFor()
     heldRelease()

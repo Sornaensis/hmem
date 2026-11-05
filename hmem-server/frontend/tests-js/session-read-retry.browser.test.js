@@ -32,6 +32,9 @@ for (const kind of ['metadata', 'range']) {
       })
       await select(h)
       await until(() => arrivals.length === 1)
+      const pendingName = kind === 'metadata' ? 'Loading session details' : 'Reading transcript'
+      await h.page.getByRole('status', { name: pendingName, exact: true }).waitFor()
+      assert.equal(await h.page.locator('.session-detail .app-spinner').count(), 1, 'one indicator for the selected read')
       await delay(650)
       assert.equal(arrivals.length, 1, 'an outstanding original request never retries')
       release()
@@ -49,6 +52,8 @@ for (const kind of ['metadata', 'range']) {
 
 test('progress cannot bypass backoff or exhaustion; manual Retry restores a bounded attempt', { timeout: 45000 }, async () => {
   const h = await openSessionExplorer(), arrivals = []
+  let releaseRetry
+  const heldRetry = new Promise(resolve => { releaseRetry = resolve })
   let failures = 2
   try {
     await h.page.route('**/api/v1/**', async route => {
@@ -56,7 +61,7 @@ test('progress cannot bypass backoff or exhaustion; manual Retry restores a boun
       if (url.pathname !== readPath(h, 'range')) return route.fallback()
       arrivals.push({ at: Date.now(), query: url.search })
       if (failures-- > 0) await route.fulfill({ status: 500, json: { error: 'temporary' } })
-      else await route.fallback()
+      else { await heldRetry; await route.fallback() }
     })
     await select(h)
     await until(() => arrivals.length === 1)
@@ -65,13 +70,18 @@ test('progress cannot bypass backoff or exhaustion; manual Retry restores a boun
     await until(() => arrivals.length === 2)
     for (let i = 0; i < 6; i++) { await h.appendRecords({ text: 'Progress after exhaustion ' + i }); await delay(100) }
     assert.equal(arrivals.length, 2, 'two failed requests cannot become an endless chain')
-    const alert = h.page.locator('.session-conversation [role=alert]')
-    await alert.getByRole('button', { name: 'Retry', exact: true }).click()
+    const alert = h.page.getByRole('alert').filter({ hasText: 'Transcript request failed.' })
+    const retry = alert.getByRole('button', { name: 'Retry', exact: true })
+    await retry.press('Enter')
     await until(() => arrivals.length >= 3)
     assert.equal(arrivals[2].query, arrivals[0].query, 'manual retry preserves the failed finite range')
+    await h.page.getByRole('status', { name: 'Reading transcript', exact: true }).waitFor()
+    assert.equal(await retry.count(), 0, 'the failed read cannot offer Retry again while pending')
+    await until(() => h.page.locator('#session-transcript-view').evaluate(node => node === document.activeElement))
+    releaseRetry()
     await h.page.getByRole('heading', { name: 'A calmer session explorer' }).waitFor()
     assert.ok(h.peak() <= 2); assert.deepEqual(h.errors, [])
-  } finally { await h.close() }
+  } finally { releaseRetry(); await h.close() }
 })
 
 test('manual Retry during backoff retires the delayed ticket', { timeout: 45000 }, async () => {
@@ -186,7 +196,10 @@ for (const kind of ['metadata', 'range']) {
         else await route.fallback()
       })
       await select(h)
-      await h.page.locator(kind === 'metadata' ? '.session-detail > [role=alert]' : '.session-viewer [role=alert]').waitFor()
+      const alert = kind === 'metadata'
+        ? h.page.locator('.session-detail > [role=alert]')
+        : h.page.locator('.session-viewer').getByRole('alert').filter({ hasText: 'Transcript request failed.' })
+      await alert.waitFor()
       await h.associate(h.fixture.tasks[0].id)
       await h.page.getByRole('heading', { name: 'A calmer session explorer' }).waitFor()
       await h.idle()

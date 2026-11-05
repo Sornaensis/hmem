@@ -9,16 +9,35 @@ const count=(page,n)=>until(async()=>await page.locator('.session-summary').coun
 
 test('activity changes preserve zero-match project/task scopes and Quiet options survive a heartbeat crossing',{timeout:45000},async()=>{
  const h=await openSessionExplorer({savedCount:0}),{page}=h
+ let releaseFacet,facetRequested
+ const heldFacet=new Promise(resolve=>{releaseFacet=resolve}),admittedFacet=new Promise(resolve=>{facetRequested=resolve})
  try{
+  await page.route('**/sessions/filters?*',async route=>{
+   const query=new URL(route.request().url()).searchParams
+   if(query.get('kind')==='projects'&&query.get('activity')===''){
+    facetRequested()
+    await heldFacet
+   }
+   return route.fallback()
+  })
   await h.start();await h.idle();await toggle(page,'Sessions');await count(page,1)
   const project=h.fixture.projects[0].id,task=h.fixture.tasks[1].id
-  await page.getByRole('combobox',{name:'Project sessions'}).selectOption(project)
-  await page.getByRole('combobox',{name:'Task sessions'}).selectOption(task)
+  const projectFilter=page.getByRole('combobox',{name:'Project sessions'}),taskFilter=page.getByRole('combobox',{name:'Task sessions'})
+  await projectFilter.selectOption(project)
+  await until(()=>page.url().includes('project='+project))
+  await taskFilter.selectOption(task)
   for(const name of ['Live','Completed','Quiet']){
-   await toggle(page,name);await count(page,0)
+   await toggle(page,name)
+   if(name==='Live'){
+    await admittedFacet
+    assert.equal(await projectFilter.inputValue(),project,'the chosen project remains visible before its replacement options arrive')
+    releaseFacet()
+   }
+   await count(page,0)
    await until(()=>page.url().includes('project='+project)&&page.url().includes('task='+task))
-   assert.equal(await page.getByRole('combobox',{name:'Project sessions'}).inputValue(),project)
-   assert.equal(await page.getByRole('combobox',{name:'Task sessions'}).inputValue(),task)
+   await until(async()=>await projectFilter.inputValue()===project&&await taskFilter.inputValue()===task)
+   assert.equal(await projectFilter.inputValue(),project)
+   assert.equal(await taskFilter.inputValue(),task)
   }
   const settled=Promise.all(['projects','tasks'].map(kind=>page.waitForResponse(response=>{const u=new URL(response.url());return u.pathname.endsWith('/filters')&&u.searchParams.get('activity')==='quiet'&&u.searchParams.get('kind')===kind})))
   await toggle(page,'Completed');await settled // Quiet alone; the only session is still Live.
@@ -30,7 +49,7 @@ test('activity changes preserve zero-match project/task scopes and Quiet options
   assert.equal(h.reads.filter(r=>r.path.endsWith('/filters')).length,facetReads,'freshness-independent options need no timer reads')
   assert.equal(await page.getByRole('combobox',{name:'Task sessions'}).inputValue(),task)
   assert.deepEqual(h.errors,[])
- }finally{await h.close()}
+ }finally{releaseFacet();await h.close()}
 })
 
 test('sealed controls and maximum wrapped runtime remain reachable in a short narrow reader',{timeout:45000},async()=>{
@@ -164,7 +183,7 @@ test('Linked Tasks disclosure reuses read-only dependency cards with loading, er
   await h.start();await h.idle();await toggle(page,'Sessions');await page.locator('.session-summary a').first().click()
   const linked=page.locator('.session-linked-tasks'),summary=linked.locator(':scope > summary')
   await summary.focus();await page.keyboard.press('Enter')
-  await linked.getByRole('status').waitFor();releaseInitial();await linked.getByRole('alert').waitFor();phase='ok';await linked.getByRole('button',{name:'Retry',exact:true}).click()
+  await linked.getByRole('status',{name:'Loading linked tasks',exact:true}).waitFor();releaseInitial();await linked.getByRole('alert').waitFor();phase='ok';await linked.getByRole('button',{name:'Retry',exact:true}).click()
   await until(async()=>await linked.locator('.dep-item.popover-card').count()===2)
   const ordering=await page.evaluate(()=>document.querySelector('.session-linked-tasks').getBoundingClientRect().top<document.querySelector('.session-pane-label').getBoundingClientRect().top)
   assert.ok(ordering);assert.equal(await linked.getByTitle('Remove dependency').count(),0)

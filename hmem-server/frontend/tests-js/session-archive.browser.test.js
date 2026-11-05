@@ -67,6 +67,8 @@ test('sanitized viewer labels and downloads the selected content receipt',{timeo
  const original=Buffer.from('{"text":"opaque original content"}\r\n{"text":"tail"}')
  const content=Buffer.from('{"text":"Encrypted Payload"}\r\n{"text":"tail"}'),gzip=gzipSync(content)
  const h=await openSessionExplorer({transcriptBytes:original}),{page}=h
+ let releaseExport
+ const exportGate=new Promise(resolve=>{releaseExport=resolve})
  try{
   await page.addInitScript(()=>{
    const set=window.setTimeout.bind(window),clear=window.clearTimeout.bind(window),longTimers=new WeakMap()
@@ -101,12 +103,13 @@ test('sanitized viewer labels and downloads the selected content receipt',{timeo
     'X-HMem-Archive-Generation':generation,'X-HMem-Archive-SHA256':hash(gzip),'X-HMem-Archive-Raw-Bytes':String(original.length),
     'X-HMem-Archive-Raw-SHA256':hash(original),'X-HMem-Archive-Representation':'sanitized-v1',
     'X-HMem-Archive-Content-Bytes':String(content.length),'X-HMem-Archive-Content-SHA256':hash(content)}
-  await page.route('**/sessions/**/archive**',route=>{
+  await page.route('**/sessions/**/archive**',async route=>{
    const request=route.request(),url=new URL(request.url())
    if(url.pathname.endsWith('/sanitized-content'))return request.headers()['if-none-match']
      ? route.fulfill({status:304,headers}):route.fulfill({headers,body:gzip})
    if(url.pathname.endsWith('/sanitized-evidence')){
     assert.equal(url.searchParams.get('offset'),'0')
+    await exportGate
     return route.fulfill({json:{workspace_id:manifest.workspace_id,session_id:manifest.session_id,generation_id:generation,
       representation:'sanitized-v1',policy_sha256:manifest.policy_sha256,content_bytes:manifest.content_bytes,
       content_sha256:manifest.content_sha256,offset:0,next_offset:content.length,has_more:false,data_base64:content.toString('base64')}})
@@ -120,7 +123,10 @@ test('sanitized viewer labels and downloads the selected content receipt',{timeo
   assert.equal(await page.getByText('opaque original content',{exact:true}).count(),0)
   const downloading=page.waitForEvent('download')
   await page.getByRole('button',{name:'↓ Download sanitized JSONL',exact:true}).click()
+  await page.getByRole('status',{name:'Preparing sanitized JSONL',exact:true}).waitFor()
+  releaseExport()
   const download=await downloading
+  await page.getByRole('status',{name:'Preparing sanitized JSONL',exact:true}).waitFor({state:'hidden'})
   assert.equal(download.suggestedFilename(),h.saved.id+'-sanitized.jsonl')
   const parts=[]
   for await(const bytes of await download.createReadStream())parts.push(bytes)
@@ -130,7 +136,7 @@ test('sanitized viewer labels and downloads the selected content receipt',{timeo
   await page.getByText('Temporary download removed. Download again to save a new copy.',{exact:true}).waitFor()
   assert.deepEqual(await page.evaluate(()=>window.sanitizedCleanup),{added:1,removed:1,attempts:2})
   assert.deepEqual(h.errors,[])
- }finally{await h.close()}
+ }finally{releaseExport();await h.close()}
 })
 
 test('Jump to latest reaches a verified final archive page and its actual last formatted part',{timeout:45000},async()=>{
@@ -204,7 +210,9 @@ for(const jumpLatest of [false,true])test('failed native reader page retries thr
   await h.page.getByText('controlled_reader_page_failure',{exact:true}).waitFor()
   assert.deepEqual(await h.page.locator('#session-records').evaluate(node=>[node.dataset.sealedFirst,node.dataset.sealedLast]),admitted,'failed acquisition preserves the admitted source interval even when real Home changes its mounted slice')
   assert.ok(await h.page.locator('.session-record').evaluateAll((nodes,[first,last])=>nodes.every(node=>node.dataset.blockKey>=first&&node.dataset.blockKey<=last),admitted))
-  await h.page.getByRole('button',{name:jumpLatest?'Jump to latest':'Retry',exact:true}).click()
+  const recovery=h.page.getByRole('button',{name:jumpLatest?'Jump to latest':'Retry',exact:true})
+  if(!jumpLatest)assert.equal(await recovery.getAttribute('data-sealed-action'),'retry-page')
+  await recovery.click()
   if(jumpLatest)await h.page.getByText('Retry occurrence 179',{exact:true}).waitFor()
   else await h.page.waitForFunction(first=>document.getElementById('session-records').dataset.sealedFirst<first,admitted[0])
   assert.equal(readerIncarnations,2);assert.deepEqual(conditional,[phaseArchiveETag,phaseArchiveETag])
@@ -1068,11 +1076,12 @@ async function selectArchiveAcknowledgement(page,workspace,session) {
         if(!owner || prior.get(node)===owner)continue
         let stamp;try{stamp=JSON.parse(owner)}catch{continue}
         if(!Array.isArray(stamp) || stamp[0]!==workspace || stamp[3]!==session)continue
-        const status=node.querySelector('[role="status"]')?.textContent || ''
-        if(/^(Preparing complete archive|Downloading complete archive|Verifying and indexing)/.test(status)){finish(null,{ms:performance.now()-start,status:status.slice(0,128)});return}
+        const statusNode=node.querySelector('.session-archive-status[role="status"],.session-archive-status [role="status"]')
+        const status=statusNode?.getAttribute('aria-label') || statusNode?.textContent || ''
+        if(/^(Preparing complete archive|Opening archive index|Downloading complete archive|Verifying and indexing)/.test(status)){finish(null,{ms:performance.now()-start,status:status.slice(0,128)});return}
       }
     })
-    observer.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['data-viewer-owner','class']})
+    observer.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['data-viewer-owner','class','aria-label']})
     addEventListener('pagehide',retired,{once:true});timer=setTimeout(()=>finish(Error('archive_initial_ack_deadline')),2000)
     location.hash='tab=sessions&session='+session
   }),{workspace,session})
@@ -1855,22 +1864,22 @@ for(const delivery of ['fast','slow'])test('production local navigation status c
     await h.start();await h.idle();await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=sessions&session='+h.saved.id)
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:10000})
     const previous=await h.page.evaluate(delivery=>{
-      const status=document.querySelector('.session-sealed-viewer [role="status"]');window.navigationStatuses=[]
-      window.navigationStatusObserver=new MutationObserver(()=>{const value=status.textContent;if(window.navigationStatuses.at(-1)!==value)window.navigationStatuses.push(value)})
-      window.navigationStatusObserver.observe(status,{childList:true,subtree:true,characterData:true});window.holdNavigationPage=true
+      const status=document.querySelector('.session-sealed-viewer .session-archive-status');window.navigationStatuses=[]
+      window.navigationStatusObserver=new MutationObserver(()=>{const value=status.querySelector('[role="status"]')?.getAttribute('aria-label') || status.textContent;if(window.navigationStatuses.at(-1)!==value)window.navigationStatuses.push(value)})
+      window.navigationStatusObserver.observe(status,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['aria-label']});window.holdNavigationPage=true
       return window.navigationPageReplies
     },delivery)
     for(let step=0;!await h.page.evaluate(()=>typeof window.releaseNavigationPage==='function');step++){assert.ok(step<8,'actual upward input reaches one indexed continuation');await continuousScrollStep(h.page,-1);await h.page.waitForTimeout(25)}
     if(delivery==='slow'){
       await h.page.waitForFunction(()=>typeof window.releaseNavigationPage==='function',null,{timeout:2000})
-      await h.page.getByText('Reading local index…',{exact:true}).waitFor({timeout:2000})
-      assert.equal(await h.page.evaluate(()=>window.navigationStatuses.filter(value=>value==='Reading local index…').length),1)
+      await h.page.getByRole('status',{name:'Reading local index',exact:true}).waitFor({timeout:2000})
+      assert.equal(await h.page.evaluate(()=>window.navigationStatuses.filter(value=>value==='Reading local index').length),1)
     }
     await h.page.evaluate(()=>window.releaseNavigationPage())
     await h.page.waitForFunction(previous=>window.navigationPageReplies===previous+1,previous,{timeout:2000})
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor({timeout:2000});await h.page.waitForTimeout(150)
     const state=await h.page.evaluate(()=>{window.navigationStatusObserver.disconnect();const timing=window.navigationTiming;return {statuses:window.navigationStatuses,status:document.querySelector('.session-sealed-viewer [role="status"]').textContent,rows:document.querySelectorAll('#session-records [data-offset]').length,acquiredRows:window.navigationLastPageRows,holdMs:timing.released-timing.held,replyMs:timing.replied-timing.released}})
-    assert.equal(state.status,'Verified complete archive.');assert.ok(state.rows>0&&state.rows<=200);assert.equal(state.acquiredRows,64);assert.equal(state.statuses.filter(value=>value==='Reading local index…').length,delivery==='slow'?1:0,JSON.stringify(state))
+    assert.equal(state.status,'Verified complete archive.');assert.ok(state.rows>0&&state.rows<=200);assert.equal(state.acquiredRows,64);assert.equal(state.statuses.filter(value=>value==='Reading local index').length,delivery==='slow'?1:0,JSON.stringify(state))
     assert.deepEqual(h.errors,[]);console.log(JSON.stringify({localNavigationStatus:{delivery,...state}}))
   }finally{await h.close()}
 })
@@ -2058,7 +2067,7 @@ test('known credential switch and authorization loss synchronously retire visibl
     assert.deepEqual(cancelled,{records:0,inspector:0})
     await h.page.getByText('Archive loading cancelled.',{exact:true}).waitFor()
     await h.page.evaluate(()=>window.releaseArchivePage?.(true))
-    await h.page.locator('.session-sealed-viewer').getByRole('button',{name:'Retry',exact:true}).click()
+    await h.page.locator('.session-sealed-viewer').getByRole('button',{name:'Load archive again',exact:true}).click()
     await h.page.getByText('Verified complete archive.',{exact:true}).waitFor()
     await h.page.locator('#session-records').press('Home');await h.page.getByRole('heading',{name:'A calmer session explorer'}).waitFor()
     await group.locator(':scope > summary').click()

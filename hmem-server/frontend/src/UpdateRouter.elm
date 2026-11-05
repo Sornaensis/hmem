@@ -106,6 +106,7 @@ route msg model =
         SessionsPreviousPage -> Ok (Feature.Sessions.update msg model)
         SessionsLinkedPage _ -> Ok (Feature.Sessions.update msg model)
         SessionsRetry -> Ok (Feature.Sessions.update msg model)
+        SessionsRetryTaskSection _ _ _ -> Ok (Feature.Sessions.update msg model)
         SessionsActivityFilter _ -> Ok (Feature.Sessions.update msg model)
         SessionsStateFilter _ -> Ok (Feature.Sessions.update msg model)
         SessionsProjectFilter _ -> Ok (Feature.Sessions.update msg model)

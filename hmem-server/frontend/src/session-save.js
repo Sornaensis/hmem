@@ -468,7 +468,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
         }
         window.requestAnimationFrame?.(()=>restore(0))
       }
-    }catch(error){owned.failedPage={options:{...options},visibleKey};clearPageProgress(owned,operation);if(current(owned)){if(owned.latestJump){event(owned,'latest-error',{latestRequest:owned.latestJump.request,code:error.message});owned.latestJump=null}event(owned,'error',{code:error.message})}}finally{clearPageProgress(owned,operation);owned.pagePending=false;if(owned.latestJump?.phase==='page-ready')finishLatestPage(owned);else drainLocalIntent(owned)}
+    }catch(error){owned.failedPage={options:{...options},visibleKey};clearPageProgress(owned,operation);if(current(owned)){if(owned.latestJump){event(owned,'latest-error',{latestRequest:owned.latestJump.request,code:error.message});owned.latestJump=null}event(owned,'error',{code:error.message,retryPage:true})}}finally{clearPageProgress(owned,operation);owned.pagePending=false;if(owned.latestJump?.phase==='page-ready')finishLatestPage(owned);else drainLocalIntent(owned)}
   }
   async function smallJson(response,owned,limit=65536) {
     if(!response.body)throw Error('archive_response_failed')
@@ -592,7 +592,7 @@ export function createSealedViewer({send,fetchArchive,document,window,workerFact
     const controller=new AbortController()
     const timer=window.setTimeout(()=>controller.abort(),900000)
     owned.exportController=controller
-    event(owned,'export',{message:'Preparing sanitized JSONL…'})
+    event(owned,'export',{pending:true})
     owned.exportPromise=(async()=>{
       const total=Number(manifest.content_bytes),digest=sha256.create()
       let root,name,file,writable,closed=false,published=false,authorized=()=>true,parts=[]
@@ -1473,7 +1473,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     if(config.stamp!==stamp || activeSave) return
     const owned={...config,retired:false,writer:null,native:null,picking:false,acquiring:true}
     activeSave=owned
-    send({kind:'save-picking',stamp:owned.stamp,operation:owned.operation,session:owned.session})
+    send({kind:'save-picking',stamp:owned.stamp,operation:owned.operation,session:owned.session,task:owned.task})
     ;(async()=>{
       const filename=config.session.id+'.jsonl'
       const trigger=async (file,cleanup=async()=>{})=>{
@@ -1527,7 +1527,7 @@ export function installSessionBridge(app, { document = globalThis.document, wind
     let picking
     try { picking = window.showSaveFilePicker({suggestedName:config.session.id+'.jsonl',types:[{description:'Original JSONL evidence',accept:{'application/x-ndjson':['.jsonl']}}]}) }
     catch { activeSave=null; send({kind:'save-error',stamp:owned.stamp,operation:owned.operation,code:'picker_failed'}); return }
-    send({kind:'save-picking',stamp:owned.stamp,operation:owned.operation,session:owned.session})
+    send({kind:'save-picking',stamp:owned.stamp,operation:owned.operation,session:owned.session,task:owned.task})
     Promise.resolve(picking).then(async handle => {
       owned.picking = false
       if(owned.retired || activeSave !== owned || stamp !== owned.stamp) { await retireSave(owned); return }

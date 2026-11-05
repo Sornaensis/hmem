@@ -2,12 +2,12 @@ module HMem.DB.SessionArchiveSpec (spec) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait, concurrently)
-import Control.Exception (bracket, bracket_, try)
+import Control.Exception (bracket, bracket_, finally, try)
 import Control.Monad (forM_)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as B8
-import Data.Int (Int32)
+import Data.Int (Int32, Int64)
 import Data.Pool (destroyAllResources)
 import Data.Text qualified as T
 import Data.UUID (UUID)
@@ -83,6 +83,78 @@ spec=around withTestEnv $ describe "Session archives" $ do
     reject $ execute env ("INSERT INTO session_archive_ledger(generation_id,session_id,workspace_id,revision,start_offset,end_offset,allow_final_record,record_count,ends_with_newline,raw_sha256,binding_sha256) VALUES("<>binding l<>"1,0,3,false,1,true,repeat('0',64),'')")
     stageComplete env l
     publishArchive env.pool l verification `shouldReturn` True
+
+  it "reads and stages one validated original append under the exact live ledger fence" $ \env -> do
+    (w,active)<-fixture env "{}\r\n" False
+    appended<-appendSession env.pool w active.id (AppendSession active.committedBytes active.revision "[]\n" True)
+    let raw="{}\r\n[]\n"
+        final=appended.session
+    sealed<-terminateSession env.pool w final.id (TerminateSession final.committedBytes final.revision final.committedBytes (sessionSha256 raw))
+    _<-enqueueArchives env.pool Nothing 100
+    Just lease<-claimArchive env.pool "combined-source-ledger"
+    wrongToken<-UUID.nextRandom
+    let forged=ArchiveLease lease.workspaceId lease.sessionId lease.generationId wrongToken lease.attempt
+        accept :: ArchiveSourceChunk -> Either T.Text Int64
+        accept row=Right row.recordCount
+        rejectGap row
+          | row.startOffset==4 && row.revision==2 = Left "source gap"
+          | otherwise = accept row
+        readStage offset revision=readAndStageArchiveSourceChunk env.pool lease offset revision
+    readAndStageArchiveSourceChunk env.pool forged 0 0 accept `shouldReturn` ArchiveSourceEnd
+    readStage 1 0 rejectGap `shouldReturn` ArchiveSourceRejected "source gap"
+    readStage 0 0 (const (Left "invalid metadata" :: Either T.Text Int64)) `shouldReturn` ArchiveSourceRejected "invalid metadata"
+    readStage 0 1 accept `shouldReturn` ArchiveSourceLedgerRejected
+    readStagedLedger env.pool lease 1 `shouldReturn` Nothing
+    boolean env "SELECT staged_bytes=0 FROM session_archive_control" `shouldReturn` True
+
+    readStage 0 0 accept `shouldReturn` ArchiveSourceReady (ArchiveSourceChunk 1 0 "{}\r\n" True 1 True) 1
+    Just first<-readStagedLedger env.pool lease 1
+    (first.revision,first.startOffset,first.endOffset,first.rawSha256) `shouldBe` (1,0,4,sessionSha256 "{}\r\n")
+    T.length first.bindingSha256 `shouldBe` 64
+    reject $ readStage 0 0 accept
+    readStagedLedger env.pool lease 1 `shouldReturn` Just first
+    boolean env "SELECT staged_bytes=1024 FROM session_archive_control" `shouldReturn` True
+
+    readStage 4 1 accept `shouldReturn` ArchiveSourceReady (ArchiveSourceChunk 2 4 "[]\n" True 1 True) 1
+    Just second<-readStagedLedger env.pool lease 2
+    (second.revision,second.startOffset,second.endOffset,second.rawSha256) `shouldBe` (2,4,7,sessionSha256 "[]\n")
+    second.bindingSha256 `shouldNotBe` first.bindingSha256
+    readStage 7 2 accept `shouldReturn` ArchiveSourceEnd
+    getPublishedArchive env.pool w sealed.id `shouldReturn` Nothing
+    expire env sealed.id
+    readStage 0 0 accept `shouldReturn` ArchiveSourceEnd
+    boolean env "SELECT staged_bytes=2048 FROM session_archive_control" `shouldReturn` True
+    readSessionRange env.pool w sealed.id 0 10 >>= (\result -> result.bytes `shouldBe` raw)
+
+  it "rechecks global permit expiry after the initial source lease fence" $ \env -> do
+    (_,sealed,lease)<-claimed env "{}\n"
+    let isolated = createPool env.testDb.testDbConnStr 1 30 30000
+        accept _=Right () :: Either T.Text ()
+        waitFor observation = do
+          let loop = do
+                seen<-observation
+                if seen then pure () else threadDelay 20000 >> loop
+          timeout 6000000 loop `shouldReturn` Just ()
+    bracket isolated destroyAllResources $ \blockerPool ->
+      bracket isolated destroyAllResources $ \observerPool ->
+        withConn blockerPool $ \blockerConnection -> do
+          let run sql=S.run (S.sql sql) blockerConnection >>= either (fail . show) pure
+              unblock=run "ROLLBACK"
+              observer=env {pool=observerPool}
+          blocker <- S.run (S.statement () (St.Statement "SELECT pg_backend_pid()" E.noParams (D.singleRow (D.column (D.nonNullable D.int4))) True)) blockerConnection
+            >>= either (fail . show) pure
+          let sourceBlockedWithLivePermit = runSession observerPool $ S.statement blocker $ St.Statement
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.wait_event_type='Lock' AND pg_blocking_pids(a.pid) @> ARRAY[$1::int4] AND a.query LIKE 'SELECT c.revision,c.start_offset,c.data,%') AND EXISTS(SELECT 1 FROM session_archive_control WHERE singleton AND permit_kind='compression' AND permit_expires_at>clock_timestamp())"
+                (E.param (E.nonNullable E.int4)) (D.singleRow (D.column (D.nonNullable D.bool))) False
+              permitExpiredWithLiveJob = boolean observer
+                ("SELECT c.permit_expires_at<=clock_timestamp() AND j.lease_expires_at>clock_timestamp() FROM session_archive_control c CROSS JOIN session_archive_jobs j WHERE c.singleton AND j.session_id='"<>uuid sealed.id<>"'")
+          bracket_ (run "BEGIN; LOCK TABLE session_chunks IN ACCESS EXCLUSIVE MODE") unblock $ do
+            execute observer "UPDATE session_archive_control SET permit_expires_at=clock_timestamp()+interval '3 seconds' WHERE singleton"
+            withAsync (readAndStageArchiveSourceChunk env.pool lease 0 0 accept) $ \source -> do
+              -- Release the real blocker before waiting or cancelling the source.
+              (waitFor sourceBlockedWithLivePermit >> waitFor permitExpiredWithLiveJob) `finally` unblock
+              timeout 5000000 (wait source) `shouldReturn` Just ArchiveSourceLedgerRejected
+    boolean env "SELECT staged_bytes=0 AND NOT EXISTS(SELECT 1 FROM session_archive_ledger) FROM session_archive_control" `shouldReturn` True
 
   it "refuses incomplete output or manifest counts and retains raw evidence" $ \env -> do
     (w,s,l)<-claimed env "{}\n"

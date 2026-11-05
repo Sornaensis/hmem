@@ -43,6 +43,18 @@ spec = describe "Sealed archive replacement" $ do
     drain source `shouldReturn` expected
     count `shouldReturn` 1
 
+  it "validates complete unselected string tokens after finding their closing quote" $ do
+    rules <- fixtureRules
+    let record token = "{\"untouched\":" <> token <> "}\r\n"
+        long = "\"" <> BS.replicate 64 120
+        valid = ["\"plain\"", "\"escaped quote: \\\"\"", "\"escaped slash: \\\\\"", "\"\\uD83D\\uDE00\"", "\"\195\169\""
+          , long <> "\195\169\"", long <> "\\\"escaped\""]
+        invalid = ["\"unescaped\ttab\"", "\"unescaped\nnewline\"", "\"control\1byte\"", "\"\195x\"", "\"\\uD800\"", "\"\\uDC00\"", "\"\\q\"", "\"unfinished\\\""
+          , long <> "\t\"", long <> "\1\\\"escaped\"", long <> "\195x\"", long <> "\\uD800\""]
+    forM_ valid $ \token -> replaceRecord rules (record token) `shouldBe` Right (record token,0)
+    forM_ invalid $ \token -> replaceRecord rules (record token) `shouldBe` Left InvalidRecord
+    replaceRecord rules "{\"\\u0078\":1,\"x\":2}" `shouldBe` Left AmbiguousRecord
+
   it "batches short unchanged records next to shrinking records from distinct maximum chunks" $ do
     rules <- fixtureRules
     let prefix = "{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\",\"encrypted_content\":\""

@@ -11,6 +11,7 @@ module HMem.DB.SessionArchive
   , getArchiveJob, getPublishedArchive, readArchivePart, findArchiveCheckpoint, readArchiveLedger
   , readStagedPart, cleanupArchiveGeneration, cleanupNextArchiveGeneration
   , ArchiveReceipt(..), ArchiveSourceChunk(..), readArchiveReceipt, readArchiveSourceChunk
+  , ArchiveSourceStage(..), readAndStageArchiveSourceChunk
   , readStagedCheckpoint, readStagedLedger
   ) where
 
@@ -97,6 +98,13 @@ data ArchiveSourceChunk = ArchiveSourceChunk
   , allowFinalRecord :: !Bool, recordCount :: !Int64, endsWithNewline :: !Bool
   } deriving stock (Show, Eq)
 
+data ArchiveSourceStage e a
+  = ArchiveSourceEnd
+  | ArchiveSourceRejected !e
+  | ArchiveSourceLedgerRejected
+  | ArchiveSourceReady !ArchiveSourceChunk !a
+  deriving stock (Show, Eq)
+
 param :: (a -> b) -> E.Value b -> E.Params a
 param f v=contramap f (E.param (E.nonNullable v))
 pair :: E.Params (UUID,UUID)
@@ -150,6 +158,10 @@ claimArchive pool implementation=do
 lockControl :: S.Session ()
 lockControl=S.statement () $ statement "SELECT singleton FROM session_archive_control WHERE singleton FOR UPDATE" E.noParams (() <$ D.singleRow (column D.bool))
 
+archiveLeaseCurrent :: ByteString
+archiveLeaseCurrent =
+  "j.state='running' AND j.generation_id=$3 AND j.lease_token=$4 AND j.attempt=$5 AND j.lease_expires_at>clock_timestamp() AND c.permit_kind='compression' AND c.permit_generation=$3 AND c.permit_token=$4 AND c.permit_expires_at>clock_timestamp()"
+
 withLease :: Pool H.Connection -> ArchiveLease -> S.Session a -> IO (Maybe a)
 withLease pool lease action=runTransaction pool $ do
   lockControl
@@ -159,7 +171,7 @@ withLease pool lease action=runTransaction pool $ do
     Nothing -> pure Nothing
     Just _ -> do
       live <- S.statement lease $ statement
-        "SELECT coalesce(j.state='running' AND j.generation_id=$3 AND j.lease_token=$4 AND j.attempt=$5 AND j.lease_expires_at>clock_timestamp() AND c.permit_kind='compression' AND c.permit_generation=$3 AND c.permit_token=$4 AND c.permit_expires_at>clock_timestamp(),false) FROM session_archive_jobs j CROSS JOIN session_archive_control c WHERE c.singleton AND j.workspace_id=$1 AND j.session_id=$2"
+        ("SELECT coalesce("<>archiveLeaseCurrent<>",false) FROM session_archive_jobs j CROSS JOIN session_archive_control c WHERE c.singleton AND j.workspace_id=$1 AND j.session_id=$2")
         leaseParams (D.singleRow (column D.bool))
       if live then Just <$> action else pure Nothing
 
@@ -297,11 +309,35 @@ readArchiveReceipt pool lease=withLease pool lease $ S.statement lease $ stateme
 readArchiveSourceChunk :: Pool H.Connection -> ArchiveLease -> Int64 -> IO (Maybe ArchiveSourceChunk)
 readArchiveSourceChunk pool lease offset=do
   guardInput (offset>=0)
-  result<-withLease pool lease $ S.statement (lease,offset) $ statement
+  result<-withLease pool lease $ S.statement (lease,offset) archiveSourceChunkStatement
+  pure (result >>= id)
+
+archiveSourceChunkStatement :: St.Statement (ArchiveLease,Int64) (Maybe ArchiveSourceChunk)
+archiveSourceChunkStatement = statement
     "SELECT c.revision,c.start_offset,c.data,c.allow_final_record,c.record_count,c.ends_with_newline FROM session_chunks c JOIN sessions s ON s.id=c.session_id WHERE s.workspace_id=$1 AND s.id=$2 AND c.start_offset>=$6 AND $3::uuid IS NOT NULL AND $4::uuid IS NOT NULL AND $5::bigint>0 ORDER BY c.start_offset LIMIT 1"
     (contramap fst leaseParams<>param snd E.int8)
     (D.rowMaybe (ArchiveSourceChunk <$> column D.int8 <*> column D.int8 <*> column D.bytea <*> column D.bool <*> column D.int8 <*> column D.bool))
-  pure (result >>= id)
+
+-- Read and validate one bounded original append before staging its ledger.
+-- Recheck both deadlines at the INSERT because time can advance while the
+-- control and job locks are held. The original source and binding guards apply.
+readAndStageArchiveSourceChunk
+  :: Pool H.Connection -> ArchiveLease -> Int64 -> Int64
+  -> (ArchiveSourceChunk -> Either e a) -> IO (ArchiveSourceStage e a)
+readAndStageArchiveSourceChunk pool lease offset previousRevision validate = do
+  guardInput (offset>=0 && previousRevision>=0 && previousRevision<maxBound)
+  let expectedRevision=previousRevision+1
+  result <- withLease pool lease $ S.statement (lease,offset) archiveSourceChunkStatement >>= \case
+    Nothing -> pure ArchiveSourceEnd
+    Just chunk -> case validate chunk of
+      Left reason -> pure (ArchiveSourceRejected reason)
+      Right checked -> do
+        copied <- S.statement (lease,expectedRevision,offset) $ statement
+          ("INSERT INTO session_archive_ledger(generation_id,session_id,workspace_id,revision,start_offset,end_offset,allow_final_record,record_count,ends_with_newline,raw_sha256,binding_sha256) SELECT $3,$2,$1,s.revision,s.start_offset,s.start_offset+octet_length(s.data),s.allow_final_record,s.record_count,s.ends_with_newline,encode(sha256(s.data),'hex'),'' FROM session_chunks s JOIN session_archive_jobs j ON (j.session_id,j.workspace_id)=(s.session_id,$1) CROSS JOIN session_archive_control c WHERE c.singleton AND s.session_id=$2 AND s.revision=$6 AND s.start_offset=$7 AND "<>archiveLeaseCurrent<>" RETURNING revision")
+          (contramap (\(l,_,_)->l) leaseParams<>param (\(_,r,_)->r) E.int8<>param (\(_,_,o)->o) E.int8)
+          (D.rowMaybe (column D.int8))
+        pure $ if copied==Just expectedRevision then ArchiveSourceReady chunk checked else ArchiveSourceLedgerRejected
+  pure (maybe ArchiveSourceEnd id result)
 
 readStagedCheckpoint :: Pool H.Connection -> ArchiveLease -> Int64 -> IO (Maybe ArchiveCheckpoint)
 readStagedCheckpoint pool lease ordinal=do

@@ -314,7 +314,13 @@ scanRecord wanted bytes = do
         93 -> Right (sep+1,captured)
         _ -> Left InvalidRecord
     string start = do
-      end <- closing (start+1)
+      let suffix = BS.drop (start+1) bytes
+      quote <- maybe (Left InvalidRecord) Right (BS.elemIndex 34 suffix)
+      -- Use the first quote directly when there is no earlier backslash.
+      -- The full token still goes through Aeson to validate UTF-8 and escapes.
+      end <- case BS.elemIndex 92 (BS.take quote suffix) of
+        Nothing -> Right (start+quote+2)
+        Just escape -> closing (start+escape+1)
       str <- either (const (Left InvalidRecord)) Right (eitherDecodeStrict' (BS.take (end-start) (BS.drop start bytes)))
       pure (end,str)
     closing i

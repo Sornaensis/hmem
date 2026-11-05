@@ -143,6 +143,38 @@ spec = around withTestEnv $ describe "Archive worker" $ do
     Just manifest <- DB.getPublishedArchive env.pool w sealed.id
     (manifest.rawBytes,manifest.rawSha256) `shouldBe` (sealed.committedBytes,sessionSha256 (BS.concat chunks))
 
+  it "paces by completed raw bytes across append cuts and keeps the exact gzip receipt" $ \env -> bounded $ do
+    forM_ [([16,16],1048576),([9,9,9,5],1179648)] $ \(cuts,expectedPause) -> do
+      let chunks = map pacingRecords cuts
+      _ <- fixture env chunks
+      lease <- claim env
+      offsets <- newIORef []
+      prepared <- compressArchiveWithPause (\offset -> modifyIORef' offsets (offset:)) env.pool lease
+      readIORef offsets `shouldReturn` [expectedPause]
+      remaining <- newIORef chunks
+      let next = atomicModifyIORef' remaining $ \case
+            [] -> ([],Nothing)
+            bytes:rest -> (rest,Just bytes)
+      unchanged <- Codec.compress next (const (pure ()))
+      prepared.encoded `shouldBe` unchanged
+      verifyAndPublishArchive env.pool lease prepared
+
+  it "allows lock acquisition and bounded cancellation during a compression pause" $ \env -> bounded $ do
+    (w,sealed,_) <- fixture env [pacingRecords 16,pacingRecords 1]
+    lease <- claim env
+    entered <- newEmptyMVar
+    blocked <- newEmptyMVar
+    let pause offset = putMVar entered offset >> takeMVar blocked
+    withAsync (compressArchiveWithPause pause env.pool lease) $ \attempt -> do
+      timeout 5000000 (takeMVar entered) `shouldReturn` Just 1048576
+      bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \observer ->
+        runTransaction observer (S.sql "LOCK TABLE session_archive_control, session_archive_jobs IN ACCESS EXCLUSIVE MODE NOWAIT")
+      timeout 2000000 (cancel attempt) `shouldReturn` Just ()
+      waitCatch attempt >>= (`shouldSatisfy` either (const True) (const False))
+    DB.getPublishedArchive env.pool w sealed.id `shouldReturn` Nothing
+    getSession env.pool w sealed.id `shouldReturn` Just sealed
+    DB.releaseArchive env.pool lease False "archive_cancelled" `shouldReturn` True
+
   it "retains and re-drains the actual renewal child after its parent exits with a failed join" $ \env -> bounded $ do
     _ <- fixture env ["{}\n"]
     attemptReady <- newEmptyMVar
@@ -330,6 +362,10 @@ spec = around withTestEnv $ describe "Archive worker" $ do
 
 bounded :: IO () -> IO ()
 bounded action = timeout 25000000 action >>= \r -> r `shouldBe` Just ()
+pacingRecords :: Int -> ByteString
+pacingRecords count = BS.concat (replicate count record)
+  where record = "{\"text\":\"" <> BS.replicate (65536-12) 120 <> "\"}\n"
+
 fixture :: TestEnv -> [ByteString] -> IO (UUID,AgentSession,UUID)
 fixture env = fixtureWithFormat env "jsonl"
 

@@ -6,14 +6,15 @@ module HMem.Server.Archive.Worker
   , startArchiveWorkerWithLoops
   , runArchiveLeaseWith
   , compressArchive, verifyAndPublishArchive, archiveAttemptMicros
+  , compressArchiveWithPause
   , verifyAndPublishArchiveWith
   , maintainArchive, runReclamationLeaseWith
   ) where
 
-import Control.Concurrent (ThreadId, forkIOWithUnmask, killThread, myThreadId, threadDelay, throwTo)
+import Control.Concurrent (ThreadId, forkIOWithUnmask, killThread, myThreadId, threadDelay, throwTo, yield)
 import Control.Concurrent.MVar
-import Control.Exception (Exception, SomeException, SomeAsyncException, bracket, catch, finally, fromException, mask, throwIO, try, onException)
-import Control.Monad (unless, void, forever)
+import Control.Exception (Exception, SomeException, SomeAsyncException, bracket, catch, finally, fromException, mask, throwIO, toException, try, onException)
+import Control.Monad (unless, void, forever, when)
 import Crypto.Hash (Context, SHA256, Digest, hashInit, hashUpdate, hashFinalize)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
@@ -249,33 +250,50 @@ runReclamationLeaseWith beforeVerification pool lease=mask $ \restore -> do
         _ -> pure ()
 
 compressArchive :: Pool H.Connection -> DB.ArchiveLease -> IO PreparedArchive
-compressArchive pool lease = do
+compressArchive = compressArchiveWithPause (const (threadDelay 1000))
+
+compressArchiveWithPause :: (Int64 -> IO ()) -> Pool H.Connection -> DB.ArchiveLease -> IO PreparedArchive
+compressArchiveWithPause pause pool lease = do
   receipt <- DB.readArchiveReceipt pool lease >>= need "archive_receipt_unavailable"
   snapshot <- DB.readArchiveReplacementSnapshot pool lease >>= need "archive_lease_lost"
   rules <- traverse (\p -> either throwIO pure (Replacement.decodeSnapshot p.formatLabel p.eligibleFrom p.snapshotBytes)) snapshot
   originalHash <- traverse (const (newIORef (hashInit :: Context SHA256))) rules
   sourcePosition <- newIORef (0,0,0 :: Int64,True)
+  lastPause <- newIORef 0
   partPosition <- newIORef (0,0 :: Int64)
-  let source = do
-        (offset,revision,records,previousNewline) <- readIORef sourcePosition
-        row <- DB.readArchiveSourceChunk pool lease offset
-        case row of
-          Nothing -> do
+  let checkSource ok code = unless ok (Left (toException (ArchiveFailure code)))
+      addSource a b
+        | a>=0 && b>=0 && a<=maxBound-b = Right (a+b)
+        | otherwise = Left (toException (Codec.CodecFailure "archive_counter_overflow"))
+      validateSource :: (Int64,Int64,Int64,Bool) -> DB.ArchiveSourceChunk -> Either SomeException (Int64,Int64,Int64,Bool)
+      validateSource (offset,revision,records,previousNewline) chunk = do
+        checkSource (chunk.startOffset == offset && revision < maxBound && chunk.revision == revision+1 &&
+          not (BS.null chunk.bytes) && BS.length chunk.bytes <= 1048576) "archive_source_order"
+        end <- addSource offset (fromIntegral (BS.length chunk.bytes))
+        let newline = BS.isSuffixOf "\n" chunk.bytes
+            count = fromIntegral (BS.count 10 chunk.bytes) + (if newline then 0 else 1) - (if previousNewline then 0 else 1)
+        checkSource (end <= receipt.rawBytes && chunk.endsWithNewline == newline && chunk.recordCount == count &&
+          (maybe False (const True) rules || previousNewline || BS.isPrefixOf "\n" chunk.bytes || BS.isPrefixOf "\r\n" chunk.bytes) &&
+          (newline || chunk.allowFinalRecord)) "archive_source_metadata"
+        totalRecords <- addSource records count
+        pure (end,chunk.revision,totalRecords,newline)
+      source = do
+        cursor@(offset,revision,records,_) <- readIORef sourcePosition
+        -- Give foreground work a turn between bounded source reads without
+        -- holding a pool lease. Count bytes rather than append calls.
+        pausedAt <- readIORef lastPause
+        when (offset < receipt.rawBytes && offset-pausedAt >= 1048576) $ do
+          pause offset
+          writeIORef lastPause offset
+        staged <- DB.readAndStageArchiveSourceChunk pool lease offset revision (validateSource cursor)
+        case staged of
+          DB.ArchiveSourceEnd -> do
             check (offset == receipt.rawBytes && revision == receipt.rawRevision-1 && records == receipt.rawRecords) "archive_source_incomplete"
             pure Nothing
-          Just chunk -> do
-            check (chunk.startOffset == offset && chunk.revision == revision+1 &&
-              not (BS.null chunk.bytes) && BS.length chunk.bytes <= 1048576) "archive_source_order"
-            end <- Codec.checkedAdd offset (fromIntegral (BS.length chunk.bytes))
-            let newline = BS.last chunk.bytes == 10
-                count = fromIntegral (BS.count 10 chunk.bytes) + (if newline then 0 else 1) - (if previousNewline then 0 else 1)
-            check (end <= receipt.rawBytes && chunk.endsWithNewline == newline && chunk.recordCount == count &&
-              (maybe False (const True) rules || previousNewline || BS.isPrefixOf "\n" chunk.bytes || BS.isPrefixOf "\r\n" chunk.bytes) &&
-              (newline || chunk.allowFinalRecord)) "archive_source_metadata"
-            copied <- DB.stageArchiveLedger pool lease revision 1
-            check (copied == Just chunk.revision) "archive_ledger_stage_failed"
-            totalRecords <- Codec.checkedAdd records count
-            writeIORef sourcePosition (end,chunk.revision,totalRecords,newline)
+          DB.ArchiveSourceRejected failure -> throwIO failure
+          DB.ArchiveSourceLedgerRejected -> throwIO (ArchiveFailure "archive_ledger_stage_failed")
+          DB.ArchiveSourceReady chunk next -> do
+            writeIORef sourcePosition next
             mapM_ (\ref -> modifyIORef' ref (`hashUpdate` chunk.bytes)) originalHash
             pure (Just chunk.bytes)
       sink bytes = do
@@ -286,7 +304,10 @@ compressArchive pool lease = do
         (raw,_,_,_) <- readIORef sourcePosition
         live (DB.archiveProgress pool lease "compressing" raw end)
   (contentSource, replacementCount) <- maybe (pure (source,pure 0)) (\configured -> Replacement.newReplacementSource configured source) rules
-  encoded <- Codec.compress contentSource sink
+  let nextContent = contentSource >>= \case
+        Nothing -> pure Nothing
+        bytes@(Just _) -> yield >> pure bytes
+  encoded <- Codec.compress nextContent sink
   sourceDigest <- maybe (pure encoded.raw.sha256) (fmap digestText . readIORef) originalHash
   check (sourceDigest == receipt.rawSha256 &&
     (maybe False (const True) rules || encoded.raw.byteCount == receipt.rawBytes)) "archive_source_receipt_mismatch"

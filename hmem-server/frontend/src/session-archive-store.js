@@ -4,15 +4,18 @@ export const BATCH_ROWS = 256
 export const BATCH_BYTES = 1048576
 export const PAGE_ROWS = 64
 export const PAGE_BYTES = 4194304
-export const INDEX_VERSION = 7
-const encoder = new TextEncoder(),indexDecoder=new TextDecoder('utf-8',{fatal:true})
+export const INDEX_VERSION = 8
+const encoder = new TextEncoder()
 const UUID=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
 const NAMESPACE='hmem-session-archives-v1'
 const DATABASE='hmem-session-archive-v1-'
+const MAX_SIGNED_COUNT=9223372036854775807n
 export const serializedBytes = value => encoder.encode(JSON.stringify(value)).length
 export function decimal(value) {
-  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value) || BigInt(value) > 9223372036854775807n) throw Error('invalid_count')
-  return BigInt(value)
+  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) throw Error('invalid_count')
+  const count=BigInt(value)
+  if(count>MAX_SIGNED_COUNT)throw Error('invalid_count')
+  return count
 }
 export function fileOffset(value) {
   const number = Number(value)
@@ -22,29 +25,167 @@ export function fileOffset(value) {
 export const positionKey = value => decimal(String(value)).toString().padStart(19,'0')
 export const pieceKey = (offset,index) => `${positionKey(offset)}:${String(index).padStart(7,'0')}`
 const INDEX_KEY=/^[0-9]{19}:[0-9]{7}$/
+const GROUP_KEY=/^(0|[1-9][0-9]*):(0|[1-9][0-9]{0,6})$/
 const PAGE_OVERHEAD=serializedBytes({key:'',data:[]})-2
 const indexPageBytes=(key,payloadBytes)=>PAGE_OVERHEAD+key.length+payloadBytes
+// Little-endian page header: magic, version, table, row count, used bytes.
+// Each row starts with its exact fence offset, block index and byte length.
+const PACKED_MAGIC=0x58494d48 // HMIX
+const PACKED_VERSION=1
+const PAGE_HEADER=12,ROW_HEADER=16
+const PIECE_FIXED=ROW_HEADER+8+4+1+3*4,GROUP_FIXED=ROW_HEADER+8+4
+const MAX_BLOCK_INDEX=9999999
+const MAX_FILE_OFFSET=BigInt(Number.MAX_SAFE_INTEGER),MAX_RECORD_BYTES=1048576
+const delimiters=['','\n','\r\n'],kinds=['text','thinking','encrypted','tool','result','event']
 
 function groupIndexKey(group) {
-  const match=/^(0|[1-9][0-9]*):(0|[1-9][0-9]{0,6})$/.exec(group)
-  if(!match)throw Error('invalid_archive_group')
+  const match=groupKeyParts(group)
   return pieceKey(match[1],match[2])
 }
-function rowsInIndexPage(page) {
+
+function piCode(row) {
+  if(!Object.hasOwn(row,'piVersion'))return 0
+  if(row.piVersion===null)return 1
+  if(row.piVersion==='invalid')return 2
+  if(Number.isInteger(row.piVersion))return 3
+  throw Error('invalid_index_row')
+}
+function indexTextUnits(table,row) {
+  if(table==='groups'){
+    if(typeof row.endTime!=='string')throw Error('invalid_index_row')
+    return row.endTime.length
+  }
+  if(typeof row.label!=='string'||typeof row.role!=='string'||typeof row.time!=='string')throw Error('invalid_index_row')
+  return row.label.length+row.role.length+row.time.length
+}
+function packedRowBytes(table,row,units) {
+  return units*2+(table==='groups'?GROUP_FIXED:PIECE_FIXED+(row.group?12:0)+(piCode(row)===3?8:0))
+}
+function indexPosition(key) {
+  const offset=BigInt(key.slice(0,19))
+  if(offset>MAX_SIGNED_COUNT)throw Error('invalid_index_key')
+  return offset
+}
+function pieceSpan(row,offset=decimal(row.offset)) {
+  const end=decimal(row.end),span=end-offset
+  if(!delimiters.includes(row.delimiter)||!kinds.includes(row.kind)||end>MAX_FILE_OFFSET
+    || span<=BigInt(row.delimiter.length)||span>BigInt(MAX_RECORD_BYTES+row.delimiter.length)
+    || row.index!==Number(row.key.slice(20))||typeof row.group!=='string')throw Error('invalid_index_row')
+  return Number(span)
+}
+function groupKeyParts(group) {
+  const match=GROUP_KEY.exec(group)
+  if(!match)throw Error('invalid_archive_group')
+  return match
+}
+function groupCount(count) {
+  const value=decimal(count)
+  if(!value)throw Error('invalid_archive_group')
+  return value
+}
+function writeIndexText(view,at,text) {
+  view.setUint32(at,text.length,true);at+=4
+  for(let index=0;index<text.length;index++,at+=2)view.setUint16(at,text.charCodeAt(index),true)
+  return at
+}
+function writeIndexRow(view,start,table,row,key,bytes) {
+  view.setBigUint64(start,indexPosition(key),true)
+  view.setUint32(start+8,Number(key.slice(20)),true)
+  view.setUint32(start+12,bytes,true)
+  let at=start+ROW_HEADER
+  if(table==='groups'){
+    view.setBigUint64(at,groupCount(row.count),true)
+    writeIndexText(view,at+8,row.endTime)
+    return
+  }
+  const offset=decimal(row.offset),span=pieceSpan(row,offset),pi=piCode(row)
+  view.setBigUint64(at,offset,true);view.setUint32(at+8,span,true);at+=12
+  view.setUint8(at++,delimiters.indexOf(row.delimiter)|(kinds.indexOf(row.kind)<<2)|(pi<<5)|(row.group?128:0))
+  if(row.group){
+    const group=groupKeyParts(row.group)
+    view.setBigUint64(at,decimal(group[1]),true);view.setUint32(at+8,Number(group[2]),true);at+=12
+  }
+  if(pi===3){view.setFloat64(at,row.piVersion || 0,true);at+=8}
+  at=writeIndexText(view,at,row.label)
+  at=writeIndexText(view,at,row.role)
+  writeIndexText(view,at,row.time)
+}
+function readSingleIndexRow(table,row,knownBytes) {
+  const units=indexTextUnits(table,row)
+  if(indexPageBytes(row.key,PAGE_HEADER+packedRowBytes(table,row,units))<=BATCH_BYTES
+    || units>BATCH_BYTES||(knownBytes??serializedBytes(row))>BATCH_BYTES)throw Error('invalid_index_page')
+  indexPosition(row.key)
+  if(table==='groups'){
+    if(Object.keys(row).length!==3)throw Error('invalid_index_page')
+    groupCount(row.count)
+  }else{
+    if(Object.keys(row).length!==10+(Object.hasOwn(row,'piVersion')?1:0))throw Error('invalid_index_page')
+    pieceSpan(row);if(row.group)decimal(groupKeyParts(row.group)[1])
+  }
+  return [row]
+}
+export function rowsInIndexPage(table,page) {
   if(!page)return []
   if(typeof page.key!=='string'||!INDEX_KEY.test(page.key))throw Error('invalid_index_page')
-  if(!Object.hasOwn(page,'data'))return [page]
-  const data=page.data
-  if(!(data instanceof Uint8Array)||data.byteLength<4||indexPageBytes(page.key,data.byteLength)>BATCH_BYTES)throw Error('invalid_index_page')
-  let rows
-  try{rows=JSON.parse(indexDecoder.decode(data))}catch{throw Error('invalid_index_page')}
-  if(!Array.isArray(rows)||!rows.length||rows.length>BATCH_ROWS)throw Error('invalid_index_page')
-  let previous=''
-  for(const row of rows){
-    if(typeof row?.key!=='string'||!INDEX_KEY.test(row.key)||row.key<=previous)throw Error('invalid_index_page')
-    previous=row.key
+  if(!Object.hasOwn(page,'data')){
+    try{return readSingleIndexRow(table,page)}catch{throw Error('invalid_index_page')}
   }
-  if(previous!==page.key)throw Error('invalid_index_page')
+  const data=page.data
+  if(!(data instanceof Uint8Array)||!(data.buffer instanceof ArrayBuffer)||data.byteOffset!==0||data.buffer.byteLength!==data.byteLength
+    || data.byteLength<PAGE_HEADER || indexPageBytes(page.key,data.byteLength)>BATCH_BYTES)throw Error('invalid_index_page')
+  const view=new DataView(data.buffer),count=view.getUint16(6,true),rows=[]
+  if(view.getUint32(0,true)!==PACKED_MAGIC||view.getUint8(4)!==PACKED_VERSION||view.getUint8(5)!==(table==='pieces'?1:2)
+    || !count||count>BATCH_ROWS||view.getUint32(8,true)!==data.byteLength)throw Error('invalid_index_page')
+  let at=PAGE_HEADER,end=data.byteLength,textScratch
+  const require=bytes=>{if(bytes>end-at)throw Error('invalid_index_page')}
+  const text=()=>{
+    require(4)
+    const units=view.getUint32(at,true);at+=4;require(units*2)
+    let result=''
+    if(units)textScratch??=new Uint16Array(1024)
+    for(let copied=0;copied<units;){
+      const count=Math.min(textScratch.length,units-copied)
+      for(let index=0;index<count;index++,at+=2)textScratch[index]=view.getUint16(at,true)
+      result+=String.fromCharCode(...textScratch.subarray(0,count));copied+=count
+    }
+    return result
+  }
+  let previous=''
+  for(let index=0;index<count;index++){
+    end=data.byteLength;require(ROW_HEADER)
+    const position=view.getBigUint64(at,true),block=view.getUint32(at+8,true),length=view.getUint32(at+12,true)
+    if(position>MAX_SIGNED_COUNT||block>MAX_BLOCK_INDEX||length<(table==='pieces'?PIECE_FIXED:GROUP_FIXED)||length>end-at)throw Error('invalid_index_page')
+    end=at+length;at+=ROW_HEADER
+    const key=`${position.toString().padStart(19,'0')}:${String(block).padStart(7,'0')}`
+    if(key<=previous)throw Error('invalid_index_page')
+    previous=key
+    if(table==='groups'){
+      const count=view.getBigUint64(at,true);at+=8
+      if(count>MAX_SIGNED_COUNT)throw Error('invalid_index_page')
+      if(!count)throw Error('invalid_archive_group')
+      rows.push({key,count:count.toString(),endTime:text()})
+    }else{
+      const offset=view.getBigUint64(at,true),span=view.getUint32(at+8,true),tags=view.getUint8(at+12);at+=13
+      const delimiter=delimiters[tags&3],kind=kinds[(tags>>2)&7],pi=(tags>>5)&3,rawEnd=offset+BigInt(span)
+      if(delimiter===undefined||kind===undefined||rawEnd>MAX_FILE_OFFSET
+        || span<=delimiter.length||span>MAX_RECORD_BYTES+delimiter.length)throw Error('invalid_index_page')
+      let group='',piVersion
+      if(tags&128){
+        require(12)
+        const position=view.getBigUint64(at,true),block=view.getUint32(at+8,true);at+=12
+        if(position>MAX_SIGNED_COUNT||block>MAX_BLOCK_INDEX)throw Error('invalid_index_page')
+        group=`${position}:${block}`
+      }
+      if(pi===1)piVersion=null
+      if(pi===2)piVersion='invalid'
+      if(pi===3){require(8);piVersion=view.getFloat64(at,true);at+=8;if(!Number.isInteger(piVersion))throw Error('invalid_index_page')}
+      const row={key,offset:offset.toString(),end:rawEnd.toString(),delimiter,index:block,kind,label:text(),role:text(),time:text(),group}
+      if(pi)row.piVersion=piVersion
+      rows.push(row)
+    }
+    if(at!==end)throw Error('invalid_index_page')
+  }
+  if(at!==data.byteLength||previous!==page.key)throw Error('invalid_index_page')
   return rows
 }
 
@@ -57,7 +198,7 @@ function readGroupSummaries(store,keys) {
     operation.onerror=()=>reject(operation.error)
     operation.onsuccess=()=>{
       try{
-        const cursor=operation.result,rows=rowsInIndexPage(cursor?.value)
+        const cursor=operation.result,rows=rowsInIndexPage('groups',cursor?.value)
         if(!rows.length)throw Error('archive_group_missing')
         const last=rows.at(-1).key
         let at=0
@@ -232,9 +373,15 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
     pending.push([table,value]);pendingBytes+=bytes
   }
   function orderedPages(table) {
-    let buffer,end=1,tailStart=1,lastKey='',single
+    let buffer,view,end=PAGE_HEADER,tailStart=PAGE_HEADER,lastKey='',single
     const keys=[]
-    const clear=()=>{end=1;tailStart=1;keys.length=0;single=null}
+    const clear=()=>{end=PAGE_HEADER;tailStart=PAGE_HEADER;keys.length=0;single=null}
+    function reserve(length) {
+      if(buffer?.length>=length)return
+      const next=new Uint8Array(Math.max(length,Math.min(BATCH_BYTES,(buffer?.length??8192)*2)))
+      if(buffer)next.set(buffer.subarray(0,end))
+      buffer=next;view=new DataView(buffer.buffer)
+    }
     function flushPage() {
       if(single){
         const {value,bytes}=single;clear()
@@ -242,16 +389,26 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
       }
       if(!keys.length)return
       const key=keys.at(-1)
-      buffer[end]=93 // ]
-      const data=buffer.slice(0,end+1)
+      view.setUint32(0,PACKED_MAGIC,true);view.setUint8(4,PACKED_VERSION);view.setUint8(5,table==='pieces'?1:2)
+      view.setUint16(6,keys.length,true);view.setUint32(8,end,true)
+      const data=buffer.slice(0,end)
       clear()
       return enqueue(table,{key,data},indexPageBytes(key,data.byteLength))
     }
     return {
-      put(value,bytes){
-        const {key}=value
+      put(value,key=value.key){
         if(typeof key!=='string'||!INDEX_KEY.test(key))throw Error('invalid_index_key')
         if(key<lastKey)throw Error('unordered_archive_index')
+        const units=indexTextUnits(table,value),bytes=packedRowBytes(table,value,units)
+        const needsSingle=indexPageBytes(key,PAGE_HEADER+bytes)>BATCH_BYTES
+        // Each UTF-16 unit uses at most six bytes when JSON-escaped. The
+        // fixed schema uses fewer than 512 bytes for its other fields.
+        let legacyBytes=0
+        if(needsSingle || units*6+512>BATCH_BYTES){
+          if(table==='groups')value={...value,key}
+          legacyBytes=indexBytes(value)
+          if(needsSingle)readSingleIndexRow(table,value,legacyBytes)
+        }
         if(key===lastKey){
           if(!keys.length&&!single)throw Error('unordered_archive_index')
           // The current group can be extended, and one adjacent event can be
@@ -259,32 +416,30 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
           if(single)single=null
           else {keys.pop();end=tailStart}
         }
-        const prospectiveBytes=indexPageBytes(key,end+(keys.length?1:0)+bytes+1)
+        const prospectiveBytes=indexPageBytes(key,end+bytes)
         const flushed=single||keys.length===BATCH_ROWS||(keys.length&&prospectiveBytes>BATCH_BYTES)?flushPage():undefined
         // Keep an entry that fits the old bound but cannot fit a page envelope.
-        if(indexPageBytes(key,bytes+2)>BATCH_BYTES)single={value,bytes}
+        if(needsSingle)single={value,bytes:legacyBytes}
         else{
-          if(!buffer){buffer=new Uint8Array(BATCH_BYTES);buffer[0]=91} // [
+          reserve(end+bytes)
           tailStart=end
-          if(keys.length)buffer[end++]=44 // ,
-          buffer.set(encodingScratch.subarray(0,bytes),end);end+=bytes;keys.push(key)
+          writeIndexRow(view,end,table,value,key,bytes)
+          end+=bytes;keys.push(key)
         }
         lastKey=key
         return flushed
       },
       flush:flushPage,
-      clear(){clear();buffer=null;lastKey=''}
+      clear(){clear();buffer=null;view=null;lastKey=''}
     }
   }
   const piecePages=orderedPages('pieces'),groupPages=orderedPages('groups')
   function put(table,value) {
     if(closed)throw Error('retired_store')
     if(adoptManifest&&table!=='disclosures')throw Error('archive_read_only')
-    if(table==='groups')value={...value,key:groupIndexKey(value.key)}
-    const bytes=indexBytes(value)
-    if(table==='pieces')return piecePages.put(value,bytes)
-    if(table==='groups')return groupPages.put(value,bytes)
-    return enqueue(table,value,bytes)
+    if(table==='pieces')return piecePages.put(value)
+    if(table==='groups')return groupPages.put(value,groupIndexKey(value.key))
+    return enqueue(table,value,indexBytes(value))
   }
   async function readIndex(table,action) {
     await flush()
@@ -306,7 +461,7 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
     if(table!=='pieces')return readIndex(table,store=>request(store.get(key)))
     return readIndex(table,async store=>{
       const cursor=await request(store.openCursor(IDBKeyRange.lowerBound(key),'next'))
-      return rowsInIndexPage(cursor?.value).find(piece=>piece.key===key)
+      return rowsInIndexPage('pieces',cursor?.value).find(piece=>piece.key===key)
     })
   }
   async function scan(table,{after,before,limit=PAGE_ROWS}={}) {
@@ -314,7 +469,7 @@ export async function openArchiveStore(name, {storage=globalThis.navigator?.stor
     const backwards=!!before,rows=[]
     await readIndex(table,store=>new Promise((resolve,reject)=>{
       const collect=page=>{
-        const pieces=rowsInIndexPage(page)
+        const pieces=rowsInIndexPage(table,page)
         for(let index=backwards?pieces.length-1:0;index>=0&&index<pieces.length&&rows.length<limit;index+=backwards?-1:1){
           const piece=pieces[index]
           if(after?piece.key>after:!before||piece.key<before)rows.push(piece)

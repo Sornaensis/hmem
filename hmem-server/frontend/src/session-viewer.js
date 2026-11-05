@@ -153,13 +153,51 @@ export function payloadTokens(text) {
   return tokens
 }
 
+const textBlockType=type=>type==='text'||type==='input_text'||type==='output_text'
+const validatedTime=source=>source&&parseInstant(source)?source:''
+
+function conversationRow(role,time,blocks,archive,extra) {
+  const row={type:'conversation',role:string(role).slice(0,256)||'assistant',time}
+  // Archive indexing and hydration use the structured blocks directly.
+  if(archive)Object.defineProperty(row,archiveBlocks,{value:blocks})
+  else row.text=JSON.stringify(blocks)
+  return extra?Object.assign(row,extra):row
+}
+
+export function createArchivePresentation() {
+  let lastSource,lastTime
+  const timeFor=source=>{
+    if(!source)return ''
+    if(source===lastSource)return lastTime
+    const time=validatedTime(source)
+    // Do not retain unusually long fractional timestamp strings.
+    if(source.length<=128){lastSource=source;lastTime=time}
+    return time
+  }
+  const options={archive:true,piVersion:null,timeFor}
+  return (value,raw,piVersion)=>{
+    options.piVersion=piVersion
+    return presentation(value,raw,options)
+  }
+}
+
 // Presentation never changes the stored record or its byte boundaries.
-export function presentation(value, raw, {archive=false,piVersion=null}={}) {
+export function presentation(value, raw, {archive=false,piVersion=null,timeFor=validatedTime}={}) {
   const object = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const time=timeFor(string(object.timestamp || object.time))
+  // The common single text block needs no raw-token locator or block traversal.
+  // Leave potential Pi entries, ephemeral records and all other blocks below.
+  if(archive&&object.type==='response_item'&&object.ephemeral!==true&&!Object.hasOwn(object,'parentId')){
+    const item=object.payload,content=item?.content
+    if(item?.type==='message'&&Array.isArray(content)&&content.length===1){
+      const part=content[0]
+      if(part&&typeof part==='object'&&!Array.isArray(part)&&textBlockType(part.type)&&typeof part.text==='string'){
+        return conversationRow(item.role || 'assistant',time,[{kind:'text',text:part.text,label:''}],true)
+      }
+    }
+  }
   let rawLocator
   const rawValue=path=>(rawLocator??=createRawJsonLocator(raw))(path)
-  const sourceTime = string(object.timestamp || object.time)
-  const time = parseInstant(sourceTime) ? sourceTime : ''
   const block = (kind, text, label = '') => ({kind, text:string(text), label:string(label).slice(0,256)})
   // Reuse the raw-token pager for unfamiliar content, including nested blocks.
   // It preserves source spelling and produces deep indentation only on demand.
@@ -168,6 +206,8 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
   const attachment = value => payload(value?.type || 'attachment',attachmentMetadata(value),null)
   const tool = (kind, value, name = '') => {
     const field=kind === 'result'?'output':'input'
+    const label=`${kind === 'result'?'Result':'Call'}${name?' · '+short(name):''}`
+    if(archive&&(value===null||value===undefined))return {...block(kind,'null',label),tokens:[]}
     let payload,preview
     if(archive) {
       let parsed=value
@@ -179,12 +219,12 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
       preview=prettyPayloadSlice(typeof value==='string'?parsed:JSON.parse(payload.text)).text
     }else {payload=toolPayload(value,field);preview=payload.text}
     const first=preview.split('\n').find(line=>line.includes(':'))?.trim() || ''
-    return {...block(kind,payload.text,`${kind === 'result'?'Result':'Call'}${name?' · '+short(name):''}${first?' · '+short(first.replace(/,$/,'')):''}`),tokens:payload.tokens}
+    return {...block(kind,payload.text,`${label}${first?' · '+short(first.replace(/,$/,'')):''}`),tokens:payload.tokens}
   }
   const contentBlocks = (content,path) => (Array.isArray(content) ? content : [{type:typeof content === 'string'?'text':'unknown',text:content}]).flatMap((part,index) => {
     const source=Array.isArray(content)?[...path,index]:path,value=Array.isArray(content)?part:content
     if (!part || typeof part !== 'object' || Array.isArray(part)) return [payload('content block',value,source)]
-    if (['text','input_text','output_text'].includes(part.type)) return typeof part.text === 'string' ? [block('text',part.text)] : [payload(part.type,value,source)]
+    if (textBlockType(part.type)) return typeof part.text === 'string' ? [block('text',part.text)] : [payload(part.type,value,source)]
     if (['redacted_thinking','encrypted_thinking'].includes(part.type) || (['thinking','reasoning'].includes(part.type) && (part.encrypted_content || part.encrypted || part.redacted===true))) return [block('encrypted','','Thinking...')]
     if (['thinking','reasoning','summary_text'].includes(part.type)) return [block('thinking',part.thinking || part.text,'Thinking')]
     if (part.type === 'tool_use') return [tool('tool',part.input,part.name)]
@@ -193,13 +233,7 @@ export function presentation(value, raw, {archive=false,piVersion=null}={}) {
     if(['image','image_url','input_image','audio','input_audio','file','document','video'].includes(part.type))return [attachment(part)]
     return [payload(part.type || 'content block',value,source)]
   })
-  const conversation = (role,blocks,extra={}) => {
-    const row={type:'conversation',role:string(role).slice(0,256)||'assistant',time}
-    // Archive indexing and hydration use the structured blocks directly.
-    if(archive)Object.defineProperty(row,archiveBlocks,{value:blocks})
-    else row.text=JSON.stringify(blocks)
-    return Object.assign(row,extra)
-  }
+  const conversation = (role,blocks,extra) => conversationRow(role,time,blocks,archive,extra)
   const hidden=()=>({type:'unknown',role:'',time,text:''})
   if(object.ephemeral===true || ['assistant.message_delta','assistant.reasoning_delta','assistant.streaming_delta','tool.execution_partial_result','tool.execution_progress'].includes(object.type))return hidden()
   if(object.type==='session')return object.version===3?hidden():conversation('notice',[payload(`pi session version ${short(String(object.version))}`)],{piVersion:Number.isInteger(object.version)?object.version:'invalid'})
@@ -386,6 +420,10 @@ export function visibleBlocks(row) {
 
 export function pairOccurrence(previous,row) {
   if (!previous || previous.type !== 'conversation' || row.type !== 'conversation') return false
+  if(Boolean(previous.eventEnvelope)===Boolean(row.eventEnvelope)
+    || (previous.pairedOffset!==undefined&&previous.pairedOffset!==row.offset)
+    || (row.pairedOffset!==undefined&&row.pairedOffset!==previous.offset)
+    || previous.role!==row.role)return false
   const sameText=(first,second)=>{
     if(!first.pretty && !second.pretty)return first.text===second.text
     if(first.pretty && second.pretty)return first.text===second.text
@@ -395,17 +433,10 @@ export function pairOccurrence(previous,row) {
     while(true){const part=reader.read();if(plain.text.slice(at,at+part.text.length)!==part.text)return false;at+=part.text.length
       if(at>plain.text.length)return false;if(!part.more)return at===plain.text.length}
   }
-  const sameContent=()=>{
-    if(previous.role!==row.role)return false
-    const before=blocksFor(previous),after=blocksFor(row)
-    return before.length===after.length && before.every((block,index)=>block.kind===after[index].kind && sameText(block,after[index]))
-  }
-  const paired = Boolean(previous.eventEnvelope)!==Boolean(row.eventEnvelope)
-    && (previous.pairedOffset === undefined || previous.pairedOffset === row.offset)
-    && (row.pairedOffset === undefined || row.pairedOffset === previous.offset)
-    && sameContent()
+  const before=blocksFor(previous),after=blocksFor(row)
+  if(before.length!==after.length||!before.every((block,index)=>block.kind===after[index].kind&&sameText(block,after[index])))return false
   const firstTime=Date.parse(previous.time),lastTime=Date.parse(row.time)
-  if(paired && Number.isFinite(firstTime) && Number.isFinite(lastTime) && Math.abs(firstTime-lastTime)<=100) {
+  if(Number.isFinite(firstTime) && Number.isFinite(lastTime) && Math.abs(firstTime-lastTime)<=100) {
     const canonical = row.eventEnvelope ? previous : row
     canonical.presentationOffset = (typeof row.presentationOffset === 'string'
       ? BigInt(previous.presentationOffset) < BigInt(row.presentationOffset)

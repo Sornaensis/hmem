@@ -57,17 +57,137 @@ test('one native gzip context receives bounded compressed writes across input bo
   assert.ok(gzip.length>4096)
   const Native=globalThis.DecompressionStream,writes=[];let contexts=0,reader,pipeline,completion,cleanup
   globalThis.DecompressionStream=class {
-    constructor(codec){contexts++;const decoder=new Native(codec);return {readable:decoder.readable,writable:{getWriter(){const writer=decoder.writable.getWriter();return {write(bytes){writes.push(bytes.length);return writer.write(bytes)},close:()=>writer.close(),abort:error=>writer.abort(error),releaseLock:()=>writer.releaseLock()}}}}}
+    constructor(codec){contexts++;const decoder=new Native(codec);return {readable:decoder.readable,writable:{getWriter(){const writer=decoder.writable.getWriter();return {closed:writer.closed,write(bytes){writes.push(bytes.length);return writer.write(bytes)},close:()=>writer.close(),abort:error=>writer.abort(error),releaseLock:()=>writer.releaseLock()}}}}}
   }
   try{
     const source=new ReadableStream({start(controller){controller.enqueue(gzip.subarray(0,5003));controller.enqueue(gzip.subarray(5003));controller.close()}})
+    const modes=[],getReader=source.getReader.bind(source)
+    source.getReader=options=>{modes.push(options?.mode??'default');return getReader(options)}
     pipeline=gzipPipeline(source);completion=pipeline.completion.then(()=>({}),error=>({error}));cleanup=pipeline.cleanup.then(()=>({}),error=>({error}))
     reader=pipeline.readable.getReader();const hash=createHash('sha256');let bytes=0
     while(true){const part=await reader.read();if(part.done)break;hash.update(part.value);bytes+=part.value.length}
     assert.deepEqual(await completion,{});assert.deepEqual(await cleanup,{})
+    assert.deepEqual(modes,['byob','default']);assert.equal(source.locked,false)
     assert.equal(contexts,1);assert.ok(writes.length>1);assert.ok(writes.every(length=>length>0&&length<=4096));assert.equal(writes.reduce((sum,size)=>sum+size,0),gzip.length)
     assert.equal(bytes,raw.length);assert.equal(hash.digest('hex'),digest(raw))
   }finally{reader?.releaseLock();globalThis.DecompressionStream=Native}
+})
+
+function useCopyingGzipSink(){
+  const native=globalThis.DecompressionStream
+  globalThis.DecompressionStream=class {
+    constructor(codec){assert.equal(codec,'gzip');return new TransformStream({transform(bytes,controller){controller.enqueue(bytes.slice())}})}
+  }
+  return ()=>{globalThis.DecompressionStream=native}
+}
+
+test('gzip byte stream reuses one returned buffer across short, full and terminal reads',{timeout:5000},async()=>{
+  let seed=0x51a7
+  const bytes=Buffer.alloc(2*IO_BYTES),lengths=[]
+  for(let at=0;at<bytes.length;at++){seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;bytes[at]=seed&255}
+  let at=0,previous,tail
+  const source=new ReadableStream({type:'bytes',pull(controller){
+    const request=controller.byobRequest,view=request.view
+    assert.equal(view.byteLength,IO_BYTES);assert.equal(view.byteOffset,0)
+    if(previous){assert.equal(previous.byteLength,0);assert.equal(view.at(-1),tail)}
+    else view.fill(0xa5)
+    if(at===bytes.length){controller.close();request.respond(0);return}
+    const length=Math.min(lengths.length===0?4099:IO_BYTES,bytes.length-at)
+    view.set(bytes.subarray(at,at+length));at+=length;tail=view.at(-1);previous=view
+    lengths.push(length);request.respond(length)
+  }})
+  const restore=useCopyingGzipSink()
+  try{
+    const pipeline=gzipPipeline(source)
+    const [forwarded]=await Promise.all([new Response(pipeline.readable).arrayBuffer(),pipeline.completion,pipeline.cleanup])
+    assert.deepEqual(Buffer.from(forwarded),bytes)
+    assert.equal(lengths[0],4099);assert.ok(lengths.includes(IO_BYTES));assert.ok(lengths.at(-1)<IO_BYTES)
+    assert.equal(at,bytes.length);assert.equal(source.locked,false)
+  }finally{restore()}
+})
+
+test('native gzip verifies the logical bytes from a staged Blob byte reader',async()=>{
+  const raw=Buffer.from('λ😀 strict gzip\n'.repeat(101)),source=new Blob([gzipSync(raw)]).stream()
+  const modes=[],getReader=source.getReader.bind(source)
+  source.getReader=options=>{modes.push(options?.mode??'default');return getReader(options)}
+  const pipeline=gzipPipeline(source)
+  const [decoded]=await Promise.all([new Response(pipeline.readable).arrayBuffer(),pipeline.completion,pipeline.cleanup])
+  assert.deepEqual(Buffer.from(decoded),raw);assert.deepEqual(modes,['byob']);assert.equal(source.locked,false)
+})
+
+test('gzip byte read rejection closes the owned pipeline without retrying the default reader',async()=>{
+  for(const failure of [new TypeError('actual_byte_read_failed'),NaN]){
+    const modes=[],header=gzipSync('partial gzip').subarray(0,10)
+    let pulls=0
+    const source=new ReadableStream({type:'bytes',pull(controller){
+      if(++pulls===1){const request=controller.byobRequest;request.view.set(header);request.respond(header.length)}
+      else controller.error(failure)
+    }})
+    const getReader=source.getReader.bind(source)
+    source.getReader=options=>{modes.push(options?.mode??'default');return getReader(options)}
+    const pipeline=gzipPipeline(source)
+    await Promise.all([
+      assert.rejects(new Response(pipeline.readable).arrayBuffer()),
+      assert.rejects(pipeline.completion,error=>Object.is(error,failure)),
+      pipeline.cleanup
+    ])
+    assert.equal(pulls,2);assert.deepEqual(modes,['byob']);assert.equal(source.locked,false)
+  }
+})
+
+test('gzip cancellation joins the actual byte reader even when its pending read resolves as EOF',{timeout:5000},async()=>{
+  const restore=useCopyingGzipSink()
+  try{for(const reason of [undefined,'retired',NaN])for(const hookFails of [false,true]){
+    const header=gzipSync('partial gzip').subarray(0,10)
+    let pulls=0,cancels=0,complete=false,readPending,startedCancel,finishCancel
+    const pendingRead=new Promise(resolve=>{readPending=resolve})
+    const cancelStarted=new Promise(resolve=>{startedCancel=resolve})
+    const heldCancel=new Promise((resolve,reject)=>{finishCancel=()=>hookFails?reject(reason):resolve()})
+    const source=new ReadableStream({type:'bytes',pull(controller){
+      if(++pulls===1){const request=controller.byobRequest;request.view.set(header);request.respond(header.length)}
+      else readPending()
+    },cancel(actual){cancels++;startedCancel(actual);return heldCancel}})
+    const pipeline=gzipPipeline(source),reader=pipeline.readable.getReader()
+    const completion=pipeline.completion.then(()=>({failed:false}),error=>({failed:true,error})).finally(()=>{complete=true})
+    const cleanup=pipeline.cleanup.then(()=>({}),error=>({error}))
+    try{
+      const first=await reader.read();assert.equal(first.done,false)
+      assert.deepEqual(Buffer.from(first.value),header)
+      const output=reader.read()
+      await pendingRead
+      await reader.cancel(reason)
+      assert.equal(await cancelStarted,reason)
+      assert.deepEqual(await output,{done:true,value:undefined})
+      assert.equal(complete,false);assert.equal(source.locked,true)
+      finishCancel()
+      const result=await completion
+      assert.equal(result.failed,true)
+      if(hookFails){
+        assert.equal(result.error.message,'archive_cleanup_failed');assert.equal(result.error.errors.at(-1),reason)
+        assert.deepEqual(await cleanup,{error:reason});assert.equal(source.locked,true)
+      }else{
+        assert.deepEqual(await cleanup,{});assert.equal(source.locked,false)
+      }
+      assert.equal(cancels,1)
+    }finally{finishCancel();reader.releaseLock()}
+  }}finally{restore()}
+})
+
+test('gzip rejects invalid BYOB views before writing them and releases the sole reader',async()=>{
+  for(const value of [new Uint16Array(1),new Uint8Array(IO_BYTES+1),new Uint8Array(new ArrayBuffer(IO_BYTES),1,1),new Uint8Array(new ArrayBuffer(IO_BYTES),0,0)]){
+    let cancelled=0,released=0
+    const source={getReader(options){
+      assert.deepEqual(options,{mode:'byob'})
+      return {read:async()=>({done:false,value}),closed:Promise.resolve(),cancel:async()=>{cancelled++},releaseLock:()=>{released++}}
+    }}
+    const pipeline=gzipPipeline(source)
+    await Promise.all([
+      assert.rejects(new Response(pipeline.readable).arrayBuffer(),/invalid_gzip_source_view/),
+      assert.rejects(pipeline.completion,/invalid_gzip_source_view/),
+      pipeline.cleanup
+    ])
+    assert.equal(cancelled,1);assert.equal(released,1)
+  }
 })
 test('strict archive framing preserves per-record BOM, UTF-8, CRLF, LF and final bytes across every cut',()=>{
   const lexical='{"type": "future", "value": 9007199254740993, "λ": "😀"}'
@@ -142,6 +262,65 @@ test('archive and live semantic transitions match pairing, metadata resets and d
   assert.equal(new Set(visible.filter(row=>row.category==='activity').map(row=>row.activityAnchors[0])).size,1)
 })
 
+test('archive single-text projection retains exact framing, timestamps and fallback metadata',()=>{
+  const repeated='2024-02-29t23:59:59.12345+23:59',invalid='2023-02-29T00:00:00Z'
+  const long='2024-01-01T00:00:00.'+'0'.repeat(145)+'z'
+  const message=(content,timestamp,extra={},role='assistant')=>({type:'response_item',timestamp,payload:{type:'message',role,content},...extra})
+  const text=(type,text)=>({type,text})
+  const values=[
+    message([text('output_text','λ😀\ud800')],repeated,{},'x'.repeat(270)),
+    message([text('input_text','same instant')],undefined),
+    message([text('text','repeated')],repeated),
+    message([text('text','invalid')],invalid),
+    message([text('text','long fraction')],long),
+    message([text('text','same invalid')],invalid),
+    message([text('text','valid again')],repeated),
+    message([text('text','ephemeral')],repeated,{ephemeral:true}),
+    message([text('output_text',42)],repeated),
+    message([text('text','first'),text('output_text','second')],repeated),
+    message('plain string content',repeated),
+    {type:'session',version:3},
+    message([text('output_text','Pi precedence')],repeated,{id:'pi',parentId:null}),
+    message([text('output_text','non-Pi fallback')],repeated,{parentId:null})
+  ]
+  const records=values.map((value,index)=>JSON.stringify(value)+(index===values.length-1?'':index%2?'\r\n':'\n'))
+  const input=Buffer.from(records.join('')),cut=input.indexOf(Buffer.from('λ'))+1,framer=createArchiveFramer()
+  const rows=[...framer.push(input.subarray(0,cut)),...framer.push(input.subarray(cut),true)]
+  let offset=0,piVersion=null
+  for(const [index,row] of rows.entries()){
+    const value=values[index],raw=JSON.stringify(value),length=Buffer.byteLength(records[index])
+    if(value.type==='session')piVersion=value.version
+    const reference=presentation(JSON.parse(raw),raw,{piVersion})
+    assert.deepEqual([row.type,row.role,row.time,row.piVersion],[reference.type,reference.role,reference.time,reference.piVersion])
+    assert.deepEqual([row.offset,row.end,row.delimiter,row.recordBytes],
+      [String(offset),String(offset+length),records[index].slice(raw.length),length])
+    if(row.type==='conversation'){
+      assert.deepEqual(blocksFor(row),blocksFor(reference))
+      assert.equal(Object.hasOwn(row,'text'),false)
+    }
+    offset+=length
+  }
+  assert.deepEqual(rows.slice(0,7).map(row=>row.time),[repeated,'',repeated,'',long,'',repeated])
+  assert.equal(rows[7].type,'unknown')
+  assert.ok(blocksFor(rows[12])[0].nativeContext)
+  assert.equal(framer.through,BigInt(input.length))
+})
+
+test('absent archive tool payloads keep exact null text and labels without a JSON round trip',()=>{
+  const values=[
+    [{type:'response_item',payload:{type:'function_call',name:'mcp__check',arguments:null}},'tool','Call · check'],
+    [{type:'response_item',payload:{type:'function_call_output',call_id:'request'}},'result','Result · request']
+  ]
+  const parse=JSON.parse,stringify=JSON.stringify
+  const raw=values.map(([value])=>stringify(value))
+  JSON.parse=()=>{throw Error('unexpected null JSON parse')}
+  JSON.stringify=()=>{throw Error('unexpected null JSON stringify')}
+  let blocks
+  try{blocks=values.map(([value],index)=>blocksFor(presentation(value,raw[index],{archive:true}))[0])}
+  finally{JSON.parse=parse;JSON.stringify=stringify}
+  assert.deepEqual(blocks,values.map(([,kind,label])=>({kind,text:'null',label,tokens:[]})))
+})
+
 test('archive block refs are per-row, stable and private while exact live semantics remain unchanged',async()=>{
   const event={type:'event_msg',timestamp:'2026-01-01T00:00:00Z',payload:{type:'agent_message',text:'same λ😀'}}
   const canonical={type:'response_item',timestamp:'2026-01-01T00:00:00.050Z',payload:{type:'message',role:'assistant',content:[{type:'text',text:'same λ😀'}]}}
@@ -201,7 +380,10 @@ test('lazy pretty output preserves exact formatting without expanding a 202MB va
   assert.ok(block.text.length<1048576);assert.equal(block.tokens.length,0)
 })
 function memoryStore(){const tables=Object.fromEntries(['records','pieces','groups','meta','disclosures'].map(name=>[name,new Map()]));const compressed=[],raw=[];let published=false,closed=false
-  return {tables,get published(){return published},get closed(){return closed},put(name,value){tables[name].set(value.key,structuredClone(value))},async get(name,key){return tables[name].get(key)},async flush(){},writeCompressed(_,bytes){compressed.push(bytes.slice())},writeRaw(_,bytes){raw.push(bytes.slice())},async detach(){closed=true},async compressedStream(){return new Blob(compressed).stream()},readRaw(start,end){return Buffer.concat(raw).subarray(Number(start),Number(end))},async publish(){published=true},async closeAndDelete(){closed=true},async scan(name,{after,before,limit}){let rows=[...tables[name].values()].sort((a,b)=>a.key.localeCompare(b.key));if(after)rows=rows.filter(row=>row.key>after);if(before)return rows.filter(row=>row.key<before).slice(-limit);return rows.slice(0,limit)},async readPageMetadata(pieces){return pieces.map(piece=>({open:tables.disclosures.get(piece.key)?.open || false,groupOpen:piece.group?tables.disclosures.get('group:'+piece.group)?.open || false:false,count:piece.group?tables.groups.get(piece.group)?.count || '0':'0',endTime:piece.group?tables.groups.get(piece.group)?.endTime || '':''}))},async disclosure(key,open){tables.disclosures.set(key,{key,open})}}
+  // Keep stable input buffers in the Node codec adapter. Chromium exercises
+  // the actual staged Blob byte stream in the native archive fixtures.
+  const compressedStream=async()=>new ReadableStream({start(controller){for(const bytes of compressed)controller.enqueue(bytes);controller.close()}})
+  return {tables,get published(){return published},get closed(){return closed},put(name,value){tables[name].set(value.key,structuredClone(value))},async get(name,key){return tables[name].get(key)},async flush(){},writeCompressed(_,bytes){compressed.push(bytes.slice())},writeRaw(_,bytes){raw.push(bytes.slice())},async detach(){closed=true},compressedStream,readRaw(start,end){return Buffer.concat(raw).subarray(Number(start),Number(end))},async publish(){published=true},async closeAndDelete(){closed=true},async scan(name,{after,before,limit}){let rows=[...tables[name].values()].sort((a,b)=>a.key.localeCompare(b.key));if(after)rows=rows.filter(row=>row.key>after);if(before)return rows.filter(row=>row.key<before).slice(-limit);return rows.slice(0,limit)},async readPageMetadata(pieces){return pieces.map(piece=>({open:tables.disclosures.get(piece.key)?.open || false,groupOpen:piece.group?tables.disclosures.get('group:'+piece.group)?.open || false:false,count:piece.group?tables.groups.get(piece.group)?.count || '0':'0',endTime:piece.group?tables.groups.get(piece.group)?.endTime || '':''}))},async disclosure(key,open){tables.disclosures.set(key,{key,open})}}
 }
 function indexedRecords(store) {
   return [...store.tables.records.values()].flatMap(({key,spans})=>{
@@ -845,15 +1027,16 @@ test('both receipt barriers precede publication and decode; corruption publishes
 
 test('failed decode retains ownership through upstream cleanup and preserves secondary cleanup failure',async()=>{
   const prior=globalThis.Worker;globalThis.Worker=class{}
-  try{for(const failedCleanup of [false,true]) {
+  try{for(const failedCleanup of [false,true,'undefined rejection']) {
     const raw=Buffer.from('0\n'),gzip=gzipSync(raw),store=memoryStore();let release,settled=false
-    const cleanup=new Promise((resolve,reject)=>{release=()=>failedCleanup?reject(Error('actual_source_close_failed')):resolve()})
+    const cleanupError=failedCleanup===true?Error('actual_source_close_failed'):undefined
+    const cleanup=new Promise((resolve,reject)=>{release=()=>failedCleanup?reject(cleanupError):resolve()})
     const engine=createArchiveEngine({openStore:async()=>store,decode:()=>({readable:new ReadableStream({start(controller){controller.enqueue(Buffer.from('{\n'));controller.close()}}),completion:Promise.resolve(),cleanup})})
     await engine.start({name:'owned',stamp:{workspace,session},manifest:manifest(raw,gzip)});await engine.chunk(gzip)
     const finishing=engine.finish().then(()=>assert.fail('invalid JSON published'),error=>{settled=true;return error})
     await new Promise(resolve=>setTimeout(resolve,5));assert.equal(settled,false);assert.equal(store.closed,false)
     release();const failure=await finishing
-    if(failedCleanup){assert.equal(failure.message,'archive_cleanup_failed');assert.ok(failure.errors.some(error=>error.message==='invalid_json_record'));await assert.rejects(engine.cleanup(),/archive_cleanup_failed/);assert.equal(store.closed,false)}
+    if(failedCleanup){assert.equal(failure.message,'archive_cleanup_failed');assert.equal(failure.errors[0].message,'invalid_json_record');assert.equal(failure.errors[1],cleanupError);await assert.rejects(engine.cleanup(),/archive_cleanup_failed/);assert.equal(store.closed,false)}
     else {assert.equal(failure.message,'invalid_json_record');await engine.cleanup();assert.equal(store.closed,true)}
   }}finally{globalThis.Worker=prior}
 })

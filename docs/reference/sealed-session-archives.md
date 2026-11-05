@@ -614,10 +614,12 @@ activity anchors, disclosure identity and source order. Persist source/block
 references and bounded cursor indexes rather than all-session maps or growing
 group arrays. Record-boundary pages store one exact start offset and up to 256
 packed byte lengths and delimiters, including for hidden records. Semantic
-pieces and activity summaries use separate pages of up to 256 entries, encoded
-in bounded UTF-8 buffers. Their last source/block key supports exact seeks. An
-entry that needs the full 1 MiB budget stays in a single entry. An adjacent
-event and canonical record can replace the pending piece, and a carried
+pieces and activity summaries use separate binary pages of up to 256 entries.
+The pages encode numeric positions, counts and exact UTF-16 metadata. Their
+last source/block key supports exact seeks. Metadata that fits the existing
+1 MiB single-entry budget but exceeds the binary page budget stays in its own
+entry. An adjacent event and canonical record can replace the pending piece,
+and a carried
 activity can update its pending summary before the respective page is written.
 Metadata reads seek only the group pages needed for the current pieces.
 Index write batches hold at most 256 entries or 1 MiB. Each local acquisition

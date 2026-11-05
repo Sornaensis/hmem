@@ -1,8 +1,26 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {decimal,fileOffset,positionKey,pieceKey,serializedBytes,openArchiveStore,createRawReadCache,IO_BYTES,BATCH_ROWS,BATCH_BYTES} from '../src/session-archive-store.js'
-const piecePageRows=page=>page.data?JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(page.data)):[page]
+import {decimal,fileOffset,positionKey,pieceKey,serializedBytes,openArchiveStore,createRawReadCache,rowsInIndexPage,IO_BYTES,BATCH_ROWS,BATCH_BYTES} from '../src/session-archive-store.js'
+const piecePageRows=page=>rowsInIndexPage('pieces',page)
+const groupPageRows=page=>rowsInIndexPage('groups',page)
 const piecePageSize=page=>page.data?serializedBytes({key:page.key,data:[]})-2+page.data.byteLength:serializedBytes(page)
+const indexedPiece=(key,extra={})=>{
+  const offset=BigInt(key.slice(0,19))
+  return {key,offset:String(offset),end:String(offset+1n),delimiter:'',index:Number(key.slice(20)),kind:'text',label:'',role:'',time:'',group:'',...extra}
+}
+function packedGroups(rows) {
+  const data=new Uint8Array(12+rows.reduce((bytes,row)=>bytes+28+2*row.endTime.length,0)),view=new DataView(data.buffer)
+  data.set([72,77,73,88,1,2]);view.setUint16(6,rows.length,true);view.setUint32(8,data.length,true)
+  let at=12
+  for(const {key,count,endTime} of rows){
+    const [position,index]=key.split(':'),length=28+2*endTime.length
+    view.setBigUint64(at,BigInt(position),true);view.setUint32(at+8,Number(index),true);view.setUint32(at+12,length,true)
+    view.setBigUint64(at+16,BigInt(count),true);view.setUint32(at+24,endTime.length,true)
+    for(let unit=0;unit<endTime.length;unit++)view.setUint16(at+28+unit*2,endTime.charCodeAt(unit),true)
+    at+=length
+  }
+  return {key:rows.at(-1).key,data}
+}
 test('archive count and ordered cursor keys retain exact signed 64-bit values',()=>{
   assert.equal(decimal('9223372036854775807'),9223372036854775807n)
   assert.ok(positionKey('10')>positionKey('2'))
@@ -109,9 +127,8 @@ test('page metadata uses one bounded readonly transaction with aligned scalar de
   const previous=globalThis.IDBKeyRange;globalThis.IDBKeyRange={lowerBound:(lower,open)=>({lower,open})}
   const state=controlledStore(),store=await state.open(),pieces=[{key:'a',group:'2:10'},{key:'b',group:'2:10'},{key:'c',group:'10:2'},{key:'d',group:''}]
   const summary={key:pieceKey(2n,10),count:'99',endTime:'2026-10-30T11:00:00Z'},singleton={key:pieceKey(10n,2),count:'1',endTime:''}
-  const packed=rows=>({key:rows.at(-1).key,data:new TextEncoder().encode(JSON.stringify(rows))})
   state.values.set('disclosures:a',{open:true});state.values.set('disclosures:group:2:10',{open:true})
-  state.values.set('groups:'+singleton.key,packed([summary,singleton]))
+  state.values.set('groups:'+singleton.key,packedGroups([summary,singleton]))
   try{
     let settled=false
     const reading=store.readPageMetadata(pieces);reading.then(()=>{settled=true})
@@ -127,7 +144,7 @@ test('page metadata uses one bounded readonly transaction with aligned scalar de
     await assert.rejects(store.readPageMetadata(Array.from({length:65},(_,index)=>({key:String(index),group:''}))),/page_limit/)
     assert.equal(state.transactions.length,before)
     const rows=Array.from({length:64},(_,index)=>({key:pieceKey(100n+BigInt(index),0),count:'1',endTime:''}))
-    state.values.set('groups:'+rows.at(-1).key,packed(rows))
+    state.values.set('groups:'+rows.at(-1).key,packedGroups(rows))
     const maximum=store.readPageMetadata(Array.from({length:64},(_,index)=>({key:'p'+index,group:(100+index)+':0'})))
     await new Promise(resolve=>setImmediate(resolve));const largest=state.transactions.at(-1);assert.equal(largest.requests.length,128);assert.equal(largest.cursorVisits.length,1)
     state.respond(largest);state.complete(largest);assert.equal((await maximum).length,64)
@@ -156,16 +173,18 @@ test('piece pages preserve full-fence replacement and exclusive primary seeks in
   const state=controlledStore(),store=await state.open()
   const offsets=Array.from({length:BATCH_ROWS*2+18},(_,index)=>4294967296n+BigInt(index*2)),keys=offsets.map(offset=>pieceKey(offset,0))
   const select=rows=>rows.map(row=>row.key)
+  const canonical=indexedPiece(keys[255],{offset:String(offsets[255]+1n),end:String(offsets[255]+4n),delimiter:'\r\n',
+    kind:'thinking',group:'4294967296:7',label:'lone \ud800',role:'\ufeffrole😀\udc00',time:'2026-01-01T00:00:00.012Z',piVersion:1e30})
   try{
     assert.equal(state.indexCalls,0)
     assert.deepEqual(await store.scan('pieces'),[])
     assert.deepEqual(await store.scan('pieces',{before:'\uffff'}),[])
     assert.equal(await store.get('pieces',keys[0]),undefined)
     for(let index=0;index<keys.length;index++){
-      store.put('pieces',{key:keys[index],group:'shared'})
+      store.put('pieces',indexedPiece(keys[index]))
       if(index===BATCH_ROWS-1){
-        store.put('pieces',{key:keys[index],group:'shared',source:'canonical',label:'lone \ud800'})
-        assert.throws(()=>store.put('pieces',{key:keys[index-1]}),/unordered_archive_index/)
+        store.put('pieces',canonical)
+        assert.throws(()=>store.put('pieces',indexedPiece(keys[index-1])),/unordered_archive_index/)
       }
     }
     const publishing=store.publish({raw_bytes:'0'})
@@ -175,7 +194,8 @@ test('piece pages preserve full-fence replacement and exclusive primary seeks in
     const pages=state.writes.filter(row=>row.table==='pieces').map(row=>row.value)
     assert.deepEqual(pages.map(page=>[page.key,piecePageRows(page).length]),[[keys[255],256],[keys[511],256],[keys.at(-1),18]])
     assert.ok(pages.every(page=>piecePageSize(page)<=BATCH_BYTES&&page.data.byteLength===page.data.buffer.byteLength))
-    assert.deepEqual(await store.get('pieces',keys[255]),{key:keys[255],group:'shared',source:'canonical',label:'lone \ud800'})
+    assert.deepEqual(await store.get('pieces',keys[255]),canonical)
+    assert.equal(Object.hasOwn(await store.get('pieces',keys[0]),'piVersion'),false)
     assert.equal((await store.get('pieces',keys[256])).key,keys[256])
     assert.equal(await store.get('pieces',pieceKey(offsets[255]+1n,0)),undefined)
     const first=await store.scan('pieces'),next=await store.scan('pieces',{after:first.at(-1).key})
@@ -200,15 +220,17 @@ test('a growing tail can split a page without losing the earlier piece or its by
   const state=controlledStore(),store=await state.open()
   const keys=[1n,2n,3n].map(offset=>pieceKey(offset,0))
   try{
-    store.put('pieces',{key:keys[0],padding:'λ'.repeat(200000)})
-    store.put('pieces',{key:keys[1],padding:'x'.repeat(200000)})
-    store.put('pieces',{key:keys[1],padding:'\n'.repeat(330000)})
+    store.put('pieces',indexedPiece(keys[0],{role:'λ'.repeat(200000)}))
+    store.put('pieces',indexedPiece(keys[1],{role:'x'.repeat(200000)}))
+    store.put('pieces',indexedPiece(keys[1],{role:'\n'.repeat(330000)}))
     const held=store.flush()
     const first=state.transactions.at(-1);assert.equal(first.writes.length,1)
     assert.equal(first.writes[0].value.key,keys[0])
     state.complete(first);await held
-    store.put('pieces',{key:keys[2]})
-    assert.throws(()=>store.put('pieces',{key:pieceKey(4n,0),padding:'λ'.repeat(BATCH_BYTES)}),/index_entry_limit/)
+    store.put('pieces',indexedPiece(keys[2]))
+    assert.throws(()=>store.put('pieces',indexedPiece(pieceKey(4n,0),{role:'λ'.repeat(BATCH_BYTES)})),/index_entry_limit/)
+    // Binary would fit, but the original admission limit counts JSON escapes.
+    assert.throws(()=>store.put('pieces',indexedPiece(pieceKey(4n,0),{role:'\u0001'.repeat(180000)})),/index_entry_limit/)
     const publishing=store.publish({raw_bytes:'0'})
     await new Promise(resolve=>setImmediate(resolve))
     for(const tx of state.transactions)state.complete(tx)
@@ -217,21 +239,40 @@ test('a growing tail can split a page without losing the earlier piece or its by
     assert.deepEqual(pages.map(page=>page.key),[keys[0],keys[2]])
     assert.ok(pages.every(page=>piecePageSize(page)<=BATCH_BYTES))
     assert.deepEqual((await store.scan('pieces')).map(piece=>piece.key),keys)
-    assert.equal((await store.get('pieces',keys[1])).padding.length,330000)
+    assert.equal((await store.get('pieces',keys[1])).role.length,330000)
   }finally{for(const tx of state.transactions){state.respond(tx);state.complete(tx)}await store.closeAndDelete();globalThis.IDBKeyRange=previous}
 })
 
 test('piece reads reject malformed, oversized and incorrectly fenced binary pages',async()=>{
   const previous=globalThis.IDBKeyRange;globalThis.IDBKeyRange={lowerBound:(lower,open)=>({lower,open}),upperBound:(upper,open)=>({upper,open})}
   const state=controlledStore(),store=await state.open()
-  const key=pieceKey(2n,0),other=pieceKey(1n,0),encode=value=>new TextEncoder().encode(JSON.stringify(value))
+  const key=pieceKey(2n,0),other=pieceKey(1n,0)
   try{
-    for(const data of [
-      new Uint8Array([91,255,255,93]),new TextEncoder().encode('[{"key"'),new Uint8Array(BATCH_BYTES),
-      encode([{key:other}]),encode([{key},{key}]),encode([]),
-      encode(Array.from({length:BATCH_ROWS+1},(_,index)=>({key:pieceKey(index,0)})))
-    ]){
-      state.values.set('pieces:'+key,{key,data})
+    store.put('pieces',indexedPiece(other,{piVersion:3}))
+    store.put('pieces',indexedPiece(key))
+    const publishing=store.publish({raw_bytes:'0'})
+    await new Promise(resolve=>setImmediate(resolve));state.complete(state.transactions.at(-1));await publishing
+    const valid=state.values.get('pieces:'+key).data
+    const second=12+new DataView(valid.buffer).getUint32(24,true)
+    const changed=change=>{const bytes=valid.slice();change(new DataView(bytes.buffer));return bytes}
+    const invalid=[
+      new Uint8Array([72,77,73,88]),new Uint8Array(BATCH_BYTES),new Uint16Array(64),
+      Uint8Array.from([0,...valid]).subarray(1),
+      changed(view=>view.setUint8(0,0)),changed(view=>view.setUint8(4,2)),changed(view=>view.setUint8(5,2)),
+      changed(view=>view.setUint16(6,0,true)),changed(view=>view.setUint16(6,BATCH_ROWS+1,true)),
+      changed(view=>view.setUint32(8,valid.length-1,true)),
+      changed(view=>view.setBigUint64(12,9223372036854775808n,true)),
+      changed(view=>view.setUint32(20,10000000,true)),
+      changed(view=>view.setUint32(24,16,true)),
+      changed(view=>view.setUint32(36,0,true)),
+      changed(view=>view.setUint8(40,31)),
+      changed(view=>view.setFloat64(41,0.5,true)),
+      changed(view=>view.setUint32(49,0xffffffff,true)),
+      changed(view=>view.setBigUint64(second,1n,true)),
+      changed(view=>view.setBigUint64(second,3n,true))
+    ]
+    for(const page of [...invalid.map(data=>({key,data})),indexedPiece(key)]){
+      state.values.set('pieces:'+key,page)
       await assert.rejects(store.get('pieces',other),/invalid_index_page/)
       await assert.rejects(store.scan('pieces'),/invalid_index_page/)
     }
@@ -243,16 +284,17 @@ test('a maximum-sized piece retains its exact single-entry budget without a page
   const previous=globalThis.IDBKeyRange;globalThis.IDBKeyRange={lowerBound:(lower,open)=>({lower,open}),upperBound:(upper,open)=>({upper,open})}
   const state=controlledStore(),store=await state.open(),key=pieceKey(1n,0),next=pieceKey(2n,0)
   try{
-    const value={key,padding:'x'.repeat(BATCH_BYTES-serializedBytes({key,padding:''}))}
+    const empty=indexedPiece(key,{role:'\ud800',piVersion:'invalid'})
+    const value={...empty,role:empty.role+'x'.repeat(BATCH_BYTES-serializedBytes(empty))}
     assert.equal(serializedBytes(value),BATCH_BYTES)
-    store.put('pieces',value);store.put('pieces',{key:next})
+    store.put('pieces',value);store.put('pieces',indexedPiece(next,{piVersion:null}))
     const publishing=store.publish({raw_bytes:'0'})
     await new Promise(resolve=>setImmediate(resolve));state.complete(state.transactions.at(-1))
     await new Promise(resolve=>setImmediate(resolve));state.complete(state.transactions.at(-1))
     await publishing
     const entries=state.writes.filter(row=>row.table==='pieces').map(row=>row.value)
     assert.deepEqual(entries[0],value);assert.equal(piecePageSize(entries[0]),BATCH_BYTES)
-    assert.deepEqual(piecePageRows(entries[1]),[{key:next}])
+    assert.deepEqual(piecePageRows(entries[1]),[indexedPiece(next,{piVersion:null})])
     assert.deepEqual(await store.get('pieces',key),value)
   }finally{for(const tx of state.transactions)state.complete(tx);await store.closeAndDelete();globalThis.IDBKeyRange=previous}
 })
@@ -261,7 +303,7 @@ test('group pages keep exact counts and timestamps across numeric fences and ski
   const previous=globalThis.IDBKeyRange;globalThis.IDBKeyRange={lowerBound:(lower,open)=>({lower,open})}
   const state=controlledStore(),store=await state.open()
   const high=4294967296n
-  const ids=['2:2','2:10','10:2',...Array.from({length:BATCH_ROWS*2+3},(_,index)=>(high+BigInt(index))+':0')]
+  const ids=['2:2','2:10','10:2',...Array.from({length:BATCH_ROWS*2+3},(_,index)=>(high+BigInt(index))+':0'),'9223372036854775807:9999999']
   const keys=ids.map(id=>pieceKey(...id.split(':')))
   const selected=[ids.at(-1),ids[1],ids[0],ids[1]]
   const read=async(groups,check)=>{
@@ -275,7 +317,7 @@ test('group pages keep exact counts and timestamps across numeric fences and ski
   }
   try{
     for(const [index,key] of ids.entries()){
-      store.put('groups',{key,count:'1',endTime:''})
+      store.put('groups',{key,count:index===ids.length-1?'9223372036854775807':'1',endTime:''})
       if(index===BATCH_ROWS-1)store.put('groups',{key,count:'2',endTime:'2026-01-01T00:00:00Z'})
     }
     const publishing=store.publish({raw_bytes:'0'})
@@ -283,17 +325,20 @@ test('group pages keep exact counts and timestamps across numeric fences and ski
     for(const tx of state.transactions)state.complete(tx)
     await publishing
     const pages=state.writes.filter(row=>row.table==='groups').map(row=>row.value)
-    assert.deepEqual(pages.map(page=>[page.key,piecePageRows(page).length]),[[keys[255],256],[keys[511],256],[keys.at(-1),6]])
+    assert.deepEqual(pages.map(page=>[page.key,groupPageRows(page).length]),[[keys[255],256],[keys[511],256],[keys.at(-1),7]])
     assert.ok(pages.every(page=>piecePageSize(page)<=BATCH_BYTES&&page.data.byteLength===page.data.buffer.byteLength))
-    assert.deepEqual(piecePageRows(pages[0]).at(-1),{key:keys[255],count:'2',endTime:'2026-01-01T00:00:00Z'})
+    assert.deepEqual(groupPageRows(pages[0]).at(-1),{key:keys[255],count:'2',endTime:'2026-01-01T00:00:00Z'})
     state.values.set('disclosures:group:2:10',{open:true})
     const result=await read(selected,tx=>assert.deepEqual(tx.cursorVisits,[{table:'groups',key:keys[255]},{table:'groups',key:keys.at(-1)}]))
-    assert.deepEqual(result.map(value=>[value.count,value.groupOpen]),[['1',false],['1',true],['1',false],['1',true]])
+    assert.deepEqual(result.map(value=>[value.count,value.groupOpen]),[['9223372036854775807',false],['1',true],['1',false],['1',true]])
     await assert.rejects(read(['3:0']),/archive_group_missing/)
     await assert.rejects(read([(high+9999n)+':0']),/archive_group_missing/)
-    const corrupt=piecePageRows(pages[0]);corrupt[0].count='0'
-    state.values.set('groups:'+pages[0].key,{key:pages[0].key,data:new TextEncoder().encode(JSON.stringify(corrupt))})
+    const corrupt=pages[0].data.slice();new DataView(corrupt.buffer).setBigUint64(28,0n,true)
+    const corruptPage={key:pages[0].key,data:corrupt}
+    assert.throws(()=>groupPageRows(corruptPage),/invalid_archive_group/)
+    state.values.set('groups:'+pages[0].key,corruptPage)
     await assert.rejects(read([ids[0]]),/invalid_archive_group/)
+    await assert.rejects(read([ids[1]]),/invalid_archive_group/)
   }finally{for(const tx of state.transactions){state.respond(tx);state.complete(tx)}await store.closeAndDelete();globalThis.IDBKeyRange=previous}
 })
 
@@ -420,10 +465,11 @@ test('verified reader release joins pending disclosure writes without deleting t
 })
 
 test('adoption mismatch missing stage and accidental upgrade never expose or rewrite a reader',async()=>{
-  for(const mismatch of ['manifest','schema','keyPath','raw-length','marker','missing','upgrade','old-index']){
+  for(const mismatch of ['manifest','schema','keyPath','raw-length','marker','missing','upgrade','old-index','missing-index']){
     const state=controlledStore(),{store,manifest}=await verifiedBorrowedStore(state);await store.detach()
     if(mismatch==='schema')state.db.version=2
-    if(mismatch==='old-index'){const verified=state.values.get('meta:verified');delete verified.indexVersion}
+    if(mismatch==='old-index')state.values.get('meta:verified').indexVersion=7
+    if(mismatch==='missing-index')delete state.values.get('meta:verified').indexVersion
     if(mismatch==='keyPath')state.wrongKeyPath=true
     if(mismatch==='raw-length')state.files.set('raw.jsonl',new Uint8Array([1]))
     if(mismatch==='marker'){const marker=JSON.parse(new TextDecoder().decode(state.files.get('owner.json')));marker.custody='wrong';state.files.set('owner.json',new TextEncoder().encode(JSON.stringify(marker)))}

@@ -185,24 +185,22 @@ renderWindow budget target anchor fragments =
                else Html.span (Attributes.style "display" "block"::attrs) []
         walkList ancestors path gapTag values state =
             let
+                prependGap pending nodes =
+                    case pending of
+                        Just (begin,finish,cost) -> ("gap:" ++ String.fromInt begin ++ ":" ++ String.fromInt finish,gapNode gapTag begin finish cost) :: nodes
+                        Nothing -> nodes
                 add (index,fragment) (nodes,pending,(current,total)) =
                     let
                         (node,next,weight)=walk ancestors (path ++ ":" ++ String.fromInt index) fragment current
-                        flush deferred = case deferred of
-                            Just (begin,finish,cost) -> [("gap:" ++ String.fromInt begin ++ ":" ++ String.fromInt finish,gapNode gapTag begin finish cost)]
-                            Nothing -> []
                     in case node of
-                        Just html -> (nodes ++ flush pending ++ [(String.fromInt index,html)],Nothing,(next,total+weight))
+                        Just html -> ((String.fromInt index,html) :: prependGap pending nodes,Nothing,(next,total+weight))
                         Nothing ->
                             let first=min current.page next.page in
                             (nodes,Just (case pending of
                                 Just (begin,_,cost) -> (begin,next.page,cost+weight)
                                 Nothing -> (first,next.page,weight)),(next,total+weight))
                 (selected,tailPending,(listState,listWeight))=List.indexedMap Tuple.pair values |> List.foldl add ([],Nothing,(state,0))
-                trailing=case tailPending of
-                    Just (first,last,cost) -> [("gap:" ++ String.fromInt first ++ ":" ++ String.fromInt last,gapNode gapTag first last cost)]
-                    Nothing -> []
-            in (selected ++ trailing,listState,listWeight)
+            in (List.reverse (prependGap tailPending selected),listState,listWeight)
         branch ancestors path cost gapTag children render state =
             if List.isEmpty children then walk ancestors path (Atom cost (\_ -> render [])) state
             else

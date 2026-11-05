@@ -1447,26 +1447,44 @@ async function archiveDiskReceipt(page) {
       })
       const verifyPiecePages=()=>new Promise((yes,no)=>{
         const operation=tx.objectStore('pieces').openCursor()
-        let pieces=0,previous=''
+        let pieces=0,previous='',packedBytes=0,singleBytes=0
         operation.onerror=()=>no(operation.error)
         operation.onsuccess=()=>{
           try{
             const cursor=operation.result
-            if(!cursor){yes(pieces);return}
+            if(!cursor){yes({pieces,packedBytes,singleBytes});return}
             const value=cursor.value
-            const rows=value.data?JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(value.data)):[value]
-            if(!Array.isArray(rows)||!rows.length||rows.length>256||rows.at(-1)?.key!==cursor.key)throw Error('invalid_piece_page')
-            for(const {key} of rows){
+            const accept=key=>{
               if(typeof key!=='string'||key<=previous)throw Error('unordered_piece_page')
               previous=key;pieces++
             }
+            if(value.data){
+              const data=value.data,view=new DataView(data.buffer,data.byteOffset,data.byteLength)
+              const count=view.getUint16(6,true)
+              if(view.getUint32(0,true)!==0x58494d48||view.getUint8(4)!==1||view.getUint8(5)!==1
+                || count<1||count>256||view.getUint32(8,true)!==data.byteLength||data.byteLength>1048576)throw Error('invalid_piece_page')
+              let at=12
+              for(let index=0;index<count;index++){
+                const offset=view.getBigUint64(at,true),block=view.getUint32(at+8,true),length=view.getUint32(at+12,true)
+                if(offset>9223372036854775807n||block>9999999||length<41||at+length>data.byteLength)throw Error('invalid_piece_page')
+                accept(offset.toString().padStart(19,'0')+':'+String(block).padStart(7,'0'))
+                at+=length
+              }
+              if(at!==data.byteLength)throw Error('invalid_piece_page')
+              packedBytes+=data.byteLength
+            }else{
+              const bytes=new TextEncoder().encode(JSON.stringify(value)).byteLength
+              if(bytes>1048576)throw Error('invalid_piece_page')
+              accept(value.key);singleBytes+=bytes
+            }
+            if(previous!==cursor.key)throw Error('invalid_piece_page')
             cursor.continue()
           }catch(error){no(error)}
         }
       })
-      let records,pieces,primary;try{[records,pieces]=await Promise.all([verifyRecordPages(),verifyPiecePages()])}catch(error){primary=error}
+      let records,index,primary;try{[records,index]=await Promise.all([verifyRecordPages(),verifyPiecePages()])}catch(error){primary=error}
       try{await terminal}catch(error){throw primary || error}if(primary)throw primary
-      return {files,records,pieces,estimate:await navigator.storage.estimate()}
+      return {files,records,...index,estimate:await navigator.storage.estimate()}
     }finally{db.close()}
   })
 }
@@ -1730,7 +1748,7 @@ test('actual Chromium Worker verifies private OPFS/IDB and rejects empty second 
     const entropy=Array.from({length:32768},()=>{seed^=seed<<13;seed^=seed>>>17;seed^=seed<<5;return String.fromCharCode(33+(seed>>>0)%90)}).join('')
     const call=(name,timestamp)=>JSON.stringify({type:'response_item',timestamp,payload:{type:'function_call',name,arguments:'{}'}})
     const endTime='2026-01-01T00:00:01Z'
-    const records=[JSON.stringify({type:'metadata',entropy})+'\n','{"text":"λ😀"}\r\n',call('first','2026-01-01T00:00:00Z')+'\n',call('second',endTime)+'\n','{"text":"final"}']
+    const records=[JSON.stringify({type:'metadata',entropy})+'\n','{"text":"λ😀","role":"\\ud800"}\r\n',call('first','2026-01-01T00:00:00Z')+'\n',call('second',endTime)+'\n','{"text":"final"}']
     const asset=await workerAsset(),raw=Buffer.from(records.join('')),gzip=gzipSync(raw)
     assert.ok(gzip.length>4096&&gzip.length<65536,'native integrity fixture must cross compressed writer quanta within one download chunk')
     const cases=[['valid',gzip],['truncated',gzip.subarray(0,-2)],['empty-second',Buffer.concat([gzip,gzipSync(Buffer.alloc(0))])],['garbage',Buffer.concat([gzip,Buffer.from([1,2,3])])],['zero-padding',Buffer.concat([gzip,Buffer.from([0,0])])],['invalid-chunk-length',gzip],['invalid-chunk-capacity',gzip]]
@@ -1759,11 +1777,38 @@ test('actual Chromium Worker verifies private OPFS/IDB and rejects empty second 
               terminal=new Promise(resolve=>{tx.oncomplete=()=>resolve({});tx.onabort=()=>resolve({error:tx.error || Error('inspection_aborted')})})
               const count=table=>new Promise((yes,no)=>{const request=tx.objectStore(table).count();request.onsuccess=()=>yes(request.result);request.onerror=()=>no(request.error)})
               const inspectRecords=new Promise((yes,no)=>{const request=tx.objectStore('records').get('0000000000000000000');request.onsuccess=()=>yes(request.result?.spans);request.onerror=()=>no(request.error)})
-              const inspectPieces=new Promise((yes,no)=>{const request=tx.objectStore('pieces').openCursor();request.onsuccess=()=>{try{yes(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(request.result?.value?.data)).map(piece=>piece.offset))}catch(error){no(error)}};request.onerror=()=>no(request.error)})
-              const inspectGroups=new Promise((yes,no)=>{const request=tx.objectStore('groups').openCursor();request.onsuccess=()=>{try{yes(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(request.result?.value?.data)))}catch(error){no(error)}};request.onerror=()=>no(request.error)})
-              const indexNames=Array.from(tx.objectStore('pieces').indexNames),[recordPages,spans,piecePages,pieceOffsets,groupPages,groups]=await Promise.all([count('records'),inspectRecords,count('pieces'),inspectPieces,count('groups'),inspectGroups]),done=await terminal
+              const inspect=(table,tag,read)=>new Promise((yes,no)=>{
+                const request=tx.objectStore(table).openCursor()
+                request.onsuccess=()=>{
+                  try{
+                    const cursor=request.result,data=cursor.value.data,view=new DataView(data.buffer,data.byteOffset,data.byteLength)
+                    const count=view.getUint16(6,true),rows=[]
+                    if(view.getUint32(0,true)!==0x58494d48||view.getUint8(4)!==1||view.getUint8(5)!==tag
+                      || view.getUint32(8,true)!==data.byteLength||count<1||count>256)throw Error('invalid_typed_index')
+                    let at=12,fence=''
+                    for(let index=0;index<count;index++){
+                      const key=view.getBigUint64(at,true).toString().padStart(19,'0')+':'+String(view.getUint32(at+8,true)).padStart(7,'0')
+                      const length=view.getUint32(at+12,true)
+                      if(key<=fence||length<(tag===1?41:28)||at+length>data.byteLength)throw Error('invalid_typed_row')
+                      rows.push(read(view,at,key,length));fence=key;at+=length
+                    }
+                    if(at!==data.byteLength||fence!==cursor.key)throw Error('invalid_typed_fence')
+                    yes({rows,bytes:data.byteLength})
+                  }catch(error){no(error)}
+                }
+                request.onerror=()=>no(request.error)
+              })
+              const inspectPieces=inspect('pieces',1,(view,at)=>view.getBigUint64(at+16,true).toString())
+              const inspectGroups=inspect('groups',2,(view,at,key,length)=>{
+                const count=view.getBigUint64(at+16,true).toString(),units=view.getUint32(at+24,true)
+                if(28+units*2!==length)throw Error('invalid_typed_group')
+                let endTime=''
+                for(let index=0;index<units;index++)endTime+=String.fromCharCode(view.getUint16(at+28+index*2,true))
+                return {key,count,endTime}
+              })
+              const indexNames=Array.from(tx.objectStore('pieces').indexNames),[recordPages,spans,piecePages,pieces,groupPages,groups]=await Promise.all([count('records'),inspectRecords,count('pieces'),inspectPieces,count('groups'),inspectGroups]),done=await terminal
               if(done.error)throw done.error
-              schema={indexNames,recordPages,spans,piecePages,pieceOffsets,groupPages,groups,transactionComplete:true}
+              schema={indexNames,recordPages,spans,piecePages,pieceOffsets:pieces.rows,groupPages,groups:groups.rows,typedBytes:[pieces.bytes,groups.bytes],transactionComplete:true}
             }finally{if(terminal)await terminal;db.close();if(schema)schema.databaseClosed=true}
           }
         }catch(failure){error=failure.message}
@@ -1772,13 +1817,19 @@ test('actual Chromium Worker verifies private OPFS/IDB and rejects empty second 
       },{asset,manifest,bytes:[...bytes],name})
       assert.equal(result.cleanup,true,JSON.stringify(result))
       if(name==='valid'){
-        assert.equal(result.error,null);assert.equal(result.page.rows[0].body.text,'λ😀');assert.equal(result.page.rows.at(-1).body.text,'final')
+        assert.equal(result.error,null);assert.equal(result.page.rows[0].body.text,'λ😀');assert.equal(result.page.rows[0].role,'\ud800');assert.equal(result.page.rows.at(-1).body.text,'final')
         let offset=0
         const offsets=records.map(record=>{const start=offset;offset+=Buffer.byteLength(record);return String(start)})
         const spans=records.map(record=>Buffer.byteLength(record)*4+(record.endsWith('\r\n')?2:record.endsWith('\n')?1:0))
         const [first,second]=result.page.rows.slice(1,3)
         for(const row of [first,second]){assert.equal(row.group,offsets[2]+':0');assert.equal(row.count,'2');assert.equal(row.endTime,endTime)}
-        assert.deepEqual(result.schema,{indexNames:[],recordPages:1,spans,piecePages:1,pieceOffsets:offsets.slice(1),groupPages:1,groups:[{key:first.key,count:'2',endTime}],transactionComplete:true,databaseClosed:true})
+        const {typedBytes,...schema}=result.schema
+        assert.deepEqual(schema,{indexNames:[],recordPages:1,spans,piecePages:1,pieceOffsets:offsets.slice(1),groupPages:1,groups:[{key:first.key,count:'2',endTime}],transactionComplete:true,databaseClosed:true})
+        assert.ok(typedBytes[0]>0&&typedBytes[0]<1024);assert.equal(typedBytes[1],12+28+endTime.length*2)
+        const pieces=result.page.rows.map(({key,offset,end,delimiter,index,kind,label,role,time,group})=>({key,offset,end,delimiter,index,kind,label,role,time,group}))
+        const legacyBytes=[pieces,schema.groups].map(rows=>Buffer.byteLength(JSON.stringify(rows)))
+        assert.ok(typedBytes.every((bytes,index)=>bytes<legacyBytes[index]))
+        console.log(JSON.stringify({nativeIndexBytes:{typedBytes,legacyBytes,singleBytes:0}}))
       }
       else {assert.ok(result.error,JSON.stringify(result));assert.ok(!result.progress.includes('ready'));if(name.startsWith('invalid-chunk-'))assert.equal(result.error,'chunk_limit')}
       console.log(JSON.stringify({case:name,error:result.error,cleanup:result.cleanup,schema:result.schema,browser:result.browser}))

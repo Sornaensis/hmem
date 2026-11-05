@@ -764,13 +764,23 @@ composeSealed incoming pageFirst pageLast request fromEnd canPrevious canNext re
                 if Set.member item.group seen then (kept,item::dropped,seen) else (item::kept,dropped,Set.insert item.group seen)
             else (item::kept,dropped,seen)
         (previous,compacted,_) = List.foldl compact ([],[],Set.empty) (List.reverse (if seeking then [] else old.rows))
+        previousByKey = List.foldr (\item byKey -> Dict.insert item.key item byKey) Dict.empty previous
         policy = { identity = .key, source = .key, bytes = sealedPieceBytes }
         anchor = if state.historyAnchor == "" then Nothing else Just state.historyAnchor
-        preserveBody fresh = previous |> List.filter (.key >> (==) fresh.key) |> List.head |> Maybe.map (\cached -> case cached.body of
-            Just content -> if content.format=="markdown" && not content.more && content.part==0 then {fresh | body=cached.body,ast=cached.ast} else fresh
-            Nothing -> fresh) |> Maybe.withDefault fresh
+        completeMarkdown body = body.format == "markdown" && not body.more && body.part == 0
+        cachedMarkdown key =
+            Dict.get key previousByKey |> Maybe.andThen (\cached ->
+                if Maybe.map completeMarkdown cached.body == Just True then Just cached else Nothing)
+        preserveBody fresh = case cachedMarkdown fresh.key of
+            Just cached -> {fresh | body=cached.body,ast=cached.ast}
+            Nothing -> fresh
         bodyBytes = Dict.values old.bodies |> List.concat |> List.map sealedBodyBytes |> List.sum
         result = SessionWindow.composeRange (Just represented) policy 200 (4194304-2*payloadBytes (Encode.string old.markdown.source)-bodyBytes) anchor state.following fromEnd previous (List.map preserveBody incoming)
+        -- Parse only complete bodies that survived admission and have no cached AST.
+        parseAdmitted item = case (item.body,cachedMarkdown item.key) of
+            (Just body,Nothing) ->
+                if completeMarkdown body then {item | ast=Markdown.Parser.parse body.text |> Result.mapError (always "parse error")} else item
+            _ -> item
         first = List.head result.rows |> Maybe.map .key |> Maybe.withDefault ""
         last = List.reverse result.rows |> List.head |> Maybe.map .key |> Maybe.withDefault ""
         scanFirst = if old.scanFirst == "" || seeking then pageFirst else min old.scanFirst pageFirst
@@ -795,7 +805,7 @@ composeSealed incoming pageFirst pageLast request fromEnd canPrevious canNext re
         presentationAnchor=if state.windowPurpose=="gap" then result.rows |> List.filter (\item -> item.key>=state.historyAnchor) |> List.head |> Maybe.map (\item -> item.key ++ ":") |> Maybe.withDefault "" else state.presentationAnchor
     in
     {state | historyTop=if topCount==0 then 0 else top,historyBottom=if bottomCount==0 then 0 else bottom,historyTopCount=topCount,historyBottomCount=bottomCount,historyTopGroup="",historyBottomGroup="",historyGaps=gaps,presentationAnchor=presentationAnchor
-        ,sealed={old | phase="ready",error=Nothing,http=Nothing,rows=result.rows,first=first,last=last,pageFirst=pageFirst,pageLast=pageLast,pageRequest=request,scanFirst=scanFirst,scanLast=scanLast,atBeginning=atBeginning,atLatest=atLatest
+        ,sealed={old | phase="ready",error=Nothing,http=Nothing,rows=List.map parseAdmitted result.rows,first=first,last=last,pageFirst=pageFirst,pageLast=pageLast,pageRequest=request,scanFirst=scanFirst,scanLast=scanLast,atBeginning=atBeginning,atLatest=atLatest
             ,canPrevious=not atBeginning || first>scanFirst,canNext=not atLatest || last<scanLast,more=not atLatest || last<scanLast
             ,renderPart=if state.following || seeking then -1 else if starting then (if fromEnd then -1 else 0) else old.renderPart
             ,bodies=Dict.filter (\key _ -> Set.member key keptKeys) old.bodies
@@ -814,11 +824,9 @@ receiveSealed value model =
             (Decode.field "key" Decode.string) (Decode.field "offset" Decode.string) (Decode.field "kind" Decode.string) (Decode.field "label" Decode.string)
             (Decode.field "role" Decode.string) (Decode.field "time" Decode.string) (Decode.field "group" Decode.string) (Decode.field "count" Decode.string)
             |> Decode.andThen (\row -> Decode.map (\endTime -> {row | endTime=endTime}) (Decode.oneOf [Decode.field "endTime" Decode.string,Decode.succeed ""]))
-            |> Decode.andThen (\row -> Decode.map3 (\open groupOpen body -> {row | open=open,groupOpen=groupOpen,body=body,ast=case body of
-                    Just content -> if content.format == "markdown" && not content.more && content.part == 0 then Markdown.Parser.parse content.text |> Result.mapError (always "parse error") else Err "not_loaded"
-                    Nothing -> Err "not_loaded"})
+            |> Decode.andThen (\row -> Decode.map3 (\open groupOpen body -> {row | open=open,groupOpen=groupOpen,body=body})
                 (Decode.field "open" Decode.bool) (Decode.field "groupOpen" Decode.bool)
-                (Decode.oneOf [Decode.field "body" (Decode.map7 (\text part more tokens format structured exception -> Just {text=text,part=part,more=more,tokens=tokens,format=format,structured=structured,exception=exception}) (Decode.field "text" Decode.string) (Decode.field "part" Decode.int) (Decode.field "more" Decode.bool) (Decode.oneOf [Decode.field "tokens" (Decode.list (Decode.map2 Tuple.pair (Decode.field "kind" Decode.string) (Decode.field "text" Decode.string))),Decode.succeed []]) (Decode.oneOf [Decode.field "format" Decode.string,Decode.succeed "markdown"]) (Decode.oneOf [Decode.field "structured" Decode.bool,Decode.succeed False]) (Decode.oneOf [Decode.field "exception" Decode.bool,Decode.succeed False])),Decode.succeed Nothing]))
+                (Decode.oneOf [Decode.field "body" (Decode.map Just sealedBodyDecoder),Decode.succeed Nothing]))
     in
     if field "stamp" Decode.string "" /= state.stamp || field "generation" Decode.int -1 /= state.generation
         || Just (field "workspace" Decode.string "") /= state.workspace || Just (field "session" Decode.string "") /= state.selected

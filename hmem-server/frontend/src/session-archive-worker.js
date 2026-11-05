@@ -1,5 +1,5 @@
 import {sha256} from '@noble/hashes/sha256'
-import {MAX_RECORD_BYTES,presentation,blocksFor,semanticTransition,visibleBlocks,createPrettyPayloadReader,createRawPayloadReader,payloadTokens} from './session-viewer.js'
+import {MAX_RECORD_BYTES,presentation,createArchivePresentation,blocksFor,semanticTransition,visibleBlocks,createPrettyPayloadReader,createRawPayloadReader,payloadTokens} from './session-viewer.js'
 import {openArchiveStore,decimal,fileOffset,pieceKey,positionKey,serializedBytes,IO_BYTES,BATCH_ROWS,PAGE_ROWS,PAGE_BYTES} from './session-archive-store.js'
 
 const utf8=new TextDecoder('utf-8',{fatal:true}),encoder=new TextEncoder()
@@ -38,11 +38,11 @@ export function archiveChunkOffset(base,local) {
 }
 export function createArchiveFramer() {
   let offset=0n,start=0n,size=0,piVersion=null
-  const pending=new Uint8Array(MAX_RECORD_BYTES+2)
+  const pending=new Uint8Array(MAX_RECORD_BYTES+2),present=createArchivePresentation()
   function record(raw,recordBytes,delimiter) {
     let value;try{value=JSON.parse(raw)}catch{throw Error('invalid_json_record')}
     if(value?.type==='session')piVersion=Number.isInteger(value.version)?value.version:'invalid'
-    const row=presentation(value,raw,{archive:true,piVersion})
+    const row=present(value,raw,piVersion)
     const startText=start.toString()
     Object.assign(row,{offset:startText,presentationOffset:startText,end:offset.toString(),delimiter,recordBytes})
     size=0;start=offset;return row
@@ -93,25 +93,53 @@ export function createArchiveFramer() {
 
 export function gzipPipeline(stream) {
   const decoder=new DecompressionStream('gzip')
-  const source=stream.getReader(),writer=decoder.writable.getWriter()
+  let source,byob=true
+  try {
+    source=stream.getReader({mode:'byob'})
+  }catch(error){
+    if(!(error instanceof TypeError) || stream.locked)throw error
+    byob=false;source=stream.getReader()
+  }
+  const writer=decoder.writable.getWriter()
+  let eof=false,cancellation
+  const outcome=promise=>promise.then(()=>({}),error=>({error}))
+  const cancelSource=reason=>cancellation??=outcome(source.cancel(reason))
+  const sourceClosed=outcome(source.closed)
+  // A downstream cancellation must also wake a pending compressed-file read.
+  const writerClosed=writer.closed.catch(error=>{
+    if(!eof)void cancelSource(error)
+  })
   let resolveCleanup,rejectCleanup
   const cleanup=new Promise((resolve,reject)=>{resolveCleanup=resolve;rejectCleanup=reject})
   // The producer owns actual source/writer handles and a separate cleanup
   // receipt. A decoder error is not itself an upstream cleanup failure.
   const completion=(async()=>{
-    let eof=false,primary
+    let failed=false,primary
     try {
-      while(true){const part=await source.read();if(part.done){eof=true;break}
-        for(let at=0;at<part.value.length;at+=GZIP_INPUT_BYTES)await writer.write(part.value.subarray(at,at+GZIP_INPUT_BYTES))}
+      let input=byob?new Uint8Array(IO_BYTES):undefined
+      while(true){
+        const {done,value}=await (input?source.read(input):source.read())
+        if(done){if(value?.byteLength)throw Error('invalid_gzip_source_view');eof=true;break}
+        if(input && (!(value instanceof Uint8Array) || !(value.buffer instanceof ArrayBuffer)
+          || value.buffer.byteLength!==IO_BYTES || value.byteOffset!==0 || !value.byteLength))throw Error('invalid_gzip_source_view')
+        for(let at=0;at<value.length;at+=GZIP_INPUT_BYTES)await writer.write(value.subarray(at,at+GZIP_INPUT_BYTES))
+        if(input)input=new Uint8Array(value.buffer)
+      }
       await writer.close()
-    }catch(error){primary=error}
+    }catch(error){failed=true;primary=error}
     try {
-      if(!eof)await source.cancel(primary)
-      await source.closed.catch(error=>{if(error!==primary)throw error})
-      if(primary)await writer.abort(primary)
+      const checkCleanupError=error=>{if(!failed || !Object.is(error,primary))throw error}
+      if(failed)await writer.abort(primary).catch(checkCleanupError)
+      await writerClosed
+      const cancelled=!eof || cancellation?await cancelSource(primary):{}
+      const closed=await sourceClosed
+      // An errored source repeats its read error from both promises. A source
+      // whose cancellation hook rejects instead has a fulfilled closed promise.
+      if('error' in cancelled && (!('error' in closed) || !Object.is(closed.error,cancelled.error)))throw cancelled.error
+      if('error' in closed)checkCleanupError(closed.error)
       source.releaseLock();writer.releaseLock();resolveCleanup()
-    }catch(error){rejectCleanup(error);throw new AggregateError([primary,error].filter(Boolean),'archive_cleanup_failed')}
-    if(primary)throw primary
+    }catch(error){rejectCleanup(error);throw new AggregateError(failed?[primary,error]:[error],'archive_cleanup_failed')}
+    if(failed)throw primary
   })()
   return {readable:decoder.readable,completion,cleanup}
 }
@@ -119,7 +147,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
   let store,manifest,stamp,downloadHash,downloadBytes=0n,rawHash,rawBytes=0n,records=0n,retired=false,published=false,reader
   let previous=null,anchor=null,group=null
   let recordPage=null
-  let pipelineCompletion,pipelineCleanup,pipelinePrimary
+  let pipelineCompletion,pipelineCleanup,pipelineFailure
   let stageName,stageCustody,mode='processor',detached=false
   let formatter=null
   let cleanupPoisoned=false
@@ -267,7 +295,7 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
       pipelineCleanup=Promise.resolve(pipeline.cleanup).then(()=>({}),error=>({error}))
       reader=pipeline.readable.getReader()
       const framer=createArchiveFramer();let sinceYield=0,lastProgress=0
-      let eof=false,primary
+      let eof=false,failed=false,primary
       try {
         while(true) {
           current();const result=await reader.read();if(result.done){eof=true;break}
@@ -283,18 +311,18 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
         }
         for(const row of framer.push(new Uint8Array(),true)){const pending=index(row);if(pending)await pending}
         await flushRecordPage()
-      }catch(error){primary=error;pipelinePrimary=error;throw error}
+      }catch(error){failed=true;primary=error;pipelineFailure={error};throw error}
       finally{
         if(!eof){
           try{await reader.cancel(primary)}
-          catch(error){if(error!==primary)throw new AggregateError([primary,error].filter(Boolean),'archive_cleanup_failed')}
+          catch(error){if(!failed || !Object.is(error,primary))throw new AggregateError(failed?[primary,error]:[error],'archive_cleanup_failed')}
         }
-        await reader.closed.catch(error=>{if(error!==primary)throw error})
+        await reader.closed.catch(error=>{if(!failed || !Object.is(error,primary))throw error})
         const result=await pipelineCompletion
         const cleanup=await pipelineCleanup
-        if(cleanup.error)throw new AggregateError([primary,cleanup.error].filter(Boolean),'archive_cleanup_failed')
+        if('error' in cleanup)throw new AggregateError(failed?[primary,cleanup.error]:[cleanup.error],'archive_cleanup_failed')
         reader.releaseLock();reader=null
-        if(result.error && !primary){pipelinePrimary=result.error;throw result.error}
+        if('error' in result && !failed){pipelineFailure=result;throw result.error}
       }
       current()
       if(rawBytes!==contentBytes(manifest) || records!==decimal(manifest.raw_records) || hex(rawHash.digest())!==(manifest.content_sha256??manifest.raw_sha256))throw Error('raw_receipt_mismatch')
@@ -356,13 +384,14 @@ export function createArchiveEngine({openStore=openArchiveStore,emit=()=>{},stor
       if(detached)return
       if(cleanupPoisoned)throw Error('archive_cleanup_failed')
       if(reader){
-        await reader.cancel(pipelinePrimary).catch(error=>{if(error!==pipelinePrimary)throw error})
-        await reader.closed.catch(error=>{if(error!==pipelinePrimary)throw error})
+        const checkReaderError=error=>{if(!pipelineFailure || !Object.is(error,pipelineFailure.error))throw error}
+        await reader.cancel(pipelineFailure?.error).catch(checkReaderError)
+        await reader.closed.catch(checkReaderError)
         reader.releaseLock();reader=null
       }
       await pipelineCompletion
       const result=await pipelineCleanup
-      if(result?.error)throw Error('archive_cleanup_failed')
+      if(result && 'error' in result)throw Error('archive_cleanup_failed')
       downloadHash?.destroy();rawHash?.destroy();formatter=null;recordPage=null;if(store)await store.closeAndDelete()
     },
     snapshot:()=>({downloadBytes:downloadBytes.toString(),rawBytes:rawBytes.toString(),records:records.toString(),published,nativeOutputChunkBytes})

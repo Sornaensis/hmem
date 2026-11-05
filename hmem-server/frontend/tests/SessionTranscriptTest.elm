@@ -19,6 +19,13 @@ tests =
         [ test "a supported indivisible leaf can use more than one slice of the whole budget" <| \_ ->
             let rendered=Transcript.renderWindow 100000 0 "" [Transcript.atom 45000 (\_ -> Html.text "large supported leaf")] in
             Expect.all [\_ -> Expect.equal False rendered.error,\_ -> Html.div [] rendered.nodes |> Query.fromHtml |> Query.has [Selector.text "large supported leaf"]] ()
+        , test "admitted fragments and their omitted ranges retain source order" <| \_ ->
+            let
+                fragments = List.range 0 6 |> List.map (\index -> Transcript.atom 9000 (\_ -> Html.text (String.fromInt index)))
+                rendered = Transcript.renderWindow 30000 3 "" fragments
+            in
+            Expect.equal { keys = [ "gap:0:1", "2", "3", "gap:3:6" ], part = 3, more = True, error = False }
+                { keys = rendered.keys, part = rendered.part, more = rendered.more, error = rendered.error }
         , test "exact resolved qualification fixtures retain the original whole-page continuation bound" <| \_ ->
             let
                 referenceDestination="https://example.test/" ++ String.repeat 8400 "x"

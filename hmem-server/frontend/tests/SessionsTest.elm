@@ -1169,6 +1169,39 @@ completedReaderTests =
             apply stamp generation wanted part more format=Sessions.update (packet stamp generation wanted part more format) waiting |> Tuple.first |> .sessions |> .sealed |> .rows |> List.head |> Maybe.map (.ast >> Result.toMaybe >> (/=) Nothing)
         in Expect.equal [Just True,Just False,Just False,Just False,Just False,Just False,Just False]
             [apply state.stamp state.generation key 0 False "markdown",apply "retired" state.generation key 0 False "markdown",apply state.stamp (state.generation-1) key 0 False "markdown",apply state.stamp state.generation "missing" 0 False "markdown",apply state.stamp state.generation key 1 False "markdown",apply state.stamp state.generation key 0 True "markdown",apply state.stamp state.generation key 0 False "json"]
+    , test "admitted Markdown parses once per body while overlap preserves the cached AST" <| \_ ->
+        let
+            ready = model "ready"
+            state = ready.sessions
+            key index = String.padLeft 19 '0' (String.fromInt index) ++ ":0000000"
+            kept = "[Kept](https://example.test/kept)"
+            piece index source more format opened =
+                Encode.object
+                    [ ("key",Encode.string (key index)),("offset",Encode.string (String.fromInt index))
+                    , ("kind",Encode.string "text"),("role",Encode.string "assistant"),("label",Encode.string "")
+                    , ("time",Encode.string ""),("group",Encode.string ""),("count",Encode.string "0")
+                    , ("open",Encode.bool opened),("groupOpen",Encode.bool False)
+                    , ("body",Encode.object [("text",Encode.string source),("part",Encode.int 0),("more",Encode.bool more),("format",Encode.string format)])
+                    ]
+            apply rows current =
+                Sessions.update (SessionsBridgeEvent (Encode.object
+                    [ ("kind",Encode.string "sealed-page"),("stamp",Encode.string state.stamp),("generation",Encode.int state.generation)
+                    , ("workspace",Encode.string workspace),("session",Encode.string sessionId),("rows",Encode.list identity rows)
+                    , ("first",Encode.string (key 1)),("last",Encode.string (key 3))
+                    ])) current |> Tuple.first
+            first = apply [piece 1 kept False "markdown" False] ready
+            firstAst = List.head first.sessions.sealed.rows |> Maybe.map .ast
+            overlap = apply [piece 1 "repeated page body" False "markdown" True,piece 2 "partial" True "markdown" False,piece 3 "{}" False "json" False] first
+            cached = List.head overlap.sessions.sealed.rows
+            blocked current = (current.sessions.sealed.error,List.length current.sessions.sealed.rows)
+        in Expect.all
+            [ \_ -> Expect.equal True (firstAst |> Maybe.andThen Result.toMaybe |> (/=) Nothing)
+            , \_ -> Expect.equal (Just kept,firstAst,Just True) (cached |> Maybe.andThen (.body >> Maybe.map .text),Maybe.map .ast cached,Maybe.map .open cached)
+            , \_ -> Expect.equal [Err "not_loaded",Err "not_loaded"] (List.drop 1 overlap.sessions.sealed.rows |> List.map .ast)
+            , \_ -> Expect.equal (Just "archive_page_limit",0) (apply (List.repeat 201 (piece 1 kept False "markdown" False)) ready |> blocked)
+            , \_ -> Expect.equal (Just "archive_page_limit",0) (apply [piece 1 (String.repeat 4194305 "x") False "markdown" False] ready |> blocked)
+            , \_ -> Expect.equal (Just "archive_page_invalid",0) (apply [Encode.object []] ready |> blocked)
+            ] ()
     , test "partial multilingual Markdown and acquired rows share the actual serialized UTF8 cap" <| \_ ->
         let
             ready=model "ready"

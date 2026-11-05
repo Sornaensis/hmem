@@ -47,11 +47,16 @@ function documentFor(expected) {
   }
   const ids = { 'timeline-chart-lifecycle-title': { textContent: expected.title },
     'timeline-chart-lifecycle-description': { textContent: expected.description } }
-  let blocked = false
+  let blocked = false, pendingSelector = null
   return { lists, ids, points, paths, toggles, entityToggles, block: () => { blocked = true },
+    hold: selector => { pendingSelector = selector },
     getElementById: id => ids[id] || null,
     querySelectorAll: selector => lists[selector] || [],
-    querySelector: selector => selector === '.timeline-panel' ? {} : blocked && selector.includes('timeline-graph-error') ? { textContent: 'error '.repeat(100) } : null }
+    querySelector: selector => {
+      if (selector === '.timeline-panel') return {}
+      if (blocked && selector.includes('timeline-graph-error')) return { textContent: 'error '.repeat(100) }
+      return pendingSelector && selector.split(',').includes(pendingSelector) ? { textContent: '' } : null
+    } }
 }
 
 async function withDocument(document, action) {
@@ -137,6 +142,24 @@ test('canonical enabled lifecycle points accept zero activity and enforce count/
   }
   const bad = structuredClone(expected.buckets); bad.buckets[0].series.project.created = -1
   assert.throws(() => timelineChartExpectation(expected.events, bad), /invalid/)
+})
+
+test('Timeline readiness rejects both the event loader and the named inline graph spinner', async () => {
+  const { chart } = expectedFor(generateFixture('small'))
+  const doc = documentFor(chart)
+  await withDocument(doc, () => {
+    for (const selector of [
+      '.timeline-panel .loading-indicator',
+      '.timeline-graph-state .app-spinner[role="status"][aria-label="Loading lifecycle graph"]'
+    ]) {
+      doc.hold(selector)
+      assert.equal(timelineDomReady(chart), false)
+      assert.equal(timelineDomSnapshot().loading, true)
+    }
+    doc.hold(null)
+    assert.equal(timelineDomReady(chart), true)
+    assert.equal(timelineDomSnapshot().loading, false)
+  })
 })
 
 test('real Timeline fixture responder retains exact wire DTO accounting and fulfilled model readiness', async () => {

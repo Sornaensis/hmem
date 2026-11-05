@@ -604,6 +604,8 @@ test('failed independent continuation pauses with truthful error and explicit Re
     await status.getByRole('status', { name: 'Loading more hierarchy items', exact: true }).waitFor()
     const siblingRetry = status.getByRole('button', { name: /Retry/ })
     assert.equal(await siblingRetry.count(), 1, 'Only the failed sibling keeps its Retry')
+    await siblingRetry.and(h.page.locator('button:disabled')).waitFor({ timeout: 5000 })
+    assert.equal(retryPending.receipt.done, false, 'The Retry transport remains held during the physical-admission paint')
     assert.equal(await siblingRetry.isDisabled(), true, 'The same owner cannot admit a second request while its retry is pending')
     await h.page.waitForFunction(() => document.activeElement.id === 'hierarchy-viewport')
     retryPending.release(); await h.idle()

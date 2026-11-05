@@ -19,6 +19,7 @@ import Http
 import Set
 import StartupAdmission
 import Test exposing (Test, describe, test)
+import Test.Html.Event as Event
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
 import Types exposing (Flags, Model, Msg(..), Page(..), WorkspaceTab(..), AuthStatus(..))
@@ -328,6 +329,24 @@ suite =
                     pendingView =
                         Cards.viewProjectsTree workspaceId requested |> Query.fromHtml
 
+                    loading =
+                        requested.dataLoading
+
+                    idle =
+                        { requested | dataLoading = { loading | projectCardDetailRequests = Dict.remove summary.id loading.projectCardDetailRequests, cardDetailAdmissions = Set.fromList (List.range 100 105) } }
+
+                    idleView =
+                        Cards.viewProjectsTree workspaceId idle |> Query.fromHtml
+
+                    queued =
+                        DataLoading.update (RetryCardDetail "project" summary.id) idle |> Tuple.first
+
+                    queuedView =
+                        Cards.viewProjectsTree workspaceId queued |> Query.fromHtml
+
+                    loadingDescription =
+                        [ Selector.attribute (Html.Attributes.attribute "role" "status"), Selector.attribute (Html.Attributes.attribute "aria-label" "Loading description") ]
+
                     firstRequest =
                         Dict.get summary.id requested.dataLoading.projectCardDetailRequests
 
@@ -346,7 +365,13 @@ suite =
                         DataLoading.update (RetryCardDetail "project" summary.id) failed |> Tuple.first
                 in
                 Expect.all
-                    [ \_ -> pendingView |> Query.has [ Selector.attribute (Html.Attributes.attribute "role" "status"), Selector.attribute (Html.Attributes.attribute "aria-label" "Loading description") ]
+                    [ \_ -> idleView |> Query.find [ Selector.tag "button", Selector.containing [ Selector.text "Load description" ] ] |> Event.simulate Event.click |> Event.expect (RetryCardDetail "project" summary.id)
+                    , \_ -> idleView |> Query.hasNot [ Selector.tag "button", Selector.containing [ Selector.text "Retry" ] ]
+                    , \_ -> Expect.equal ( True, False ) ( Set.member ( "project", summary.id ) queued.dataLoading.cardDetailRetries, Dict.member summary.id queued.dataLoading.projectCardDetailRequests )
+                    , \_ -> queuedView |> Query.findAll loadingDescription |> Query.count (Expect.equal 1)
+                    , \_ -> queuedView |> Query.hasNot [ Selector.tag "button", Selector.containing [ Selector.text "Load description" ] ]
+                    , \_ -> queuedView |> Query.hasNot [ Selector.tag "button", Selector.containing [ Selector.text "Retry" ] ]
+                    , \_ -> pendingView |> Query.has loadingDescription
                     , \_ -> pendingView |> Query.findAll [ Selector.text "Click to add description..." ] |> Query.count (Expect.equal 0)
                     , \_ -> failedView |> Query.has [ Selector.text "Description unavailable.", Selector.text "Retry" ]
                     , \_ ->

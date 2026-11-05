@@ -1410,6 +1410,9 @@ viewCardDescription model entityType entityId description =
             case retained of
                 Just previous -> readOnly previous
                 Nothing -> div [ class "card-description-state" ] [ Spinner.inline "Loading description" ]
+
+        requestDescription label =
+            button [ class "btn-small btn-ghost", Spinner.preserveFocus (CardSections.detailsId entityType entityId ++ "-toggle"), onClick (RetryCardDetail entityType entityId) ] [ text label ]
     in
     if Helpers.editingValue model entityId "description" /= Nothing then
         Feature.Editing.viewEditableTextarea model entityType entityId "description" (Maybe.withDefault "" description)
@@ -1429,17 +1432,18 @@ viewCardDescription model entityType entityId description =
                 else
                     div [ class "card-description-state card-description-error" ]
                         [ span [] [ text "Description unavailable." ]
-                        , button [ class "btn-small btn-ghost", Spinner.preserveFocus (CardSections.detailsId entityType entityId ++ "-toggle"), onClick (RetryCardDetail entityType entityId) ] [ text "Retry" ]
+                        , requestDescription "Retry"
                         ]
 
             Nothing ->
                 case retained of
                     Just previous -> readOnly previous
                     Nothing ->
-                        div [ class "card-description-state card-description-error" ]
-                            [ span [] [ text "Description not loaded." ]
-                            , button [ class "btn-small btn-ghost", Spinner.preserveFocus (CardSections.detailsId entityType entityId ++ "-toggle"), onClick (RetryCardDetail entityType entityId) ] [ text "Retry" ]
-                            ]
+                        if Set.member ( entityType, entityId ) model.dataLoading.cardDetailRetries then
+                            pending
+
+                        else
+                            div [ class "card-description-state" ] [ requestDescription "Load description" ]
 
 
 {-| Suppress only a refresh-introduced body warning. Status controls still use

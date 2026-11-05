@@ -230,15 +230,16 @@ viewObservationTotal model =
     let
         counts = model.observations.workspaceCounts
         label = counts.value |> Maybe.map (\value -> String.fromInt value.totalCount ++ " observations")
+        sharedPending = not counts.current && counts.error == Nothing && AuditNavigation.destinationStatus model == Nothing && Feature.Observation.workspaceTotalUsesVisibleDiscovery model
     in
     span [ class "workspace-observation-total", id "workspace-observation-total", tabindex -1, attribute "role" "group", attribute "aria-label" "Observation total" ]
-        [ text " · "
+        [ text (if sharedPending && label == Nothing then "" else " · ")
         , span [ attribute "aria-live" "polite" ]
             [ text (if counts.error /= Nothing || counts.current then Maybe.withDefault "Observation total unavailable" (if counts.error /= Nothing then Nothing else label) else Maybe.withDefault "" label) ]
         , if counts.error /= Nothing then
             button [ class "btn btn-sm", type_ "button", Spinner.preserveFocus "workspace-observation-total", onClick RetryWorkspaceObservationCounts ] [ text "Retry counts" ]
 
-          else if not counts.current then
+          else if not counts.current && not sharedPending then
             span [ class "workspace-total-pending" ]
                 [ Spinner.inline (if counts.value == Nothing then "Loading Observation total" else "Updating Observation total") ]
 

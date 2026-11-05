@@ -126,6 +126,7 @@ test('global search is live and independent with persistent actor preferences th
     await waitFor(h, () => requests.length === 3)
     const searching = h.page.getByRole('status', { name: 'Searching all entities', exact: true })
     assert.equal(await searching.count(), 1)
+    assert.equal(await h.page.locator('.search-state-card p').textContent(), 'Query “pending”')
     assert.match(await h.page.locator('.search-previous-results .search-results-title').innerText(), /alpha/)
     assert.equal(await bar(h).count(), 1)
     releasePending()

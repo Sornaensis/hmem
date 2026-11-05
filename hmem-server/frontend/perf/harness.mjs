@@ -712,7 +712,7 @@ async function waitForTransportQuiescence(page, tracker, label, quietMs = 250, t
 
 async function projectUiSignals(page, anchorId) {
   return page.evaluate(id => ({
-    loading: Boolean(document.querySelector('.loading-indicator')),
+    loading: Boolean(document.querySelector('.loading-indicator,.app-spinner[role="status"][aria-label="Loading Planning hierarchy"]')),
     focused: Boolean(document.querySelector('.focus-breadcrumb-bar')),
     anchorVisible: Boolean(document.querySelector(`#entity-${id}`))
   }), anchorId)
@@ -725,7 +725,9 @@ export function workspaceReadinessSnapshot(anchorId) {
   const hostRect = rect(host), anchorRect = rect(anchor), viewportRect = rect(viewport)
   const rows = [...document.querySelectorAll('[data-hierarchy-key]')]
   const key = element => element?.getAttribute('data-hierarchy-key')?.slice(0, 128) || null
-  return { hash: location.hash.slice(0, 512), loading: [...document.querySelectorAll('.loading-indicator')].slice(0, 8).map(element => element.textContent.slice(0, 128)),
+  const loading = [...document.querySelectorAll('.loading-indicator .app-spinner[role="status"],.app-spinner[role="status"][aria-label="Loading Planning hierarchy"]')]
+    .slice(0, 8).map(element => element.getAttribute('aria-label')?.slice(0, 128) || null)
+  return { hash: location.hash.slice(0, 512), loading,
     focused: !!document.querySelector('.focus-breadcrumb-bar'),
     tabs: [...document.querySelectorAll('.tabs button')].slice(0, 8).map(element => ({ text: element.textContent.slice(0, 64), class: element.className.slice(0, 128), selected: element.getAttribute('aria-selected') })),
     filters: [...document.querySelectorAll('.filter-bar button,.filter-bar input,.filter-bar select')].slice(0, 20).map(element => ({ id: element.id.slice(0, 64), text: element.textContent.slice(0, 64), value: element.value?.slice(0, 128), class: element.className.slice(0, 128), pressed: element.getAttribute('aria-pressed') })),
@@ -810,7 +812,7 @@ export async function waitForFirstUsefulViewport(page, tracker, fixture, anchorI
       const anchor = document.getElementById('entity-' + id), scroll = document.getElementById('main-content-scroll')
       const row = anchor?.getBoundingClientRect(), viewport = scroll?.getBoundingClientRect()
       const anchorVisible = !!(row && viewport && row.height > 0 && row.bottom > viewport.top && row.top < viewport.bottom)
-      const loading = !!document.querySelector('.loading-indicator')
+      const loading = !!document.querySelector('.loading-indicator,.app-spinner[role="status"][aria-label="Loading Planning hierarchy"]')
       const painted = anchorVisible && !loading
       const receipts = performance.getEntriesByType('resource').flatMap(entry => (entry.serverTiming || [])
         .filter(metric => metric.name === 'hmem_receipt')
@@ -1329,8 +1331,7 @@ export function assertTimelineTransport(tracker, before, fixture, options) {
 
 export function timelineDomReady(expected) {
   const panel = document.querySelector('.timeline-panel')
-  if (!panel || document.querySelector('.timeline-panel .loading-indicator,.timeline-graph-error,.timeline-stale-notice,.timeline-state .btn-secondary,.timeline-selection-note')
-    || [...document.querySelectorAll('.timeline-graph-state')].some(node => node.textContent.includes('Loading'))
+  if (!panel || document.querySelector('.timeline-panel .loading-indicator,.timeline-graph-state .app-spinner[role="status"][aria-label="Loading lifecycle graph"],.timeline-graph-error,.timeline-stale-notice,.timeline-state .btn-secondary,.timeline-selection-note')
     || JSON.stringify([...document.querySelectorAll('.timeline-event-card')].map(node => node.id)) !== JSON.stringify(expected.eventIds)) return false
   const charts = [...document.querySelectorAll('svg.timeline-line-chart')]
   if (charts.length !== 1 || charts[0].namespaceURI !== 'http://www.w3.org/2000/svg'
@@ -1365,7 +1366,7 @@ export function timelineDomSnapshot() {
     points: document.querySelectorAll('.timeline-point-control').length, legacyRows: document.querySelectorAll('.timeline-value-table tbody tr').length,
     selectedPoints: document.querySelectorAll('.timeline-point-selected').length, selection: !!document.querySelector('.timeline-selection-note'),
     controls: [...document.querySelectorAll('.timeline-graph-controls select')].slice(0, 2).map(node => node.value.slice(0, 32)),
-    loading: !!document.querySelector('.timeline-panel .loading-indicator') || [...document.querySelectorAll('.timeline-graph-state')].some(node => node.textContent.includes('Loading')),
+    loading: !!document.querySelector('.timeline-panel .loading-indicator,.timeline-graph-state .app-spinner[role="status"][aria-label="Loading lifecycle graph"]'),
     error: text('.timeline-graph-error,.timeline-stale-notice,.timeline-state .btn-secondary'),
     lifecycleToggles: toggles('Lifecycle line actions', 5), entityToggles: toggles('Lifecycle line entities', 4),
     pointLabels: [...document.querySelectorAll('.timeline-point-control')].slice(0, 25).map(node => node.getAttribute('aria-label')?.slice(0, 256) || null) }

@@ -18,6 +18,7 @@ module Feature.Observation exposing
     , init
     , pageSize
     , countQuery
+    , workspaceTotalUsesVisibleDiscovery
     , hasAppliedCountFilter
     , syncCounts
     , invalidateCounts
@@ -364,6 +365,63 @@ settleDiscoveryDestinations request latest result model =
         _ -> (settled, command)
 
 
+discoveryEnvelopeCurrent : ObservationDiscoveryRequest -> ObservationModel -> Bool
+discoveryEnvelopeCurrent request state =
+    let
+        discovery = state.discovery
+    in
+    discovery.owner == request.owner && discovery.sessionId == request.sessionId && discovery.generation == request.generation && discovery.query == Just request.query
+        && (case request.contextToken of
+            Nothing -> discovery.bootstrap == Just request
+            Just token -> Maybe.map .token discovery.context == Just token)
+
+
+discoveryRequestOwned : ObservationDiscoveryRequest -> Model -> Bool
+discoveryRequestOwned request model =
+    let
+        state = model.observations
+    in
+    model.auth.status == AuthReady && Permissions.canReadCurrentWorkspace model && model.selectedWorkspaceId == Just request.workspaceId && model.sessionRequestEpoch == request.epoch
+        && request.owner == treeOwner model && discoveryEnvelopeCurrent request state
+        && (case request.destination of
+            DiscoveryCount scoped workspace -> state.counts.active == Just scoped || state.workspaceCounts.active == Just workspace
+            _ -> True)
+
+
+visibleFlatDiscovery : ObservationDiscoveryRequest -> ObservationModel -> Bool
+visibleFlatDiscovery request state =
+    case request.destination of
+        DiscoveryFlat _ generation fingerprint offset ->
+            state.requestMode == ObservationFlatMode && state.loading
+                && observationResponseMatches request.epoch generation fingerprint offset state
+
+        _ ->
+            False
+
+
+workspaceTotalUsesVisibleDiscovery : Model -> Bool
+workspaceTotalUsesVisibleDiscovery model =
+    let
+        state = model.observations
+        root = Dict.get "" state.tree.branches
+
+        visible request =
+            request.workspaceCountGeneration == state.workspaceCounts.generation
+                && discoveryRequestOwned request model
+                && (case request.destination of
+                    DiscoveryTree tree ->
+                        treeMode state.requestMode && tree.prefix == "" && tree.kind == Nothing && tree.offset == 0
+                            && state.tree.totals == Nothing && state.discovery.error == Nothing
+                            && (root |> Maybe.andThen .error) == Nothing && (root |> Maybe.andThen .request) == Just tree
+
+                    _ ->
+                        visibleFlatDiscovery request state)
+    in
+    model.activeTab == ObservationsTab && not model.dataLoading.loadingWorkspaceData && model.workspaceAdmin.authorizationPending == Nothing
+        && state.workspaceCounts.active == Nothing && state.deleteConfirmation == Nothing && not (filtersPending state)
+        && List.any visible state.discovery.physical
+
+
 acceptDiscovery : ObservationDiscoveryRequest -> Result Http.Error Api.ObservationDiscoveryResponse -> Model -> ( Model, Cmd Msg )
 acceptDiscovery request result incoming =
     let
@@ -378,14 +436,7 @@ acceptDiscovery request result incoming =
         model = { incoming | observations = { releasedState | discovery = discovery }, dataLoading = case request.destination of
             DiscoveryCount _ _ -> {loading | startupAdmission = StartupAdmission.complete (discoveryCountKey request) loading.startupAdmission}
             _ -> loading }
-        owned = incoming.auth.status == AuthReady && Permissions.canReadCurrentWorkspace incoming && incoming.selectedWorkspaceId == Just request.workspaceId && incoming.sessionRequestEpoch == request.epoch
-            && request.owner == treeOwner incoming && discovery.owner == request.owner && discovery.sessionId == request.sessionId && discovery.generation == request.generation && discovery.query == Just request.query
-            && (case request.contextToken of
-                Nothing -> discovery.bootstrap == Just request
-                Just token -> Maybe.map .token discovery.context == Just token)
-            && (case request.destination of
-                DiscoveryCount scoped workspace -> state.counts.active == Just scoped || state.workspaceCounts.active == Just workspace
-                _ -> True)
+        owned = discoveryRequestOwned request incoming
     in
     if not owned then
         case request.destination of
@@ -5215,6 +5266,10 @@ viewModeCounts state =
 
         lastCount =
             Maybe.map (\value -> "Last completed count: " ++ String.fromInt value.matchCount) counts.value
+
+        flatPageSuppliesCount =
+            counts.active == Nothing && state.deleteConfirmation == Nothing
+                && List.any (\request -> request.countGeneration == counts.generation && discoveryEnvelopeCurrent request state && visibleFlatDiscovery request state) state.discovery.physical
     in
     if treeMode state.requestMode then
         case state.tree.totals of
@@ -5248,7 +5303,10 @@ viewModeCounts state =
             ]
 
     else if counts.pending || counts.active /= Nothing then
-        pending (lastCount |> Maybe.map (\count -> [ text (count ++ " ") ]) |> Maybe.withDefault []) "Counting matching Observations"
+        if flatPageSuppliesCount then
+            settled (lastCount |> Maybe.map (text >> List.singleton) |> Maybe.withDefault [])
+        else
+            pending (lastCount |> Maybe.map (\count -> [ text (count ++ " ") ]) |> Maybe.withDefault []) "Counting matching Observations"
 
     else
         settled (lastCount |> Maybe.map (text >> List.singleton) |> Maybe.withDefault [])

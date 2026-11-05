@@ -165,7 +165,7 @@ updateRaw msg model =
 
                     _ ->
                         addToast Warning
-                            "Connection lost. Reconnecting..."
+                            "Connection lost."
                             (Feature.DataLoading.invalidatePlanningCounts (setWebSocketState Connecting model))
 
             else
@@ -174,7 +174,7 @@ updateRaw msg model =
         WsConnectionFailed reason ->
             if model.auth.status == AuthReady then
                 addToast Warning
-                    "Canonical change stream is reconnecting or requires scoped resync"
+                    "Live updates lost sync. A scoped refresh may be required."
                     (Feature.DataLoading.invalidatePlanningCounts (setWebSocketState (ConnectionFailed reason) model))
 
             else

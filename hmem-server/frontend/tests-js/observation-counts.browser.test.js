@@ -147,9 +147,15 @@ test('production inactive workspace totals coalesce stale replies, count unloade
   } finally { release?.(); await h.close() }
 })
 
-test('production held count success cannot survive live read revocation and a fresh session reload', { timeout: 60000 }, async () => {
+const flatStartup = query => 'tab=observations&ov=1&oq=' + encodeURIComponent(JSON.stringify(['flat', query, null, '', '', null, null, [], '', '', '']))
+for (const [mode, view, fragment, name] of [
+  ['Tree', 'tree', 'tab=observations', 'Loading Subject Tree'],
+  ['Flat', 'list', flatStartup(''), 'Loading observations'],
+  ['filtered Flat', 'list', flatStartup('Cache'), 'Loading observations']
+]) test('production held ' + mode + ' startup shares one pending indicator and cannot survive live read revocation', { timeout: 60000 }, async () => {
   const h = await openDiscovery()
-  let release
+  const shell = view === 'tree' ? h.gate(receipt => receipt.path === '/api/v1/change-stream/resync', { hold: true }) : null
+  let release, admitted
   try {
     let canRead = true, hold = true
     await h.page.route('**/api/v1/session?**', async route => {
@@ -158,12 +164,24 @@ test('production held count success cannot survive live read revocation and a fr
         workspace: { workspace_id: h.fixture.workspace.id, role: canRead ? 'owner' : null, can_read: canRead, can_edit: canRead, can_admin: canRead } }) })
     })
     await interceptDiscovery(h,async(route,outcome)=>{
-      if(hold){hold=false;await new Promise(resolve=>{release=resolve});outcome.body.page.counts.total_count=999;outcome.body.page.counts.match_count=999}
+      if(hold){hold=false;admitted=outcome.receipt.payload;await new Promise(resolve=>{release=resolve});outcome.body.page.counts.total_count=999;outcome.body.page.counts.match_count=999}
       await route.fallback()
     })
-    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#tab=observations')
+    await h.page.goto(h.origin+'/workspace/'+h.fixture.workspace.id+'#'+fragment)
     await h.bounded((async()=>{while(!release)await h.page.waitForTimeout(20)})(),5000,'Discovery count envelope held before revocation')
-    assert.equal(await h.page.locator('.workspace-header .workspace-observation-total').getByRole('status', { name: 'Loading Observation total', exact: true }).count(), 1)
+    if (shell) await h.bounded(shell.arrived,5000,'Canonical shell held separately from the current Tree envelope')
+    else await h.page.locator('.connection-status.connected').waitFor()
+    assert.equal(admitted.view, view)
+    assert.equal(admitted.offset, 0)
+    assert.equal(admitted.terminal ?? null, null)
+    assert.equal(h.receipts.filter(receipt => !receipt.done).length, 1)
+    const pending = h.page.locator('#observation-panel').getByRole('status', { name, exact: true })
+    await pending.waitFor()
+    assert.equal(await pending.count(), 1)
+    assert.equal(await h.page.locator('.workspace-header .workspace-observation-total .app-spinner').count(), 0)
+    assert.equal(await h.page.getByRole('status', { name: 'Counting matching Observations', exact: true }).count(), 0)
+    shell?.release()
+    await h.page.locator('.connection-status.connected').waitFor()
     canRead = false
     await h.page.evaluate(workspace => window.pushHierarchyFrames([{ schema_version: 1, type: 'access_revoked', workspace_id: workspace }]), h.fixture.workspace.id)
     await h.page.waitForFunction(() => !document.getElementById('observation-panel'), null, { timeout: 5000 })
@@ -172,6 +190,50 @@ test('production held count success cannot survive live read revocation and a fr
     assert.ok(!(await h.page.locator('body').textContent()).includes('999 observations'))
     canRead = true; await h.page.reload(); await h.page.locator('#observation-panel').waitFor(); await h.idle()
     assert.equal((await h.page.locator('.workspace-header .workspace-observation-total').textContent()).replace(/^\s*·\s*/, ''), '64 observations')
+  } finally { shell?.release(); release?.(); await h.close() }
+})
+
+test('production retained Flat rows and counts share the admitted refresh indicator', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  let release
+  try {
+    await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#' + flatStartup('Cache'))
+    await h.page.locator('#observation-panel').waitFor()
+    await h.idle()
+    const rows = h.page.locator('#observation-viewport')
+    const scoped = h.page.locator('.observation-mode-announcement')
+    const total = h.page.locator('.workspace-header .workspace-observation-total')
+    assert.equal(await rows.getAttribute('data-observation-loaded-count'), '2')
+    assert.equal(await scoped.textContent(), '2 Observations match')
+    assert.match(await total.textContent(), /64 observations/)
+
+    await interceptDiscovery(h, async (route, outcome) => {
+      if (!release && outcome.receipt.payload?.view === 'list') await new Promise(resolve => { release = resolve })
+      await route.fallback()
+    })
+    h.fixture.observations.push({ ...h.fixture.observations[0], id: 'held-refresh-cache', content: 'Cache evidence added' })
+    await h.page.evaluate(workspace => window.pushHierarchyFrames([{ schema_version: 1, type: 'change', event: {
+      schema_version: 1, event_id: 'flat-refresh-create', scope: 'workspace', workspace_id: workspace,
+      occurred_at: '2026-10-19T00:00:00Z', transaction: { id: 'flat-refresh-tx', cause: 'rest', request_id: null }, actor: { type: 'system', id: null },
+      entity: { type: 'observation', id: 'held-refresh-cache', action: 'created' }, invalidations: [{ kind: 'collection', target: 'observations:' + workspace }]
+    } }]), h.fixture.workspace.id)
+    await h.bounded((async()=>{while(!release)await h.page.waitForTimeout(20)})(),5000,'Held Flat refresh')
+    const pending = h.page.getByRole('status', { name: 'Refreshing observations', exact: true })
+    await pending.waitFor()
+    assert.equal(await pending.count(), 1)
+    assert.equal(h.receipts.filter(receipt => !receipt.done).length, 1)
+    assert.equal(await rows.getAttribute('data-observation-loaded-count'), '2')
+    assert.match(await total.textContent(), /64 observations/)
+    assert.equal(await scoped.textContent(), 'Last completed count: 2')
+    assert.equal(await total.locator('.app-spinner').count(), 0)
+    assert.equal(await scoped.locator('.app-spinner').count(), 0)
+
+    release()
+    await h.idle()
+    assert.equal(await pending.count(), 0)
+    assert.equal(await rows.getAttribute('data-observation-loaded-count'), '3')
+    assert.equal(await scoped.textContent(), '3 Observations match')
+    assert.match(await total.textContent(), /65 observations/)
   } finally { release?.(); await h.close() }
 })
 
@@ -200,6 +262,7 @@ for (const phase of ['Initial','HeaderOnly']) test(`production ${phase}: count o
     await h.page.getByRole('button',{name:'Observations',exact:true}).click();await h.page.locator('#observation-panel').waitFor()
     if(phase==='Initial') {
       assert.equal(h.receipts.filter(r=>r.payload?.view==='list').length,0,'Initial page waits for the single count bootstrap token')
+      assert.equal(await h.page.locator('.workspace-header').getByRole('status',{name:'Loading Observation total',exact:true}).count(),1,'The independent count-first request keeps its own indicator')
       releaseCount();releaseCount=null
       await h.bounded((async()=>{while(!releasePage)await h.page.waitForTimeout(20)})(),5000,'Distinct initial collection owner arrives after count')
       assert.ok(!(await h.page.locator('.workspace-header .workspace-observation-total').innerText()).includes('999 observations'))

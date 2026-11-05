@@ -929,7 +929,7 @@ viewUnifiedSearchLoading model =
     div [ class "unified-search-results search-results-state" ]
         [ div [ class "search-state-card" ]
             [ h3 [] [ Spinner.inline "Searching all entities" ]
-            , p [] [ text ("Looking for results matching " ++ searchQueryLabel model ++ ".") ]
+            , p [] [ text ("Query " ++ searchQueryLabel model) ]
             ]
         , viewPreviousResults model
         ]

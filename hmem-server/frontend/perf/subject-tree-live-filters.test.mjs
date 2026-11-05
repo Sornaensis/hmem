@@ -27,7 +27,7 @@ test('workspace failure telemetry distinguishes offscreen anchor, current contex
   const document = { activeElement: element({ id: 'current-control', tagName: 'BUTTON', closest: () => rows[39] }),
     getElementById: id => ({ 'main-content-scroll': host, 'hierarchy-viewport': viewport, 'entity-target': anchor })[id],
     querySelector: () => null,
-    querySelectorAll: selector => ({ '[data-hierarchy-key]': rows, '.loading-indicator': [], '.tabs button': [tab], '.filter-bar button,.filter-bar input,.filter-bar select': [filter] })[selector] || [] }
+    querySelectorAll: selector => ({ '[data-hierarchy-key]': rows, '.tabs button': [tab], '.filter-bar button,.filter-bar input,.filter-bar select': [filter] })[selector] || [] }
   const snapshot = vm.runInNewContext('(' + workspaceReadinessSnapshot.toString() + ')("target")', { document, location: { hash: '#tab=projects' } })
   assert.equal(snapshot.anchor.present, true); assert.equal(snapshot.anchor.withinHost, false)
   assert.equal(snapshot.scroll.hostRelativeTop, 800); assert.equal(snapshot.scroll.top, 800); assert.equal(snapshot.scroll.viewportOrigin, 0)
@@ -37,6 +37,15 @@ test('workspace failure telemetry distinguishes offscreen anchor, current contex
   assert.equal(snapshot.tabs[0].text, 'Projects'); assert.equal(snapshot.filters[0].value, 'active')
   assert.equal(snapshot.focused, false); assert.equal(snapshot.loading.length, 0)
   assert.equal(host.scrollTop, 800); assert.equal(document.activeElement.id, 'current-control')
+})
+
+test('workspace readiness diagnostics retain the inline Planning root status name without visible copy', () => {
+  const selector = '.loading-indicator .app-spinner[role="status"],.app-spinner[role="status"][aria-label="Loading Planning hierarchy"]'
+  const status = { textContent: '', getAttribute: name => name === 'aria-label' ? 'Loading Planning hierarchy' : null }
+  const document = { getElementById: () => null, querySelector: () => null,
+    querySelectorAll: query => query === selector ? [status] : [] }
+  const snapshot = vm.runInNewContext('(' + workspaceReadinessSnapshot.toString() + ')(' + JSON.stringify('target') + ')', { document, location: { hash: '#tab=projects' } })
+  assert.deepEqual(Array.from(snapshot.loading), ['Loading Planning hierarchy'])
 })
 
 test('Projects return scrolls the native current root only after the unchanged click and two-paint measurement', async () => {

@@ -1078,23 +1078,18 @@ viewGlobalNavigation model =
 
 viewConnectionStatus : WSState -> Html Msg
 viewConnectionStatus state =
-    let
-        ( statusClass, statusText ) =
-            case state of
-                Connected ->
-                    ( "connected", "Connected" )
+    case state of
+        Connected ->
+            div [ class "connection-status connected" ] [ text "Connected" ]
 
-                Disconnected ->
-                    ( "disconnected", "Disconnected" )
+        Disconnected ->
+            div [ class "connection-status disconnected" ] [ text "Disconnected" ]
 
-                Connecting ->
-                    ( "connecting", "Connecting" )
+        Connecting ->
+            div [ class "connection-status connecting" ] [ Spinner.inline "Connecting to live updates" ]
 
-                ConnectionFailed _ ->
-                    ( "disconnected", "Connection failed" )
-    in
-    div [ class ("connection-status " ++ statusClass) ]
-        [ text statusText ]
+        ConnectionFailed _ ->
+            div [ class "connection-status disconnected" ] [ text "Connection failed" ]
 
 
 pageKey : Page -> String

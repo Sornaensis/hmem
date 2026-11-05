@@ -547,7 +547,7 @@ suite =
                     Just request -> Main.update (GotNavigationBranch workspaceId request.sessionEpoch request.generation ("task:" ++ parent.id) request.filterFingerprint request.projectOffset request.taskOffset
                         (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ task "late-child" (Just parent.id) ], hasMore = False } })) cleared |> Tuple.first
             in
-            Expect.equal { continuation = Just ( 50, True ), held = True, released = True, stale = False, visible = [ "project:external", "root-status:project", "root-status:task" ] }
+            Expect.equal { continuation = Just ( 50, True ), held = True, released = True, stale = False, visible = [ "project:external", "root-status:project" ] }
                 { continuation = captured |> Maybe.map (\request -> ( request.taskOffset, request.inFlight ))
                 , held = Dict.size cleared.dataLoading.navigationAdmissions == Dict.size continued.dataLoading.navigationAdmissions
                 , released = Dict.size late.dataLoading.navigationAdmissions < Dict.size cleared.dataLoading.navigationAdmissions

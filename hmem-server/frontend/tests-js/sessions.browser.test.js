@@ -483,11 +483,16 @@ test('archive readiness waits for the current task initial canonical resync', { 
     canonical=currentTaskCanonicalReady(page,workspace,task).then(()=>{ready=true})
     await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))))
     assert.equal(await page.locator('.connection-status.connected').count(),0)
+    const connecting=page.locator('.connection-status.connecting').getByRole('status',{name:'Connecting to live updates',exact:true})
+    await connecting.waitFor()
+    assert.equal(await connecting.count(),1)
+    assert.equal(await connecting.textContent(),'')
     assert.equal(ready,false,'a rendered evidence card does not establish canonical readiness')
     release()
     await canonical
     assert.equal(ready,true)
     assert.equal(await page.locator('.connection-status.connected').count(),1)
+    assert.equal(await connecting.count(),0)
     assert.deepEqual(h.errors,[])
   } finally { release();await canonical?.catch(()=>{});await h.close() }
 })

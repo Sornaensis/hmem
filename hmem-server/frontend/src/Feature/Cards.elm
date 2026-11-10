@@ -3783,9 +3783,24 @@ viewHierarchyViewport ws incoming =
                 Just task -> taskCardAppearanceClass task.status (taskRollupForProjection projection model taskId)
                 Nothing -> Dict.get taskId model.dataLoading.taskCardSummaries |> Maybe.map (\summary -> taskCardAppearanceClass summary.status (taskRollupForProjection projection model taskId)) |> Maybe.withDefault ""
         familyIsEmpty family =
-            let taskId = String.dropLeft 5 family in
-            (Dict.get taskId model.dataLoading.taskCardSummaries |> Maybe.map (not << .hasChildren) |> Maybe.withDefault False)
-                && List.isEmpty (Dict.get taskId projection.taskChildren |> Maybe.withDefault [])
+            let
+                firstBranchRow position =
+                    let
+                        next = position + 1
+                    in
+                    case Array.get next viewport.index.keys of
+                        Just key ->
+                            -- A leading drag boundary alone does not need tray chrome.
+                            if String.startsWith "drop:" key then next + 1 else next
+
+                        Nothing ->
+                            next
+            in
+            -- Use the logical preorder so offscreen rows and split wrappers agree.
+            (Dict.get family viewport.index.positions
+                |> Maybe.andThen (firstBranchRow >> familyAt)
+                |> Maybe.map Tuple.first
+            ) /= Just family
         pieceFamily piece =
             case piece of
                 Viewport.Row position _ _ -> familyAt position

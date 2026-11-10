@@ -22,6 +22,11 @@ test('fresh project and task hierarchy stays collapsed until explicitly opened a
   fixture.projects = [root, { ...root, id: 'nested-project', parent_id: root.id }]
   fixture.tasks = [task, { ...task, id: 'subtask', parent_id: task.id }]
   const h = await openFreshHierarchy(fixture)
+  const tray = h.page.locator('[data-task-family="task-000"]')
+  const trayChrome = () => tray.evaluate(element => {
+    const { backgroundColor, boxShadow } = getComputedStyle(element)
+    return { background: backgroundColor !== 'rgba(0, 0, 0, 0)', outline: boxShadow !== 'none' }
+  })
   try {
     await h.start(); await h.idle()
     assert.equal(await h.page.locator('#entity-nested-project').count(), 0)
@@ -30,12 +35,15 @@ test('fresh project and task hierarchy stays collapsed until explicitly opened a
     await h.page.locator('#entity-root-project .tree-toggle').click(); await h.idle()
     await h.page.locator('#entity-task-000').waitFor({ state: 'visible' })
     assert.equal(await h.page.locator('#entity-subtask').count(), 0)
+    assert.deepEqual(await trayChrome(), { background: false, outline: false }, 'A collapsed task paints no subtask tray')
     await h.page.locator('#entity-task-000 .tree-toggle').click(); await h.idle()
     await h.page.locator('#entity-subtask').waitFor({ state: 'visible' })
+    assert.deepEqual(await trayChrome(), { background: true, outline: true }, 'Expanding restores the subtask tray')
     await h.page.reload(); await h.idle()
     await h.page.locator('#entity-subtask').waitFor({ state: 'visible' })
     await h.page.locator('#entity-task-000 .tree-toggle').click(); await h.idle()
     assert.equal(await h.page.locator('#entity-subtask').count(), 0)
+    assert.deepEqual(await trayChrome(), { background: false, outline: false }, 'Cached subtasks do not paint a collapsed tray')
     await h.page.getByRole('button', { name: 'Expand All', exact: true }).click(); await h.idle()
     await h.page.locator('#entity-subtask').waitFor({ state: 'visible' })
     await h.page.getByRole('button', { name: 'Collapse All', exact: true }).click(); await h.idle()
@@ -794,6 +802,7 @@ test('blocked parent and offscreen family follow authoritative running-child and
     assert.equal(await h.page.locator('#entity-task-000').count(), 0, 'Parent should be outside the mounted viewport')
     const family = h.page.locator('[data-task-family="task-000"]').first()
     assert.equal(await family.evaluate(element => element.classList.contains('card-status-in_progress')), true)
+    assert.notEqual(await family.evaluate(element => getComputedStyle(element).boxShadow), 'none', 'The tray stays visible when only its subtasks are mounted')
     const childOption = h.page.locator('#entity-subtask-110 option[value="in_progress"]')
     assert.equal(await childOption.evaluate(element => element.disabled), false)
     const workspace = fixture.workspace.id

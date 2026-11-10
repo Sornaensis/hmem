@@ -1061,6 +1061,53 @@ spec = describe "Session follower" $ do
         _ <- await registry manager "http://unused.invalid" workspace another (hasStatus "failed")
         readTVarIO attempts `shouldReturn` 2
 
+  it "PrefixProofClient spaces polls from the completion of a slow pending reply" $
+    withManager $ \manager -> withSourceFile "" $ \path -> do
+      sid <- UUID.nextRandom
+      clock <- newTVarIO epoch
+      lookups <- newTVarIO (0 :: Int)
+      firstLookup <- newEmptyMVar
+      finishLookup <- newEmptyMVar
+      let base = "http://unused.invalid"
+          at seconds = addUTCTime seconds epoch
+          setClock seconds = atomically $ writeTVar clock (at seconds)
+          acknowledged seconds state = field "last_ack_at" state == Just (toJSON (at seconds))
+          metadata _ _ _ = pure (Right (fakeMetadata sid 0))
+      proof <- fakeProofTransport sid "" "pending" metadata
+      let action verb target body
+            | "/prefix-verifications" `T.isSuffixOf` route = do
+                setClock 0.02
+                proof verb target body
+            | "/prefix-verifications/" `T.isInfixOf` route = do
+                count <- atomically $ do
+                  current <- readTVar lookups
+                  writeTVar lookups (current + 1)
+                  pure current
+                if count == 0 then putMVar firstLookup () >> readMVar finishLookup >> proof verb target body
+                else do
+                  result <- proof verb target body
+                  pure $ case result of
+                    Right (Object fields) -> Right (Object (KM.insert "state" (String "verified") fields))
+                    _ -> result
+            | otherwise = proof verb target body
+            where route = T.pack target
+          options = fast {intervalMicros = 1000000, now = readTVarIO clock, requestOverride = Just action}
+      withRegistry options $ \registry ->
+        flip finally (void (tryPutMVar finishLookup ())) $ do
+          _ <- start registry manager base workspace sid path
+          _ <- await registry manager base workspace sid (acknowledged 0.02)
+          setClock 0.071
+          timeout 2000000 (readMVar firstLookup) `shouldReturn` Just ()
+          setClock 0.27
+          putMVar finishLookup ()
+          _ <- await registry manager base workspace sid (acknowledged 0.27)
+          setClock 0.319
+          threadDelay 80000
+          readTVarIO lookups `shouldReturn` 1
+          setClock 0.321
+          _ <- await registry manager base workspace sid (hasStatus "caught_up")
+          readTVarIO lookups `shouldReturn` 2
+
   it "atomically admits/completes controls across retirement and stop-finalization races" $
     withManager $ \manager -> withSourceFile "" $ \path -> do
       let base = "http://unused.invalid"

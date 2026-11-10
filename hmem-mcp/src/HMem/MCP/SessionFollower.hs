@@ -612,7 +612,9 @@ turn registry job = do
                                   , context = if verify.purpose == Periodic then verify.context else hashInit}
                             acknowledge state {sweep = Just checked, lastProof = Just (proof,reply.audience), lostProofs = 0}
                           "pending" -> do
-                            let due = addUTCTime pollDelay time
+                            -- A slow reply must not spend the next polling interval.
+                            completed <- registry.options.now
+                            let due = addUTCTime pollDelay completed
                                 updated = state {sweep = Just verify {audience = Just reply.audience, submitted = True, nextPoll = Just due}, verifyNext = False}
                             if verify.purpose == Periodic then acknowledge updated else acknowledgeAt due updated
                           "mismatch" -> throwIO SourceChanged

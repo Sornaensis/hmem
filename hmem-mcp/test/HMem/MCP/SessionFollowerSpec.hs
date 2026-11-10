@@ -307,6 +307,65 @@ spec = describe "Session follower" $ do
         part <- Sessions.readSessionRange env.pool wid sid 0 100
         part.bytes `shouldBe` "{}\n[]\n"
 
+  it "PrefixProofClient bounds repeated operation loss despite pending acknowledgements" $
+    withBackend $ \env wid manager base -> withSourceFile "{}\n[]\n" $ \path -> withCapturedHTTP base $ \captured -> do
+      sid <- UUID.nextRandom
+      peer <- UUID.nextRandom
+      _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing Nothing wid)
+      original <- Sessions.appendSession env.pool wid sid (Core.AppendSession 0 0 "{}\n" False)
+      pendingOperations <- newTVarIO ([] :: [Value])
+      lookups <- newTVarIO (0 :: Int)
+      appends <- newTVarIO (0 :: Int)
+      firstLookup <- newEmptyMVar
+      releaseLookup <- newEmptyMVar
+      let prefix = "/sessions/" <> T.pack (show sid) <> "/"
+          action verb target body
+            | prefix `T.isInfixOf` route, verb == "POST", "/prefix-verifications" `T.isSuffixOf` route = do
+                result <- followerRequest captured verb target body
+                case result of
+                  Right value | field "state" value == Just (String "pending")
+                    , Just operation <- field "operation_id" value ->
+                        atomically $ modifyTVar' pendingOperations (operation :)
+                  _ -> pure ()
+                pure result
+            | prefix `T.isInfixOf` route, verb == "GET", "/prefix-verifications/" `T.isInfixOf` route = do
+                first <- atomically $ do
+                  count <- readTVar lookups
+                  writeTVar lookups (count + 1)
+                  pure (count == 0)
+                when first $ putMVar firstLookup () >> readMVar releaseLookup
+                -- Model a poll routed to a process that never saw the submission.
+                pure (Left (HTTPStatus 404))
+            | otherwise = do
+                when (prefix `T.isInfixOf` route && "/append" `T.isSuffixOf` route) $
+                  atomically $ modifyTVar' appends (+1)
+                followerRequest captured verb target body
+            where route = T.pack target
+      withRegistry fast {requestOverride = Just action} $ \registry ->
+        flip finally (void (tryPutMVar releaseLookup ())) $ do
+          _ <- start registry manager base wid sid path
+          timeout 2000000 (readMVar firstLookup) `shouldReturn` Just ()
+          flush <- control registry manager base wid sid "session_upload_flush"
+          nested ["operation","pending"] flush `shouldBe` Just (Bool True)
+          _ <- start registry manager base wid peer path
+          _ <- await registry manager base wid peer (\value -> hasOffset 6 value && hasStatus "caught_up" value)
+          putMVar releaseLookup ()
+          failed <- await registry manager base wid sid (hasStatus "failed")
+          field "error" failed `shouldBe` Just (String "verification_retry_exhausted")
+          field "receipt" failed `shouldBe` Just Null
+          nested ["operation","pending"] failed `shouldBe` Just (Bool False)
+          nested ["operation","receipt","source_verified"] failed `shouldBe` Just (Bool False)
+          nested ["operation","receipt","error"] failed `shouldBe` Just (String "verification_retry_exhausted")
+          operations <- readTVarIO pendingOperations
+          length operations `shouldBe` 5
+          length (nub operations) `shouldBe` 5
+          readTVarIO lookups `shouldReturn` 5
+          readTVarIO appends `shouldReturn` 0
+          Just canonical <- Sessions.getSession env.pool wid sid
+          canonical.committedBytes `shouldBe` original.session.committedBytes
+          canonical.revision `shouldBe` original.session.revision
+          canonical.state `shouldBe` Core.Active
+
   it "PrefixProofClient catches mutation of an already-hashed page before resumed append" $
     withBackend $ \env wid manager base -> do
       let chunk=BS.concat (replicate 30 ("\""<>BS.replicate 32765 97<>"\"\n")); original=chunk<>chunk

@@ -63,7 +63,8 @@ data ReplayPage = ReplayPage
 -- | Verify a terminal snapshot bearer before it is exchanged for a canonical
 -- websocket ticket.  Unlike replay, validation does not rotate or expose a
 -- cursor; it only proves the opaque token is still bound to this audience,
--- scope, authorization epoch, and a completed snapshot session. Its durable
+-- scope, authorization epoch, and a completed snapshot lineage. The lineage
+-- hash survives cleanup of the snapshot and its pages. The bearer’s durable
 -- expiry is returned as part of that proof so a transport cannot accidentally
 -- mint a longer-lived connection capability from an aged bearer.
 validateCanonicalResumeToken :: Pool Hasql.Connection -> ChangeScope -> ChangeAudience -> ResumeToken -> IO (Either ChangeStreamError UTCTime)
@@ -139,11 +140,8 @@ beginResyncInternal pool ttl scope audience startHash pageSize profile materiali
               | expires > now && (storedPageSize /= fmap fromIntegral pageSize || storedProfile /= snapshotProfileToText profile) -> pure (Left SnapshotOutOfOrder)
               | expires > now -> pure (Right (SnapshotBegin (snapshotTokenForSession sessionHash) existingWatermark existingEpoch))
               | otherwise -> do
-                  -- Expired retry state must not permanently reserve an opaque
-                  -- client key.  Its full resume lineage is deleted before a
-                  -- new server-random session is materialized, so a fresh
-                  -- attempt cannot collide with an older still-live bearer.
-                  Session.statement sessionHash deleteResumeTokensForSessionStatement
+                  -- Free the retry key and give the new snapshot independent
+                  -- lineage. Issued resume bearers keep their own lifetime.
                   Session.statement sessionHash deleteSnapshotSessionStatement
                   createSnapshot freshSessionHash epoch watermark
             Nothing -> createSnapshot freshSessionHash epoch watermark)
@@ -563,10 +561,6 @@ deleteSnapshotSessionStatement :: Statement.Statement ByteString ()
 deleteSnapshotSessionStatement = Statement.Statement
   "DELETE FROM change_stream_snapshot_sessions WHERE session_hash = $1"
   (Enc.param (Enc.nonNullable Enc.bytea)) Dec.noResult True
-deleteResumeTokensForSessionStatement :: Statement.Statement ByteString ()
-deleteResumeTokensForSessionStatement = Statement.Statement
-  "DELETE FROM change_stream_resume_tokens WHERE session_hash = $1"
-  (Enc.param (Enc.nonNullable Enc.bytea)) Dec.noResult True
 snapshotPageStatement :: Statement.Statement (ByteString, Int64, Int32) [Value]
 snapshotPageStatement = Statement.Statement "SELECT item FROM change_stream_snapshot_items WHERE session_hash = $1 AND ordinal >= $2 ORDER BY ordinal ASC LIMIT $3"
   (contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.bytea)) <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.int8)) <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.int4))) (Dec.rowList (Dec.column (Dec.nonNullable Dec.jsonb))) True
@@ -646,5 +640,5 @@ cleanupTokensStatement :: Statement.Statement UTCTime Int64
 cleanupTokensStatement = Statement.Statement "WITH deleted AS (DELETE FROM change_stream_resume_tokens WHERE expires_at <= $1 OR superseded_at IS NOT NULL RETURNING 1) SELECT count(*)::bigint FROM deleted"
   (Enc.param (Enc.nonNullable Enc.timestamptz)) (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True
 cleanupSessionsStatement :: Statement.Statement UTCTime Int64
-cleanupSessionsStatement = Statement.Statement "WITH expired AS (SELECT session_hash FROM change_stream_snapshot_sessions WHERE expires_at <= $1 FOR UPDATE), resumes AS (DELETE FROM change_stream_resume_tokens WHERE session_hash IN (SELECT session_hash FROM expired)), deleted AS (DELETE FROM change_stream_snapshot_sessions WHERE session_hash IN (SELECT session_hash FROM expired) RETURNING 1) SELECT count(*)::bigint FROM deleted"
+cleanupSessionsStatement = Statement.Statement "WITH deleted AS (DELETE FROM change_stream_snapshot_sessions WHERE expires_at <= $1 RETURNING 1) SELECT count(*)::bigint FROM deleted"
   (Enc.param (Enc.nonNullable Enc.timestamptz)) (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True

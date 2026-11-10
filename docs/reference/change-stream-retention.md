@@ -31,9 +31,13 @@ Deletion and replay-floor advancement commit together. A cutoff is exclusive:
 records exactly at the cutoff remain. A retained record stops prefix deletion;
 later old timestamps cannot make retention skip it. Cancellation, lock failure
 or statement timeout cannot commit a new floor without its deleted prefix.
-Expired snapshot/token cleanup retains its existing policy and has finite
-statement budgets. It does not delete audit history, session evidence or
-planning recovery data.
+Snapshot and token cleanup have finite statement budgets. Expiring a
+snapshot removes its materialized items and page tokens. Resume tokens
+issued by its terminal page retain their own expiry and authorization and
+retention checks. Reusing an expired snapshot start key creates a new
+snapshot lineage without revoking previously issued resume tokens.
+Cleanup leaves audit history, session evidence and planning recovery data
+intact.
 
 The `change_stream_retention` server log exposes deleted rows, a capped expired
 row lower bound (1,001 means at least 1,001), oldest expired age and errors.

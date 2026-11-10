@@ -9,11 +9,11 @@ module HMem.DB.ChangeStream
   , OutboxBacklog(..), outboxBacklog, listRetentionScopes, cleanupChangeStream
   ) where
 
-import Control.Monad (forM_)
 import Control.Exception (catch, throwIO)
 import Crypto.Hash (Digest, SHA256, hash)
-import Data.Aeson (Value)
+import Data.Aeson (Value, encode)
 import Data.ByteString (ByteString)
+import Data.ByteString.Lazy qualified as BL
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
 import Data.Pool (Pool)
@@ -119,8 +119,7 @@ beginResyncInternal pool ttl scope audience startHash pageSize profile materiali
           now <- Session.statement () databaseClockStatement
           Session.statement (sessionHash, scopeName scope, scopeWorkspace scope, audienceKind audience, audienceKey audience, audienceUser audience, epoch, watermark, addUTCTime ttl now, tokenHash raw.unSnapshotToken, fmap fromIntegral pageSize, snapshotProfileToText profile, startHash) insertSnapshotSessionStatement
           Session.statement (tokenHash raw.unSnapshotToken, sessionHash, 0) insertSnapshotPageTokenStatement
-          forM_ (zip [0 :: Int64 ..] items) $ \(ordinal, item) ->
-            Session.statement (sessionHash, ordinal, item) insertSnapshotItemStatement
+          insertSnapshotItems sessionHash items
           pure $ Right (SnapshotBegin raw watermark epoch)
     runSerializableTransaction pool $ do
       -- Serialize every start attempt on the scope before looking up its retry
@@ -538,9 +537,49 @@ insertSnapshotSessionStatement :: Statement.Statement (ByteString, Text, Maybe U
 insertSnapshotSessionStatement = Statement.Statement
   "INSERT INTO change_stream_snapshot_sessions(session_hash, scope, workspace_id, audience_kind, audience_key, audience_user_id, authorization_epoch, high_watermark, expires_at, page_token_hash, page_size, snapshot_profile, start_idempotency_hash) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)"
   (contramap (\(a,_,_,_,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.bytea)) <> contramap (\(_,b,_,_,_,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,c,_,_,_,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.uuid)) <> contramap (\(_,_,_,d,_,_,_,_,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,_,_,e,_,_,_,_,_,_,_,_) -> e) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,_,_,_,f,_,_,_,_,_,_,_) -> f) (Enc.param (Enc.nullable Enc.uuid)) <> contramap (\(_,_,_,_,_,_,g,_,_,_,_,_,_) -> g) (Enc.param (Enc.nonNullable Enc.int8)) <> contramap (\(_,_,_,_,_,_,_,h,_,_,_,_,_) -> h) (Enc.param (Enc.nonNullable Enc.int8)) <> contramap (\(_,_,_,_,_,_,_,_,i,_,_,_,_) -> i) (Enc.param (Enc.nonNullable Enc.timestamptz)) <> contramap (\(_,_,_,_,_,_,_,_,_,j,_,_,_) -> j) (Enc.param (Enc.nonNullable Enc.bytea)) <> contramap (\(_,_,_,_,_,_,_,_,_,_,k,_,_) -> k) (Enc.param (Enc.nullable Enc.int4)) <> contramap (\(_,_,_,_,_,_,_,_,_,_,_,l,_) -> l) (Enc.param (Enc.nonNullable Enc.text)) <> contramap (\(_,_,_,_,_,_,_,_,_,_,_,_,m) -> m) (Enc.param (Enc.nullable Enc.bytea))) Dec.noResult True
+-- Persist bounded batches in the same transaction as the snapshot and
+-- preserve the materializer's order across batch boundaries.
+insertSnapshotItems :: ByteString -> [Value] -> Session.Session ()
+insertSnapshotItems sessionHash = go 0 0 0 []
+  where
+    -- One dimension of array framing costs 20 bytes. Each element adds
+    -- a four-byte length and the JSONB version byte to its encoded JSON.
+    byteBudget = 1024 * 1024 - 20
+    go ordinal _ _ batch [] = flush ordinal batch
+    go ordinal count bytes batch (item:remaining)
+      | itemBytes > byteBudget = do
+          flush ordinal batch
+          Session.statement (sessionHash, ordinal + count, item) insertSnapshotItemStatement
+          go (ordinal + count + 1) 0 0 [] remaining
+      | count == 256 || bytes + itemBytes > byteBudget = do
+          flush ordinal batch
+          go (ordinal + count) 1 itemBytes [encoded] remaining
+      | otherwise = go ordinal (count + 1) (bytes + itemBytes) (encoded : batch) remaining
+      where
+        encoded = encode item
+        -- Read only enough of a wide item's encoding to choose its direct
+        -- insert. Reuse the encoded chunks for items that fit.
+        itemBytes = BL.length (BL.take byteBudget encoded) + 5
+    flush _ [] = pure ()
+    flush ordinal batch = Session.statement (sessionHash, ordinal, reverse batch) insertSnapshotItemsStatement
+
+-- A single row can exceed the batch budget. Use the original scalar
+-- parameter in that case so array framing cannot introduce a new row limit.
 insertSnapshotItemStatement :: Statement.Statement (ByteString, Int64, Value) ()
-insertSnapshotItemStatement = Statement.Statement "INSERT INTO change_stream_snapshot_items(session_hash, ordinal, item) VALUES ($1,$2,$3)"
-  (contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.bytea)) <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.int8)) <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.jsonb))) Dec.noResult True
+insertSnapshotItemStatement = Statement.Statement
+  "INSERT INTO change_stream_snapshot_items(session_hash, ordinal, item) VALUES ($1,$2,$3)"
+  (contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.bytea))
+    <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.int8))
+    <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable Enc.jsonb)))
+  Dec.noResult True
+
+insertSnapshotItemsStatement :: Statement.Statement (ByteString, Int64, [BL.ByteString]) ()
+insertSnapshotItemsStatement = Statement.Statement
+  "INSERT INTO change_stream_snapshot_items(session_hash, ordinal, item) SELECT $1, $2 + position - 1, item FROM unnest($3::jsonb[]) WITH ORDINALITY AS batch(item, position)"
+  (contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.bytea))
+    <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nonNullable Enc.int8))
+    <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.jsonbLazyBytes)))))
+  Dec.noResult True
 lookupSnapshotStatement :: Statement.Statement ByteString (Maybe StoredSnapshot)
 lookupSnapshotStatement = Statement.Statement
   "SELECT s.scope, s.workspace_id, s.audience_kind, s.audience_key, s.audience_user_id, s.authorization_epoch, s.high_watermark, s.expires_at, s.session_hash, p.start_ordinal, p.end_ordinal, p.terminal, s.page_size, s.snapshot_profile FROM change_stream_snapshot_page_tokens p JOIN change_stream_snapshot_sessions s ON s.session_hash = p.session_hash WHERE p.token_hash = $1 FOR UPDATE OF s, p"

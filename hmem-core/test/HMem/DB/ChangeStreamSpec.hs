@@ -742,6 +742,113 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     case legacyPage of
       Right SnapshotPage { snapshotPageItems = [String "legacy"], snapshotPageHasMore = False, snapshotNextToken = Nothing, snapshotResumeToken = Just _, snapshotProfile = FullV1 } -> pure ()
       other -> expectationFailure (show other)
+  it "persists empty and multi-batch snapshots in their exact materialized order" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-snapshot-batches"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "snapshot-batches"
+        items = Null : map (\n -> object ["ordinal" .= n, "nested" .= [Null, toJSON n]]) [1..512 :: Int]
+        unwrap = either (fail . show) pure
+        readPages token = do
+          page <- readSnapshotPageWithStoredTtls env.pool 60 60 scope audience token >>= unwrap
+          page.snapshotProfile `shouldBe` FullV1
+          case page.snapshotNextToken of
+            Nothing -> do
+              page.snapshotPageHasMore `shouldBe` False
+              page.snapshotResumeToken `shouldSatisfy` maybe False (const True)
+              pure page.snapshotPageItems
+            Just next -> (page.snapshotPageItems <>) <$> readPages next
+    forM_ [("empty-batch", []), ("many-batches", items)] $ \(key, values) -> do
+      begun <- beginResyncWithStartKey env.pool 60 scope audience key 100 (pure values) >>= unwrap
+      readPages begun.snapshotToken `shouldReturn` values
+  it "splits snapshot batches by encoded bytes while preserving wide rows and their order" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-wide-snapshot-batches"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "wide-snapshot-batches"
+        items = [ String "before", String (T.replicate 300000 "\"")
+                , String (T.replicate 300000 "\\"), String (T.replicate 600000 "\"")
+                , String "after", Null ]
+        installProbe = runSession env.pool $ Session.sql
+          "CREATE TABLE snapshot_batch_writes(first_ordinal bigint, item_count bigint); CREATE FUNCTION record_snapshot_batch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO snapshot_batch_writes SELECT min(ordinal), count(*) FROM batch_rows; RETURN NULL; END; $$; CREATE TRIGGER record_snapshot_batch AFTER INSERT ON change_stream_snapshot_items REFERENCING NEW TABLE AS batch_rows FOR EACH STATEMENT EXECUTE FUNCTION record_snapshot_batch();"
+        removeProbe = runSession env.pool $ Session.sql
+          "DROP TRIGGER record_snapshot_batch ON change_stream_snapshot_items; DROP FUNCTION record_snapshot_batch(); DROP TABLE snapshot_batch_writes;"
+    bracket_ installProbe removeProbe $ do
+      begun <- beginResync env.pool 60 scope audience (pure items) >>= either (fail . show) pure
+      runSession env.pool (Session.statement () snapshotBatchWritesStatement)
+        `shouldReturn` [(0, 2), (2, 1), (3, 1), (4, 2)]
+      page <- readSnapshotPageWithTtl env.pool 60 scope audience begun.snapshotToken 10
+        >>= either (fail . show) pure
+      (page.snapshotPageItems == items) `shouldBe` True
+  it "rolls back earlier snapshot batches when a later insert fails" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-snapshot-batch-rollback"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "snapshot-batch-rollback"
+        key = "batch-rollback-key"
+        materialize = do
+          Session.sql "ALTER TABLE change_stream_snapshot_items ADD CONSTRAINT reject_test_batch_item CHECK (item <> to_jsonb('reject-batch-item'::text))"
+          pure (replicate 256 (String "first-batch") <> [String "reject-batch-item"])
+    beginResyncWithStartKey env.pool 60 scope audience key 100 materialize
+      `shouldThrow` (\case DBCheckViolation _ -> True; _ -> False)
+    runSession env.pool (Session.statement workspace.id countSnapshotStateStatement) `shouldReturn` (0, 0, 0)
+    begun <- beginResyncWithStartKey env.pool 60 scope audience key 100 (pure [String "reject-batch-item"])
+      >>= either (fail . show) pure
+    page <- readSnapshotPageWithStoredTtls env.pool 60 60 scope audience begun.snapshotToken
+      >>= either (fail . show) pure
+    page.snapshotPageItems `shouldBe` [String "reject-batch-item"]
+  it "preserves the snapshot and replay cut while an independent workspace progresses" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-snapshot-batch-cut"
+    independent <- createTestWorkspace env "change-stream-snapshot-batch-peer"
+    let scope = WorkspaceScope workspace.id
+        peerScope = WorkspaceScope independent.id
+        audience = TrustedAudience "snapshot-batch-cut"
+        items = replicate 257 (String "before-writer")
+        newPool = createPool env.testDb.testDbConnStr 1 5.0 30000
+        gate = Session.sql "SELECT pg_advisory_xact_lock(17923, 96)"
+        snapshot pool = beginResync pool 60 scope audience $ do
+          void $ Session.statement "batch-cut-snapshot" setLocalApplicationNameStatement
+          gate
+          visible <- Session.statement workspace.id materializeSnapshotWriterStatement
+          pure (items <> visible)
+        writer pool = runTransaction pool $ do
+          void $ Session.statement "batch-cut-writer" setLocalApplicationNameStatement
+          Session.statement (workspace.id, "post-snapshot") recordLegacyObservationForTestStatement
+    acquired <- newEmptyMVar
+    release <- newEmptyMVar
+    let holdGate pool = withConn pool $ \conn ->
+          (do
+            Session.run (Session.sql "BEGIN" *> gate) conn >>= either (fail . show) pure
+            putMVar acquired ()
+            takeMVar release)
+          `finally` void (Session.run (Session.sql "ROLLBACK") conn)
+    bracket newPool destroyAllResources $ \gatePool ->
+      bracket newPool destroyAllResources $ \snapshotPool ->
+        bracket newPool destroyAllResources $ \writerPool ->
+          withAsync (holdGate gatePool) $ \holder -> do
+            link holder
+            takeMVar acquired
+            withAsync (snapshot snapshotPool) $ \starting -> do
+              link starting
+              waitForLockWait env.pool "batch-cut-snapshot"
+              withAsync (writer writerPool) $ \writing -> do
+                link writing
+                waitForLockWait env.pool "batch-cut-writer"
+                peer <- timeout 2000000 $ beginResync env.pool 60 peerScope audience (pure [String "independent"])
+                peer `shouldSatisfy` maybe False isRight
+                putMVar release ()
+                begun <- wait starting >>= either (fail . show) pure
+                wait writing `shouldReturn` 1
+                page <- readSnapshotPageWithTtl env.pool 60 scope audience begun.snapshotToken 300
+                  >>= either (fail . show) pure
+                let (prefix, writerItems) = splitAt (length items) page.snapshotPageItems
+                prefix `shouldBe` items
+                resume <- maybe (fail "expected terminal resume bearer") pure page.snapshotResumeToken
+                replay <- replayUnacknowledgedResumeToken env.pool scope audience resume 10
+                  >>= either (fail . show) pure
+                -- A serializable retry may start after the writer commits.
+                -- Either cut must account for that writer exactly once.
+                (writerItems, map (.outboxCursor) replay.replayPageRecords) `shouldSatisfy` \case
+                  ([String "post-snapshot"], []) -> True
+                  ([], [cursor]) -> cursor == begun.snapshotHighWatermark + 1
+                  _ -> False
   it "denies expired sessions and removes their materialized items" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-expiry"
     let scope = WorkspaceScope workspace.id
@@ -1265,8 +1372,6 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     runSession env.pool $ Session.statement userId grantTestSuperadminStatement
     let scope = WorkspaceScope workspace.id
         audience = AuthenticatedAudience "superseded-cleanup-audience" userId
-    -- Clear superseded bearers from earlier examples before counting this one.
-    _ <- getCurrentTime >>= cleanupChangeStream env.pool
     begun <- beginResync env.pool 60 scope audience (pure [])
     begin <- case begun of Right value -> pure value; Left err -> expectationFailure (show err) >> fail "unreachable"
     terminal <- readSnapshotPage env.pool scope audience begin.snapshotToken 0 1
@@ -1279,7 +1384,9 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     runSession env.pool $ Session.statement (tokenHashForTest begin.snapshotToken.unSnapshotToken) expireSnapshotForTestStatement
     now <- getCurrentTime
     (removedTokens, removedSessions) <- cleanupChangeStream env.pool now
-    removedTokens `shouldBe` 1
+    -- Other examples share this database and their tokens can also expire.
+    -- The lookup below checks removal of this exact superseded bearer.
+    removedTokens `shouldSatisfy` (> 0)
     removedSessions `shouldSatisfy` (> 0)
     replayAndRotateResumeToken env.pool 60 scope audience token 10 `shouldReturn` Left ResumeNotFound
     readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 `shouldReturn` Left SnapshotNotFound
@@ -1693,6 +1800,26 @@ countSnapshotPageTokensStatement = Statement.Statement
   "SELECT count(*)::bigint FROM change_stream_snapshot_page_tokens p JOIN change_stream_snapshot_sessions s ON s.session_hash = p.session_hash WHERE s.scope = 'workspace' AND s.workspace_id = $1"
   (Enc.param (Enc.nonNullable Enc.uuid))
   (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True
+
+countSnapshotStateStatement :: Statement.Statement UUID.UUID (Int64, Int64, Int64)
+countSnapshotStateStatement = Statement.Statement
+  "WITH snapshots AS (SELECT session_hash FROM change_stream_snapshot_sessions WHERE workspace_id = $1) SELECT (SELECT count(*) FROM snapshots), (SELECT count(*) FROM change_stream_snapshot_page_tokens JOIN snapshots USING (session_hash)), (SELECT count(*) FROM change_stream_snapshot_items JOIN snapshots USING (session_hash))"
+  (Enc.param (Enc.nonNullable Enc.uuid))
+  (Dec.singleRow ((,,) <$> count <*> count <*> count)) True
+  where count = Dec.column (Dec.nonNullable Dec.int8)
+
+snapshotBatchWritesStatement :: Statement.Statement () [(Int64, Int64)]
+snapshotBatchWritesStatement = Statement.Statement
+  "SELECT first_ordinal, item_count FROM snapshot_batch_writes ORDER BY first_ordinal"
+  Enc.noParams
+  (Dec.rowList ((,) <$> number <*> number)) True
+  where number = Dec.column (Dec.nonNullable Dec.int8)
+
+materializeSnapshotWriterStatement :: Statement.Statement UUID.UUID [Value]
+materializeSnapshotWriterStatement = Statement.Statement
+  "SELECT envelope #> '{entity,id}' FROM change_stream_outbox WHERE scope = 'workspace' AND workspace_id = $1 AND envelope #>> '{entity,type}' = 'observation' AND envelope #>> '{entity,id}' = 'post-snapshot' ORDER BY cursor"
+  (Enc.param (Enc.nonNullable Enc.uuid))
+  (Dec.rowList (Dec.column (Dec.nonNullable Dec.jsonb))) True
 
 lockScopeForTestStatement :: Statement.Statement (T.Text, Maybe UUID.UUID) Int64
 lockScopeForTestStatement = Statement.Statement

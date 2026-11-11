@@ -223,6 +223,13 @@ authorization fails closed. Status distinguishes `validating`, `following`,
 `caught_up`, `pending_tail`, `retry`, `finalizing`, `stopped`, `failed` and `terminated`.
 The registry retains at most sixteen terminal entries for five minutes.
 
+Route prefix verification submission and polling to the same server process.
+Restart, eviction or routing to a different process can make the operation
+unknown. The follower rehashes the local prefix and submits a fresh operation
+ID. It allows four such recoveries without a verified proof, then reports
+`verification_retry_exhausted`. Correct the routing or server availability and
+start again with the same session UUID and source.
+
 Normal following uploads complete LF-terminated records, preserving UTF-8 and
 CRLF bytes. Partial tails stay pending; malformed terminated records, oversized
 records, replacement, truncation and observed committed-prefix changes fail the

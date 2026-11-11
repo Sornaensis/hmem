@@ -86,7 +86,7 @@ data JobState = JobState
   , observedSize :: Int64
   , lastHeartbeat :: Maybe UTCTime
   , failureDetails :: Maybe Value
-  , nextVerification :: UTCTime, lastProof :: Maybe (Wire.PrefixProofRequest,Text)
+  , nextVerification :: UTCTime, lastProof :: Maybe (Wire.PrefixProofRequest,Text), lostProofs :: Int
   , importScan :: Maybe ImportScan, importManifest :: Maybe (Int64,Text), importDeadline :: Maybe UTCTime, importCompleted :: Maybe Core.AgentSession
   }
 
@@ -214,7 +214,7 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
           , sweep = Nothing, verifyNext = False, pending = Nothing, reconcile = False, due = time
           , lastAck = Nothing, failures = 0, failure = Nothing, completedAt = Nothing, receipt = Nothing
           , observedSize = 0, lastHeartbeat = Nothing, failureDetails = Nothing
-          , nextVerification = time, lastProof = Nothing
+          , nextVerification = time, lastProof = Nothing, lostProofs = 0
           , importScan = Nothing, importManifest = Nothing, importDeadline = if name == "session_import" then Just (addUTCTime 900 time) else Nothing, importCompleted = Nothing }
         control <- newTVarIO Nothing; busy <- newTVarIO False
         let job = Job sid workspace path label title parentSessionId initialRuntimeIdentity taskId (name == "session_import") captured state control busy
@@ -584,8 +584,15 @@ turn registry job = do
                     result <- if verify.submitted then request registry job "GET" ("/prefix-verifications/" <> show proof.operationId) Nothing
                       else request registry job "POST" "/prefix-verifications" (Just (toJSON proof))
                     case result of
+                      -- A successful pending reply acknowledges transport only.
+                      -- Keep counting losses until a bound proof verifies, even
+                      -- when a new canonical cursor starts another sweep.
                       Left (HTTPStatus 404) | verify.submitted ->
-                        save state {sweep = Just verify {offset = 0, context = hashInit, proof = Nothing, audience = Nothing, submitted = False, nextPoll = Nothing}, lastProof = Nothing}
+                        if state.lostProofs >= 4 then retire registry job "failed" "verification_retry_exhausted"
+                        else save state
+                          { sweep = Just verify {offset = 0, context = hashInit, proof = Nothing, audience = Nothing, submitted = False, nextPoll = Nothing}
+                          , lastProof = Nothing, lostProofs = state.lostProofs + 1
+                          }
                       Left (HTTPStatus 409) -> retire registry job "failed" "verification_operation_conflict"
                       Left (HTTPStatus 400) -> retire registry job "failed" "verification_target_invalid"
                       Left fault -> failHTTP fault
@@ -603,9 +610,11 @@ turn registry job = do
                             let checked = verify {audience = Just reply.audience, submitted = True, proven = True, nextPoll = Nothing
                                   , offset = if verify.purpose == Periodic then verify.offset else 0
                                   , context = if verify.purpose == Periodic then verify.context else hashInit}
-                            acknowledge state {sweep = Just checked, lastProof = Just (proof,reply.audience)}
+                            acknowledge state {sweep = Just checked, lastProof = Just (proof,reply.audience), lostProofs = 0}
                           "pending" -> do
-                            let due = addUTCTime pollDelay time
+                            -- A slow reply must not spend the next polling interval.
+                            completed <- registry.options.now
+                            let due = addUTCTime pollDelay completed
                                 updated = state {sweep = Just verify {audience = Just reply.audience, submitted = True, nextPoll = Just due}, verifyNext = False}
                             if verify.purpose == Periodic then acknowledge updated else acknowledgeAt due updated
                           "mismatch" -> throwIO SourceChanged

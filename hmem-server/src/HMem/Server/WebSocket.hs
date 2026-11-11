@@ -18,6 +18,7 @@ module HMem.Server.WebSocket
   , eventVisibleToSubscription
   , resolveLocalWebSocketAccess
   , dispatchCanonicalOutbox
+  , canonicalReplayPending
   , reauthorizeCanonicalConnections
   , handleCanonicalDispatchFailure
     -- * Legacy outbox adapter
@@ -61,7 +62,7 @@ import System.Timeout (timeout)
 
 import HMem.Config (AuthConfig(..), AuthMode(..), LocalAuthConfig(..), LocalBotTokenConfig(..), authStaticBearerEnabled, authStaticBearerToken)
 import HMem.Config qualified as Config
-import HMem.DB.ChangeStream (ChangeScope(..), ChangeAudience(..), ResumeToken(..), ChangeStreamError(..), replayUnacknowledgedResumeToken, replacementResumeToken, acknowledgeReplayPage, rebaseResumeTokenAfterHidden, OutboxRecord(..), ReplayPage(..))
+import HMem.DB.ChangeStream (ChangeScope(..), ChangeAudience(..), ResumeToken(..), ChangeStreamError(..), readReplayScanPage, replacementResumeToken, acknowledgeReplayScan, rebaseResumeTokenAfterHidden, OutboxRecord(..), ReplayScanPage(..), ReplayScanWindow(..))
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..))
 import HMem.DB.Auth qualified as Auth
 import HMem.Server.Event (ChangeEvent(..), EntityType(..))
@@ -122,11 +123,23 @@ data CanonicalClient = CanonicalClient
   , canonicalClientPrincipal :: !Principal
   , canonicalClientScope :: !ChangeScope
   , canonicalClientToken :: !(TVar ResumeToken)
+  , canonicalClientReplay :: !(TVar (Maybe CanonicalReplay))
   , canonicalClientResumeTtl :: !NominalDiffTime
   , canonicalClientExpiresAt :: !UTCTime
   , canonicalClientSendLock :: !(MVar ())
   , canonicalClientRetired :: !(STM.TMVar ())
   }
+
+data CanonicalReplay = CanonicalReplay
+  { replayOriginalBearer :: !ResumeToken
+  , replayWindow :: !(Maybe ReplayScanWindow)
+  , replaySawVisible :: !Bool
+  , replayInitialCheckpoint :: !Bool
+  , replayDirty :: !Bool
+  }
+
+newCanonicalReplay :: ResumeToken -> Bool -> CanonicalReplay
+newCanonicalReplay token initial = CanonicalReplay token Nothing False initial False
 
 data ActivityTicket = ActivityTicket
   { activityTicketPrincipal :: !Principal
@@ -497,7 +510,7 @@ wsApp authCfg pool st pending = case ticketFromRequest (WS.pendingRequest pendin
           (removeCanonicalConnection st . fst) $ \(connId, client) -> do
             let serve = do
                   withLiveCanonicalClient st connId client $
-                    advanceCanonicalClientUnlocked pool st connId True client
+                    advanceCanonicalClientUnlocked pool st connId client (pure False)
                   WS.withPingThread conn 30 (pure ()) $
                     withAsync (expireCanonicalConnection st connId client) $ \_ ->
                       sinkMessages conn
@@ -545,9 +558,10 @@ addCanonicalConnection :: WSState -> WS.Connection -> Principal -> ChangeScope -
 addCanonicalConnection st conn principal scope token resumeTtl expiresAt = do
   connId <- UUIDv4.nextRandom
   bearer <- newTVarIO token
+  replay <- newTVarIO (Just (newCanonicalReplay token True))
   sendLock <- newMVar ()
   retired <- STM.newEmptyTMVarIO
-  let client = CanonicalClient conn principal scope bearer resumeTtl expiresAt sendLock retired
+  let client = CanonicalClient conn principal scope bearer replay resumeTtl expiresAt sendLock retired
   STM.atomically $ modifyTVar' st.canonicalConnections (Map.insert connId client)
   pure (connId, client)
 
@@ -577,47 +591,6 @@ closeCanonicalConnectionUnlocked st connId client frame reason =
     sendFrameUnlocked client.canonicalClientConnection frame
     WS.sendClose client.canonicalClientConnection reason)
   `onException` retireCanonicalConnection st connId client
-
--- The only write path for a canonical client.  A page is scanned and its
--- replacement bearer is retained even when every record is hidden; callers
--- invoke this only for potentially visible outbox work, so hidden-only
--- activity never creates a checkpoint cadence observable by a subscriber.
-replayUnlocked :: Pool Hasql.Connection -> NominalDiffTime -> WS.Connection -> Principal -> ChangeScope -> ResumeToken -> Bool -> IO (Maybe ResumeToken)
-replayUnlocked pool resumeTtl conn principal scope initialToken forceCheckpoint = go initialToken False
-  where
-    audience = audienceFor principal
-    go token sawVisible = do
-      replayed <- replayUnacknowledgedResumeToken pool scope audience token canonicalReplayPageSize
-      case replayed of
-        Left err -> do
-          sendFrameUnlocked conn (object ["type" .= terminalFrame err, "schema_version" .= (1 :: Int)])
-          pure Nothing
-        Right page -> do
-          visible <- fmap catMaybes $ forM page.replayPageRecords (projectRecord pool principal scope)
-          forM_ visible $ \event -> sendFrameUnlocked conn (object ["type" .= ("change" :: Text), "schema_version" .= (1 :: Int), "event" .= event])
-          -- Do not rotate/supersede the bearer until all associated frames
-          -- were accepted by the socket.  Send failure leaves this token live
-          -- for a reconnect, which may redeliver the same event ID.
-          let (acknowledgedThrough, expectedReplacement) = case reverse page.replayPageRecords of
-                [] -> (Nothing, token)
-                record:_ -> (Just record.outboxCursor, replacementResumeToken scope audience token record.outboxCursor)
-          -- The terminal bearer is sent before its durable acknowledgement.
-          -- If this write throws, the old bearer is still valid and reconnect
-          -- simply repeats this at-least-once page.
-          when (not page.replayPageHasMore && (forceCheckpoint || sawVisible || not (null visible))) $
-            sendFrameUnlocked conn (object
-              [ "type" .= ("checkpoint" :: Text), "schema_version" .= (1 :: Int)
-              , "resume_token" .= resumeText expectedReplacement, "catch_up" .= ("complete" :: Text) ])
-          acknowledged <- case acknowledgedThrough of
-            Nothing -> pure (Right token)
-            Just cursor -> acknowledgeReplayPage pool resumeTtl scope audience token cursor
-          case acknowledged of
-            Left err -> do
-              sendFrameUnlocked conn (object ["type" .= terminalFrame err, "schema_version" .= (1 :: Int)])
-              pure Nothing
-            Right replacement
-              | page.replayPageHasMore -> go replacement (sawVisible || not (null visible))
-              | otherwise -> pure (Just replacement)
 
 audienceFor :: Principal -> ChangeAudience
 audienceFor principal = case principal.authority of
@@ -678,7 +651,8 @@ dispatchCanonicalOutbox pool st records = do
         accessTargets = case client.canonicalClientPrincipal.authority of
           PrincipalGrantUser user -> [workspace | (workspace, target) <- targetedUsers, user == target]
           _ -> []
-    unless (null scopedRecords && null hints && null accessTargets) $
+    pending <- isJust <$> readTVarIO client.canonicalClientReplay
+    unless (not pending && null scopedRecords && null hints && null accessTargets) $
       withLiveCanonicalClient st connId client $ do
         stillLive <- applyAccessControlsUnlocked pool st connId client accessTargets
         when stillLive $ dispatchClient connId client scopedRecords hints
@@ -690,10 +664,20 @@ dispatchCanonicalOutbox pool st records = do
       -- Selected-scope changes already replay canonically. Cross-scope hints
       -- wake bounded catalogue probes without widening that replay.
       sendActivityHintsUnlocked pool client hints
-      visible <- anyM (isVisible client) scopedRecords
-      if visible
-        then advanceCanonicalClientUnlocked pool st connId False client
-        else rebaseHidden connId client scopedRecords
+      pending <- readTVarIO client.canonicalClientReplay
+      case pending of
+        Just replay -> do
+          forM_ replay.replayWindow $ \window ->
+            when (not replay.replayDirty && any ((> window.replayScanHighWater) . (.outboxCursor)) scopedRecords) $
+              STM.atomically $ STM.writeTVar client.canonicalClientReplay (Just replay { replayDirty = True })
+          advanceCanonicalClientUnlocked pool st connId client (pure False)
+        Nothing -> do
+          visible <- anyM (isVisible client) scopedRecords
+          if visible then do
+            token <- readTVarIO client.canonicalClientToken
+            STM.atomically $ STM.writeTVar client.canonicalClientReplay (Just (newCanonicalReplay token False))
+            advanceCanonicalClientUnlocked pool st connId client (pure False)
+          else rebaseHidden connId client scopedRecords
 
     rebaseHidden _ _ [] = pure ()
     rebaseHidden connId client (record:rest) = do
@@ -701,6 +685,13 @@ dispatchCanonicalOutbox pool st records = do
       when stillLive $ rebaseHidden connId client rest
 
     isVisible client record = isJust <$> projectRecord pool client.canonicalClientPrincipal client.canonicalClientScope record
+
+-- A dispatcher can schedule continuation work even when no outbox rows
+-- arrived on its current turn.
+canonicalReplayPending :: WSState -> IO Bool
+canonicalReplayPending st = STM.atomically $ do
+  clients <- Map.elems <$> STM.readTVar st.canonicalConnections
+  anyM (fmap isJust . STM.readTVar . (.canonicalClientReplay)) clients
 
 dispatchActivityClients :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO ()
 dispatchActivityClients pool st records = do
@@ -785,19 +776,75 @@ recordInScope scope record = case (scope, jsonText "workspace_id" record.outboxE
   (GlobalScope, Nothing) -> True
   _ -> False
 
-advanceCanonicalClientUnlocked :: Pool Hasql.Connection -> WSState -> UUID -> Bool -> CanonicalClient -> IO ()
-advanceCanonicalClientUnlocked pool st connId forceCheckpoint client = do
-  -- The caller holds the client lock through durable acknowledgement and the
-  -- local bearer update, including when dispatch races the initial replay.
-  oldToken <- readTVarIO client.canonicalClientToken
-  remainingTtl <- remainingCanonicalTtl client
-  if remainingTtl <= 0
-    then closeCanonicalConnectionUnlocked st connId client canonicalExpiryFrame "canonical resume expired"
-    else do
-      replacement <- replayUnlocked pool remainingTtl client.canonicalClientConnection client.canonicalClientPrincipal client.canonicalClientScope oldToken forceCheckpoint
-      case replacement of
-        Nothing -> retireCanonicalConnection st connId client
-        Just token -> STM.atomically $ STM.writeTVar client.canonicalClientToken token
+-- Run one page while holding the client's delivery lock. A turn can yield
+-- between records without keeping the page or superseding the original token.
+advanceCanonicalClientUnlocked :: Pool Hasql.Connection -> WSState -> UUID -> CanonicalClient -> IO Bool -> IO ()
+advanceCanonicalClientUnlocked pool st connId client shouldYield = do
+  pending <- readTVarIO client.canonicalClientReplay
+  forM_ pending $ \replay -> do
+    remaining <- remainingCanonicalTtl client
+    if remaining <= 0 then expire else do
+      yielding <- shouldYield
+      unless yielding $ do
+        pageResult <- readReplayScanPage pool scope audience replay.replayOriginalBearer replay.replayWindow
+        case pageResult of
+          Left err -> reportFailure err
+          Right page -> do
+            saveReplay replay page.replayScanPageWindow
+            deliver replay page.replayScanPageWindow page.replayScanPageWatermark page.replayScanPageRecords
+  where
+    conn = client.canonicalClientConnection
+    principal = client.canonicalClientPrincipal
+    scope = client.canonicalClientScope
+    audience = audienceFor principal
+    expire = closeCanonicalConnectionUnlocked st connId client canonicalExpiryFrame "canonical resume expired"
+    reportFailure err = do
+      sendFrameUnlocked conn (object ["type" .= terminalFrame err, "schema_version" .= (1 :: Int)])
+      retireCanonicalConnection st connId client
+    sendAuthorized frame after = do
+      allowed <- scopeAuthorized pool principal scope
+      remaining <- remainingCanonicalTtl client
+      if not allowed then reportFailure ResyncUnauthorized
+      else if remaining <= 0 then expire
+      else sendFrameUnlocked conn frame >> after
+    saveReplay replay window = STM.atomically $
+      STM.writeTVar client.canonicalClientReplay (Just replay { replayWindow = Just window })
+    deliver replay window watermark [] = do
+      yielding <- shouldYield
+      when (not yielding && window.replayScanCursor == window.replayScanHighWater) $
+        finish replay window.replayScanHighWater watermark
+    deliver replay window watermark (record:remaining) = do
+      yielding <- shouldYield
+      unless yielding $ do
+        projected <- projectRecord pool principal scope record
+        let next = window { replayScanCursor = record.outboxCursor }
+            continue updated = do
+              saveReplay updated next
+              deliver updated next watermark remaining
+        case projected of
+          Nothing -> continue replay
+          Just event -> sendAuthorized (object ["type" .= ("change" :: Text), "schema_version" .= (1 :: Int), "event" .= event]) $
+            continue replay { replaySawVisible = True }
+    finish replay highWater watermark = do
+      let original = replay.replayOriginalBearer
+          replacement = if highWater == watermark then original else replacementResumeToken scope audience original highWater
+          settle result = case result of
+            Left ResumeExpired -> expire
+            Left err -> reportFailure err
+            Right token -> STM.atomically $ do
+              STM.writeTVar client.canonicalClientToken token
+              STM.writeTVar client.canonicalClientReplay
+                (if replay.replayDirty then Just (newCanonicalReplay token False) else Nothing)
+      if replay.replayInitialCheckpoint || replay.replaySawVisible
+        then sendAuthorized (object
+          [ "type" .= ("checkpoint" :: Text), "schema_version" .= (1 :: Int)
+          , "resume_token" .= resumeText replacement, "catch_up" .= ("complete" :: Text) ]) $
+          if highWater == watermark then settle (Right original) else
+            acknowledgeReplayScan pool client.canonicalClientExpiresAt scope audience original highWater >>= settle
+        else do
+          remaining <- remainingCanonicalTtl client
+          if remaining <= 0 then expire else
+            rebaseResumeTokenAfterHidden pool client.canonicalClientResumeTtl scope audience original highWater >>= settle
 
 -- | A connected canonical client has one fixed delivery deadline. Visible
 -- activity may rotate its bearer for acknowledgement, but cannot prolong the
@@ -928,8 +975,6 @@ resumeText (ResumeToken value) = value
 canonicalResumeTtlDefault :: NominalDiffTime
 canonicalResumeTtlDefault = 82800
 
-canonicalReplayPageSize :: Int
-canonicalReplayPageSize = 500
 
 -- | Read and discard all incoming messages until the connection closes.
 sinkMessages :: WS.Connection -> IO ()

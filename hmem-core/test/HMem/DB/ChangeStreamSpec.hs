@@ -1346,6 +1346,99 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     successor <- acknowledgeReplayPage env.pool 60 scope audience token cursor
     successor `shouldSatisfy` \case Right _ -> True; _ -> False
     replayUnacknowledgedResumeToken env.pool scope audience token 10 `shouldReturn` Left ResumeSuperseded
+  it "keeps the original bearer across a fixed multi-page scan and one final acknowledgement" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-fixed-replay-window"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "fixed-replay-window-audience"
+        unwrap = either (fail . show) pure
+        readScan token window = readReplayScanPage env.pool scope audience token window
+        newProject name = CreateProject workspace.id Nothing name Nothing Nothing Nothing
+        identifier = TE.encodeUtf8 (UUID.toText workspace.id)
+    void $ createProject env.pool (newProject "before-snapshot")
+    begin <- beginResync env.pool 60 scope audience (pure []) >>= unwrap
+    terminal <- readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 >>= unwrap
+    token <- maybe (fail "expected terminal bearer") pure terminal.snapshotResumeToken
+    let watermark = begin.snapshotHighWatermark
+    runSession env.pool $ Session.sql
+      ("INSERT INTO projects(workspace_id,name) SELECT '" <> identifier <> "'::uuid, 'fixed-window-' || n FROM generate_series(1,525) n")
+    first <- readScan token Nothing >>= unwrap
+    let window = first.replayScanPageWindow
+        frozenEnd = watermark + 525
+    first.replayScanPageWatermark `shouldBe` watermark
+    window `shouldBe` ReplayScanWindow watermark frozenEnd
+    map (.outboxCursor) first.replayScanPageRecords `shouldBe` [watermark + 1 .. watermark + 500]
+    forM_ [ReplayScanWindow (watermark - 1) frozenEnd
+          ,ReplayScanWindow (frozenEnd + 1) frozenEnd
+          ,ReplayScanWindow watermark (frozenEnd + 1)] $ \invalid ->
+      readScan token (Just invalid) `shouldReturn` Left ResumeSuperseded
+    bracket (createPool env.testDb.testDbConnStr 1 5.0 30000) destroyAllResources $ \writerPool ->
+      void $ createProject writerPool (newProject "after-frozen-window")
+    -- Reconnect with the original bearer after a partial delivery. The same
+    -- records retain their event identities, even though a new scan can now
+    -- include the committed write beyond the frozen window.
+    resumed <- readScan token Nothing >>= unwrap
+    resumed.replayScanPageWindow `shouldBe` ReplayScanWindow watermark (frozenEnd + 1)
+    resumed.replayScanPageRecords `shouldBe` first.replayScanPageRecords
+    continued <- readScan token (Just (ReplayScanWindow (watermark + 493) frozenEnd)) >>= unwrap
+    map (.outboxCursor) continued.replayScanPageRecords `shouldBe` [watermark + 494 .. frozenEnd]
+    take 7 continued.replayScanPageRecords `shouldBe` drop 493 first.replayScanPageRecords
+    let successor = replacementResumeToken scope audience token frozenEnd
+    -- A checkpoint written before commit does not advance the durable
+    -- bearer. A lost checkpoint after commit invalidates the original.
+    validateCanonicalResumeToken env.pool scope audience successor `shouldReturn` Left ResumeNotFound
+    readScan token (Just (ReplayScanWindow frozenEnd frozenEnd))
+      >>= (\page -> fmap (.replayScanPageRecords) page `shouldBe` Right [])
+    expiredDeadline <- addUTCTime (-1) <$> getCurrentTime
+    acknowledgeReplayScan env.pool expiredDeadline scope audience token frozenEnd `shouldReturn` Left ResumeExpired
+    readScan token (Just window) >>= (`shouldSatisfy` isRight)
+    deadline <- addUTCTime (-15) <$> runSession env.pool
+      (Session.statement (tokenHashForTest token.unResumeToken) resumeExpiryStatement)
+    acknowledgeReplayScan env.pool deadline scope audience token frozenEnd `shouldReturn` Right successor
+    validateCanonicalResumeToken env.pool scope audience successor `shouldReturn` Right deadline
+    readScan token (Just window) `shouldReturn` Left ResumeSuperseded
+    later <- readScan successor Nothing >>= unwrap
+    map (.outboxCursor) later.replayScanPageRecords `shouldBe` [frozenEnd + 1]
+  it "revalidates scope, audience, authority and epoch on replay continuation" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-fixed-replay-authority"
+    userId <- UUIDV4.nextRandom
+    runSession env.pool $ Session.statement userId insertTestUserStatement
+    runSession env.pool $ Session.statement userId grantTestSuperadminStatement
+    let scope = WorkspaceScope workspace.id
+        audience = AuthenticatedAudience "fixed-replay-authority-audience" userId
+        unwrap = either (fail . show) pure
+    begin <- beginResync env.pool 60 scope audience (pure []) >>= unwrap
+    terminal <- readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 >>= unwrap
+    token <- maybe (fail "expected terminal bearer") pure terminal.snapshotResumeToken
+    void $ createProject env.pool (CreateProject workspace.id Nothing "replay-authority" Nothing Nothing Nothing)
+    first <- readReplayScanPage env.pool scope audience token Nothing >>= unwrap
+    let stop = first.replayScanPageWindow.replayScanHighWater
+        next = Just (ReplayScanWindow stop stop)
+    readReplayScanPage env.pool GlobalScope audience token next `shouldReturn` Left ResumeNotFound
+    readReplayScanPage env.pool scope (TrustedAudience "wrong-audience") token next `shouldReturn` Left ResumeNotFound
+    runSession env.pool $ Session.statement userId revokeTestSuperadminStatement
+    readReplayScanPage env.pool scope audience token next `shouldReturn` Left ResyncUnauthorized
+    runSession env.pool $ Session.statement userId grantTestSuperadminStatement
+    readReplayScanPage env.pool scope audience token next `shouldReturn` Left ResumeSuperseded
+  it "rejects continuation when the original watermark is pruned behind its private cursor" $ \env -> do
+    workspace <- createTestWorkspace env "change-stream-fixed-replay-retention"
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "fixed-replay-retention-audience"
+        unwrap = either (fail . show) pure
+    begin <- beginResync env.pool 60 scope audience (pure []) >>= unwrap
+    terminal <- readSnapshotPage env.pool scope audience begin.snapshotToken 0 1 >>= unwrap
+    token <- maybe (fail "expected terminal bearer") pure terminal.snapshotResumeToken
+    forM_ ["pruned-intermediate", "retained-final"] $ \name ->
+      void $ createProject env.pool (CreateProject workspace.id Nothing name Nothing Nothing Nothing)
+    first <- readReplayScanPage env.pool scope audience token Nothing >>= unwrap
+    let start = first.replayScanPageWatermark + 1
+        stop = first.replayScanPageWindow.replayScanHighWater
+        next = Just (ReplayScanWindow start stop)
+    cutoff <- addUTCTime 1 <$> getCurrentTime
+    pruneOutboxScopeBefore env.pool scope cutoff 1 `shouldReturn` 1
+    map (.outboxCursor) <$> listOutboxAfter env.pool scope start 10 `shouldReturn` [stop]
+    readReplayScanPage env.pool scope audience token next `shouldReturn` Left ReplayRetentionPruned
+    runSession env.pool $ Session.statement (tokenHashForTest token.unResumeToken) expireResumeForTestStatement
+    readReplayScanPage env.pool scope audience token next `shouldReturn` Left ResumeExpired
   it "preserves the original bearer expiry while rebasing hidden delivery" $ \env -> do
     workspace <- createTestWorkspace env "change-stream-hidden-rebase-expiry"
     let scope = WorkspaceScope workspace.id

@@ -4,6 +4,7 @@
 module HMem.DB.ChangeStream
   ( ChangeScope(..), ChangeAudience(..), SnapshotToken(..), ResumeToken(..)
   , ChangeStreamError(..), OutboxRecord(..), SnapshotBegin(..), SnapshotPage(..), ReplayPage(..)
+  , ReplayScanWindow(..), ReplayScanPage(..), readReplayScanPage, acknowledgeReplayScan
   , beginResync, beginResyncWithStartKey, beginResyncWithStartKeyAndProfile, readSnapshotPage, readSnapshotPageWithTtl, readSnapshotPageWithTtls, readSnapshotPageWithStoredTtls, validateCanonicalResumeToken, replayAndRotateResumeToken, replayUnacknowledgedResumeToken, replacementResumeToken, acknowledgeReplayPage, rebaseResumeTokenAfterHidden
   , listOutboxAfter, listOutboxScopes, pruneOutboxBefore, pruneOutboxScopeBefore
   , OutboxBacklog(..), outboxBacklog, listRetentionScopes, cleanupChangeStream
@@ -16,6 +17,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Lazy qualified as BL
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
+import Data.Maybe (fromMaybe)
 import Data.Pool (Pool)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -58,6 +60,17 @@ data SnapshotPage = SnapshotPage
 data ReplayPage = ReplayPage
   { replayPageRecords :: ![OutboxRecord], replayPageResumeToken :: !ResumeToken
   , replayPageHasMore :: !Bool
+  } deriving stock (Show, Eq)
+
+-- | Private server-side replay coordinates, never sent to a subscriber.
+data ReplayScanWindow = ReplayScanWindow
+  { replayScanCursor :: !Int64, replayScanHighWater :: !Int64
+  } deriving stock (Show, Eq)
+
+data ReplayScanPage = ReplayScanPage
+  { replayScanPageWindow :: !ReplayScanWindow
+  , replayScanPageWatermark :: !Int64
+  , replayScanPageRecords :: ![OutboxRecord]
   } deriving stock (Show, Eq)
 
 -- | Verify a terminal snapshot bearer before it is exchanged for a canonical
@@ -287,12 +300,35 @@ replayAndRotateResumeToken pool ttl scope audience oldToken requestedLimit = do
 replayUnacknowledgedResumeToken :: Pool Hasql.Connection -> ChangeScope -> ChangeAudience
   -> ResumeToken -> Int -> IO (Either ChangeStreamError ReplayPage)
 replayUnacknowledgedResumeToken pool scope audience token requestedLimit =
+  fmap asReplayPage <$> readReplayWindow pool scope audience token Nothing limit
+  where
+    limit = fromIntegral (max 1 (min 1000 requestedLimit))
+    asReplayPage page =
+      let window = page.replayScanPageWindow
+          records = page.replayScanPageRecords
+          lastCursor = maybe window.replayScanCursor outboxCursor (lastMay records)
+      in ReplayPage records token (lastCursor < window.replayScanHighWater)
+
+-- | Read at most 500 records from a frozen replay window. Each call proves
+-- the original bearer against current authority and retention. The window's
+-- cursor advances only in the transport, after complete delivery of a record.
+readReplayScanPage :: Pool Hasql.Connection -> ChangeScope -> ChangeAudience
+  -> ResumeToken -> Maybe ReplayScanWindow -> IO (Either ChangeStreamError ReplayScanPage)
+readReplayScanPage pool scope audience token window =
+  readReplayWindow pool scope audience token window 500
+
+readReplayWindow :: Pool Hasql.Connection -> ChangeScope -> ChangeAudience
+  -> ResumeToken -> Maybe ReplayScanWindow -> Int32 -> IO (Either ChangeStreamError ReplayScanPage)
+readReplayWindow pool scope audience token requestedWindow limit =
   runTransaction pool $ do
     found <- Session.statement (tokenHash token.unResumeToken) lookupResumeForUpdateStatement
     case validateResumeIdentity scope audience found of
       Left err -> pure (Left err)
       Right (epoch, watermark, expires, superseded, _sessionHash) -> do
         (currentEpoch, highWater, retainedFrom) <- Session.statement (scopeName scope, scopeWorkspace scope) lockScopeReplayStatement
+        let window = fromMaybe (ReplayScanWindow watermark highWater) requestedWindow
+            start = window.replayScanCursor
+            stop = window.replayScanHighWater
         now <- Session.statement () databaseClockStatement
         if expires <= now then pure (Left ResumeExpired)
         else if superseded /= Nothing then pure (Left ResumeSuperseded)
@@ -301,17 +337,30 @@ replayUnacknowledgedResumeToken pool scope audience token requestedLimit =
           if not allowed then pure (Left ResyncUnauthorized)
           else if currentEpoch /= epoch then pure (Left ResumeSuperseded)
           else if watermark < retainedFrom - 1 then pure (Left ReplayRetentionPruned)
+          else if start < watermark || stop < start || highWater < stop then pure (Left ResumeSuperseded)
           else do
-            records <- Session.statement (scopeName scope, scopeWorkspace scope, watermark, highWater, fromIntegral (max 1 (min 1000 requestedLimit)) :: Int32) listOutboxRangeStatement
-            if highWater > watermark && null records then pure (Left ReplayRetentionPruned)
-            else pure (Right (ReplayPage records token (maybe watermark outboxCursor (lastMay records) < highWater)))
+            records <- Session.statement (scopeName scope, scopeWorkspace scope, start, stop, limit) listOutboxRangeStatement
+            if stop > start && null records then pure (Left ReplayRetentionPruned)
+            else pure (Right (ReplayScanPage window watermark records))
 
 -- | Durable acknowledgement following a successful canonical send.  It locks
 -- the same bearer and scope used for the read, so a concurrent dispatcher
 -- cannot supersede it between a client write and acknowledgement.
 acknowledgeReplayPage :: Pool Hasql.Connection -> NominalDiffTime -> ChangeScope -> ChangeAudience
   -> ResumeToken -> Int64 -> IO (Either ChangeStreamError ResumeToken)
-acknowledgeReplayPage pool ttl scope audience oldToken acknowledgedThrough = do
+acknowledgeReplayPage pool ttl = acknowledgeReplayWithExpiry pool (\_ now -> Right (addUTCTime ttl now))
+
+-- | A canonical checkpoint cannot renew the fixed capability deadline,
+-- even if the final acknowledgement waits behind a database lock.
+acknowledgeReplayScan :: Pool Hasql.Connection -> UTCTime -> ChangeScope -> ChangeAudience
+  -> ResumeToken -> Int64 -> IO (Either ChangeStreamError ResumeToken)
+acknowledgeReplayScan pool deadline = acknowledgeReplayWithExpiry pool $ \expires now ->
+  if deadline <= now then Left ResumeExpired else Right (min expires deadline)
+
+acknowledgeReplayWithExpiry :: Pool Hasql.Connection
+  -> (UTCTime -> UTCTime -> Either ChangeStreamError UTCTime) -> ChangeScope -> ChangeAudience
+  -> ResumeToken -> Int64 -> IO (Either ChangeStreamError ResumeToken)
+acknowledgeReplayWithExpiry pool expiryFor scope audience oldToken acknowledgedThrough = do
   let replacement = replacementResumeToken scope audience oldToken acknowledgedThrough
   let oldHash = tokenHash oldToken.unResumeToken
   runTransaction pool $ do
@@ -328,11 +377,13 @@ acknowledgeReplayPage pool ttl scope audience oldToken acknowledgedThrough = do
           if not allowed then pure (Left ResyncUnauthorized)
           else if currentEpoch /= epoch || acknowledgedThrough < watermark || acknowledgedThrough > highWater || watermark < retainedFrom - 1
             then pure (Left ResumeSuperseded)
-          else if acknowledgedThrough == watermark then pure (Right oldToken)
-          else do
-            Session.statement (tokenHash replacement.unResumeToken, scopeName scope, scopeWorkspace scope, audienceKind audience, audienceKey audience, audienceUser audience, epoch, acknowledgedThrough, addUTCTime ttl now, sessionHash) insertResumeStatement
-            Session.statement (now, oldHash) supersedeResumeStatement
-            pure (Right replacement)
+          else case expiryFor expires now of
+            Left err -> pure (Left err)
+            Right _ | acknowledgedThrough == watermark -> pure (Right oldToken)
+            Right replacementExpiry -> do
+              Session.statement (tokenHash replacement.unResumeToken, scopeName scope, scopeWorkspace scope, audienceKind audience, audienceKey audience, audienceUser audience, epoch, acknowledgedThrough, replacementExpiry, sessionHash) insertResumeStatement
+              Session.statement (now, oldHash) supersedeResumeStatement
+              pure (Right replacement)
 
 -- | The successor is derived from the secret current bearer, its bound
 -- scope/audience, and the durable acknowledged cursor. This lets the

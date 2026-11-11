@@ -64,7 +64,7 @@ import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), cre
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.ChangeStream (ChangeStreamWorker, ChangeStreamMaintenance(..), startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker, readChangeStreamMaintenance, retentionScopeTurn, retentionDue)
 import HMem.Server.Snapshot (materializeSnapshot, materializeSnapshotWithProfile)
-import HMem.Server.WebSocket (WSState, newWSState, withNativeWebSocketSettings, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
+import HMem.Server.WebSocket (WSState, newWSState, withNativeWebSocketSettings, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
 import HMem.Server.WebSocketTransport (newNativeTransport, runPlainSocket, runPlainSocketWith, withNativeTransportSettings)
 import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateTask(..), CreateWorkspaceGroup(..), Project(..), Task(..), SnapshotProfile(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
 
@@ -1325,6 +1325,129 @@ spec = describe "canonical change-stream loopback" $ do
         frameType terminalFrame `shouldBe` Just "checkpoint"
         wait reconnect
 
+  it "reconnects from the original bearer after one page and checkpoints the frozen boundary once" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "canonical-frozen-replay"
+      owner <- UUIDV4.nextRandom
+      finished <- newEmptyMVar
+      let pool = ctx.deployedEnv.pool
+          st = ctx.deployedWSState
+          scope = WorkspaceScope workspace.id
+          principal = (grantPrincipal owner) { actorId = "frozen-replay", authority = PrincipalSyntheticLocalSuperadmin }
+          audience = TrustedAudience "local:frozen-replay"
+          application = observeRawWebSocket ctx.deployedApplication id (void (tryPutMVar finished ()))
+          dispatch records = declaredPhase "frozen replay dispatch" (dispatchCanonicalOutbox pool st records)
+          awaitFrameFrom frames = readChan frames >>= decodeFrame
+          receiveChanges phase frames count = declaredPhase phase $ replicateM count $ do
+            frame <- awaitFrameFrom frames
+            frameType frame `shouldBe` Just "change"
+            pure (jsonField "event" frame >>= jsonField "event_id")
+          eventIds = map (Just . String . UUID.toText . (.outboxEventId))
+      original <- terminalResume ctx scope audience
+      expires <- validateCanonicalResumeToken pool scope audience original >>= either (fail . show) pure
+      let deadline = addUTCTime (-5) expires
+      seedCanonicalReplay ctx.deployedEnv workspace.id
+      backlog <- listOutboxAfter pool scope 0 1000
+      length backlog `shouldBe` 525
+      frozenHighWater <- maybe (fail "expected replay backlog") (pure . (.outboxCursor)) (safeLast backlog)
+      firstTicket <- createCanonicalTicketWithExpiry st deadline principal scope original
+      withWebSocketApplication st application $ \port -> do
+        withActivityFrames port firstTicket.ticket $ \frames -> do
+          receiveChanges "first 500 replay records" frames 500 `shouldReturn` eventIds (take 500 backlog)
+          canonicalReplayPending st `shouldReturn` True
+          validateCanonicalResumeToken pool scope audience original `shouldReturn` Right expires
+        declaredPhase "first replay connection retired" (takeMVar finished)
+        reconnect <- createCanonicalTicketWithExpiry st deadline principal scope original
+        withActivityFrames port reconnect.ticket $ \frames -> do
+          receiveChanges "duplicates after reconnect" frames 500 `shouldReturn` eventIds (take 500 backlog)
+          marker <- Project.createProject pool (CreateProject workspace.id Nothing "post-freeze marker" Nothing Nothing Nothing)
+          laterRecords <- listOutboxAfter pool scope frozenHighWater 100
+          markerRecord <- case laterRecords of
+            [record] -> pure record
+            _ -> fail "expected one post-freeze marker"
+          dispatch [markerRecord]
+          receiveChanges "rest of the frozen page" frames 25 `shouldReturn` eventIds (drop 500 backlog)
+          checkpoint <- declaredPhase "frozen checkpoint" (awaitFrameFrom frames)
+          frameType checkpoint `shouldBe` Just "checkpoint"
+          next <- checkpointResume checkpoint
+          next `shouldBe` replacementResumeToken scope audience original frozenHighWater
+          validateCanonicalResumeToken pool scope audience next `shouldReturn` Right deadline
+          validateCanonicalResumeToken pool scope audience original `shouldReturn` Left ResumeSuperseded
+          canonicalReplayPending st `shouldReturn` True
+          dispatch []
+          declaredPhase "post-freeze change" (awaitFrameFrom frames) >>= assertChangeIdentity markerRecord marker.id
+          laterCheckpoint <- declaredPhase "post-freeze checkpoint" (awaitFrameFrom frames)
+          frameType laterCheckpoint `shouldBe` Just "checkpoint"
+          later <- checkpointResume laterCheckpoint
+          later `shouldBe` replacementResumeToken scope audience next markerRecord.outboxCursor
+          validateCanonicalResumeToken pool scope audience later `shouldReturn` Right deadline
+          canonicalReplayPending st `shouldReturn` False
+
+  it "rechecks authority before continuing a partially delivered replay" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "canonical-frozen-replay-revoke"
+      user <- createDeployedSandboxUser ctx.deployedEnv False False
+      let pool = ctx.deployedEnv.pool
+          st = ctx.deployedWSState
+          scope = WorkspaceScope workspace.id
+          principal = grantPrincipal user
+          audience = AuthenticatedAudience (UUID.toText user) user
+      _ <- Auth.upsertWorkspaceMembership pool workspace.id (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleRead) Nothing
+      resume <- terminalResume ctx scope audience
+      seedCanonicalReplay ctx.deployedEnv workspace.id
+      issued <- createCanonicalTicket st principal scope resume
+      withWebSocketApplication st ctx.deployedApplication $ \port ->
+        withActivityFrames port issued.ticket $ \frames -> do
+          declaredPhase "first page before revocation" $ replicateM_ 500 $
+            (frameType <$> (readChan frames >>= decodeFrame)) `shouldReturn` Just "change"
+          canonicalReplayPending st `shouldReturn` True
+          Auth.deleteWorkspaceMembership pool workspace.id user `shouldReturn` True
+          declaredPhase "reauthorization between replay pages" (dispatchCanonicalOutbox pool st [])
+          frameType <$> declaredPhase "terminal revocation" (readChan frames >>= decodeFrame) `shouldReturn` Just "access_revoked"
+          canonicalReplayPending st `shouldReturn` False
+
+  it "leaves the original bearer usable when the final checkpoint write fails" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "canonical-final-checkpoint-failure"
+      owner <- UUIDV4.nextRandom
+      entered <- newEmptyMVar
+      release <- newEmptyMVar
+      first <- newEmptyMVar
+      ended <- newEmptyMVar
+      let pool = ctx.deployedEnv.pool
+          st = ctx.deployedWSState
+          scope = WorkspaceScope workspace.id
+          principal = (grantPrincipal owner) { actorId = "checkpoint-failure", authority = PrincipalSyntheticLocalSuperadmin }
+          audience = TrustedAudience "local:checkpoint-failure"
+          write send bytes
+            | "\"checkpoint\"" `BS.isInfixOf` bytes = do
+                putMVar entered ()
+                takeMVar release
+                ioError (userError "injected final checkpoint write failure")
+            | otherwise = send bytes
+          application = observeRawWebSocket ctx.deployedApplication write (pure ())
+      resume <- terminalResume ctx scope audience
+      void $ Project.createProject pool (CreateProject workspace.id Nothing "before failed checkpoint" Nothing Nothing Nothing)
+      record <- latestOutbox ctx scope
+      issued <- createCanonicalTicket st principal scope resume
+      withWebSocketApplication st application $ \port -> do
+        let client = WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket issued.ticket) $ \conn -> do
+              WS.receiveData conn >>= putMVar first
+              result <- try @WS.ConnectionException (WS.receiveData conn :: IO Text)
+              putMVar ended (either (const True) (const False) result)
+        withAsync client $ \worker ->
+          (do
+            frameType <$> awaitFrame first `shouldReturn` Just "change"
+            declaredPhase "final checkpoint write entered" (takeMVar entered)
+            validateCanonicalResumeToken pool scope audience resume >>= (\result -> result `shouldSatisfy` either (const False) (const True))
+            validateCanonicalResumeToken pool scope audience (replacementResumeToken scope audience resume record.outboxCursor)
+              `shouldReturn` Left ResumeNotFound
+            putMVar release ()
+            declaredPhase "failed checkpoint socket retired" (takeMVar ended) `shouldReturn` True
+            declaredPhase "failed checkpoint client joined" (wait worker)
+            validateCanonicalResumeToken pool scope audience resume >>= (\result -> result `shouldSatisfy` either (const False) (const True)))
+          `finally` void (tryPutMVar release ())
+
   it "replays retained commits after dispatcher restart and cancels workers cleanly" $
     withDeployedSandboxAppContext $ \ctx -> do
       workspace <- createTestWorkspace ctx.deployedEnv "canonical-worker-restart"
@@ -1446,6 +1569,11 @@ canonicalTicketFor :: DeployedSandboxApp -> Principal -> ChangeScope -> ChangeAu
 canonicalTicketFor ctx principal scope audience = do
   resume <- terminalResume ctx scope audience
   createCanonicalTicket ctx.deployedWSState principal scope resume
+
+seedCanonicalReplay :: TestEnv -> UUID.UUID -> IO ()
+seedCanonicalReplay env workspace = runSession env.pool $ Session.sql
+  ("INSERT INTO projects(workspace_id,name) SELECT '" <> Text.encodeUtf8 (UUID.toText workspace)
+    <> "'::uuid, 'paged-replay-' || n FROM generate_series(1,525) n")
 
 observeRawWebSocket :: Application -> ((BS.ByteString -> IO ()) -> BS.ByteString -> IO ()) -> IO () -> Application
 observeRawWebSocket application write finished request respond =

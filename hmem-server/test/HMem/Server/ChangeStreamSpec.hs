@@ -13,7 +13,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.FileEmbed (embedFile, makeRelativeToProject)
 import Data.Maybe (isJust)
-import Data.List (sort)
+import Data.List (nub, sort)
 import Data.Pool (destroyAllResources)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import GHC.Clock (getMonotonicTimeNSec)
@@ -63,9 +63,9 @@ import HMem.DB.TestHarness (TestDb(..), TestEnv(..), createTestWorkspace)
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, withDeployedSandboxAppContext, withLocalSandboxAppContext)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
-import HMem.Server.ChangeStream (ChangeStreamWorker, ChangeStreamMaintenance(..), startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker, readChangeStreamMaintenance, retentionScopeTurn, retentionDue)
+import HMem.Server.ChangeStream (ChangeStreamWorker, ChangeStreamMaintenance(..), startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker, readChangeStreamMaintenance, retentionScopeTurn, retentionDue, ChangeStreamDispatchEvent(..), startChangeStreamWorkerWithObserver)
 import HMem.Server.Snapshot (materializeSnapshot, materializeSnapshotWithProfile)
-import HMem.Server.WebSocket (WSState, newWSState, withNativeWebSocketSettings, awaitWebSocketDrain, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
+import HMem.Server.WebSocket (WSState, newWSState, withNativeWebSocketSettings, awaitWebSocketDrain, connectionCount, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
 import HMem.Server.WebSocketDelivery (DeliveryCleanupFailure(..), DeliveryFailure(..))
 import HMem.Server.WebSocketTransport (newNativeTransport, runPlainSocket, runPlainSocketWith, withNativeTransportSettings)
 import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateTask(..), CreateWorkspaceGroup(..), Project(..), Task(..), SnapshotProfile(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
@@ -138,6 +138,339 @@ spec = describe "canonical change-stream loopback" $ do
                   records <- listOutboxAfter ctx.localEnv.pool (WorkspaceScope blocked) 0 10
                   if null records && value.lastError == Nothing then pure () else threadDelay 10000 >> awaitRetry
             timeout 10000000 awaitRetry `shouldReturn` Just ()
+
+  it "rotates bounded dispatcher batches past a skewed scope without an idle sleep" $
+    withLocalSandboxAppContext $ \ctx -> do
+      workspaces <- sort <$> forM [1..7 :: Int] (\index -> (.id) <$> createTestWorkspace ctx.localEnv ("dispatch-fair-" <> T.pack (show index)))
+      let pool = ctx.localEnv.pool
+          hot = head workspaces
+      seedReplayRows ctx.localEnv hot "dispatch-hot" 2300
+      forM_ (tail workspaces) $ \workspace ->
+        void $ Project.createProject pool (CreateProject workspace Nothing "later scope" Nothing Nothing Nothing)
+      reads <- newIORef []
+      commits <- newIORef (0 :: Int)
+      sleeps <- newIORef (0 :: Int)
+      second <- newEmptyMVar
+      hold <- newEmptyMVar
+      let observe = \case
+            DispatchBatchRead rows -> atomicModifyIORef' reads (\old -> (take 2 (old <> [rows]), ()))
+            DispatchBatchCommitted _ -> do
+              count <- atomicModifyIORef' commits (\old -> (old + 1, old + 1))
+              when (count == 2) $ putMVar second () >> takeMVar hold
+            DispatchIdle -> atomicModifyIORef' sleeps (\old -> (old + 1, ()))
+            _ -> pure ()
+      bracket (startChangeStreamWorkerWithObserver observe pool testChangeStreamConfig ctx.localWSState)
+        stopChangeStreamWorker $ \_ -> do
+          declaredPhase "two fair dispatcher turns" (takeMVar second)
+          turns <- readIORef reads
+          length turns `shouldBe` 2
+          forM_ turns $ \rows -> do
+            length rows `shouldSatisfy` (<= 4)
+            forM_ rows $ \(_, _, count) -> count `shouldSatisfy` (<= 1000)
+          let first = head turns
+              later = last turns
+          [count | (WorkspaceScope workspace, _, count) <- first, workspace == hot] `shouldBe` [1000]
+          sort (concatMap (map (\(scope, _, _) -> scope)) turns)
+            `shouldBe` sort (map WorkspaceScope workspaces <> [GlobalScope])
+          map (\(scope, _, _) -> scope) later `shouldSatisfy` elem (WorkspaceScope (last workspaces))
+          readIORef sleeps `shouldReturn` 0
+
+  it "retains nonzero process watermarks and backs off a failed dispatcher batch" $
+    withLocalSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.localEnv "dispatch-failure-ack"
+      void $ Project.createProject ctx.localEnv.pool (CreateProject workspace.id Nothing "retry me" Nothing Nothing Nothing)
+      reads <- newIORef []
+      commits <- newIORef (0 :: Int)
+      deferrals <- newIORef (0 :: Int)
+      retried <- newEmptyMVar
+      hold <- newEmptyMVar
+      let observe = \case
+            DispatchBatchRead rows -> do
+              now <- getMonotonicTimeNSec
+              prior <- atomicModifyIORef' reads (\old -> (old <> [(rows, now)], old))
+              case length prior of
+                0 -> pure ()
+                1 -> ioError (userError "injected failure after fetch, before managed dispatch")
+                _ -> putMVar retried () >> takeMVar hold
+            DispatchBatchCommitted _ -> do
+              count <- atomicModifyIORef' commits (\old -> (old + 1, old + 1))
+              when (count == 1) $ void $ Project.createProject ctx.localEnv.pool
+                (CreateProject workspace.id Nothing "after nonzero acknowledgement" Nothing Nothing Nothing)
+            DispatchDeferred -> atomicModifyIORef' deferrals (\old -> (old + 1, ()))
+            _ -> pure ()
+      bracket (startChangeStreamWorkerWithObserver observe ctx.localEnv.pool testChangeStreamConfig ctx.localWSState)
+        stopChangeStreamWorker $ \_ -> do
+          declaredPhase "failed batch retry" (takeMVar retried)
+          observed <- readIORef reads
+          case observed of
+            [(initial, _), (failed, began), (retriedRows, retriedAt)] -> do
+              forM_ initial $ \(_, previous, _) -> previous `shouldBe` 0
+              retriedRows `shouldBe` failed
+              retriedAt - began `shouldSatisfy` (>= 1000000000)
+              forM_ retriedRows $ \(_, previous, _) -> previous `shouldSatisfy` (> 0)
+            _ -> expectationFailure "unexpected number of bounded retry reads"
+          readIORef commits `shouldReturn` 1
+          readIORef deferrals `shouldReturn` 1
+
+  it "keeps retention running while successful dispatcher batches remain busy" $
+    withLocalSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.localEnv "dispatch-retention-backlog"
+      let pool = ctx.localEnv.pool
+      seedReplayRows ctx.localEnv workspace.id "expired-dispatch" 1501
+      runSession pool $ Session.sql ("UPDATE change_stream_outbox SET occurred_at=clock_timestamp()-interval '2 days' WHERE scope='workspace' AND workspace_id='" <> Text.encodeUtf8 (UUID.toText workspace.id) <> "'")
+      seedReplayRows ctx.localEnv workspace.id "live-dispatch" 3000
+      cutoff <- addUTCTime (-86400) <$> getCurrentTime
+      backlogs <- newIORef []
+      sleeps <- newIORef (0 :: Int)
+      maintained <- newEmptyMVar
+      hold <- newEmptyMVar
+      let observe = \case
+            DispatchBatchRead rows -> do
+              remaining <- outboxBacklog pool cutoff
+              atomicModifyIORef' backlogs (\old -> (old <> [remaining.expiredRowsLowerBound], ()))
+              when (remaining.expiredRowsLowerBound == 0 && any (\(_, _, count) -> count > 0) rows) $
+                putMVar maintained () >> takeMVar hold
+            DispatchIdle -> atomicModifyIORef' sleeps (\old -> (old + 1, ()))
+            _ -> pure ()
+      bracket (startChangeStreamWorkerWithObserver observe pool Config.defaultConfig.changeStream ctx.localWSState)
+        stopChangeStreamWorker $ \_ -> do
+          declaredPhase "retention completion during busy dispatch" (takeMVar maintained)
+          remaining <- readIORef backlogs
+          remaining `shouldBe` [501, 0]
+          readIORef sleeps `shouldReturn` 0
+
+  it "reauthorizes idle clients once per elapsed tick across empty scopes and observes revocation" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspaces <- forM [1..7 :: Int] $ \index -> do
+        workspace <- createTestWorkspace ctx.deployedEnv ("dispatch-idle-" <> T.pack (show index))
+        void $ Project.createProject ctx.deployedEnv.pool (CreateProject workspace.id Nothing "create counter" Nothing Nothing Nothing)
+        pure workspace.id
+      user <- createDeployedSandboxUser ctx.deployedEnv False False
+      let pool = ctx.deployedEnv.pool
+          st = ctx.deployedWSState
+          workspace = head workspaces
+          scope = WorkspaceScope workspace
+          principal = grantPrincipal user
+          audience = AuthenticatedAudience (UUID.toText user) user
+      _ <- Auth.upsertWorkspaceMembership pool workspace (Auth.UpsertWorkspaceMembership user Auth.WorkspaceRoleRead) Nothing
+      cutoff <- addUTCTime 60 <$> getCurrentTime
+      forM_ (map WorkspaceScope workspaces <> [GlobalScope]) $ \identity ->
+        void $ pruneOutboxScopeBefore pool identity cutoff 1000
+      resume <- terminalResume ctx scope audience
+      ticket <- createCanonicalTicket st principal scope resume
+      visited <- newIORef []
+      checks <- newIORef []
+      idle <- newEmptyMVar
+      release <- newEmptyMVar
+      let observe = \case
+            DispatchBatchRead rows -> atomicModifyIORef' visited (\old -> (nub (old <> map (\(identity, _, _) -> identity) rows), ()))
+            DispatchIdleAuthorization now -> atomicModifyIORef' checks (\old -> (take 16 (old <> [now]), ()))
+            DispatchIdle -> do
+              first <- tryPutMVar idle ()
+              when first (takeMVar release)
+            _ -> pure ()
+      frames <- newChan
+      withWebSocketApplication st ctx.deployedApplication $ \port ->
+        withAsync ((runPlainPeer port ticket.ticket $ \conn ->
+          forever (WS.receiveData conn >>= writeChan frames))
+          `catch` \(_ :: WS.ConnectionException) -> pure ()) $ \peer -> do
+          frameType <$> declaredPhase "idle initial checkpoint" (readChan frames >>= decodeFrame) `shouldReturn` Just "checkpoint"
+          bracket (startChangeStreamWorkerWithObserver observe pool testChangeStreamConfig st)
+            stopChangeStreamWorker $ \_ -> do
+              declaredPhase "complete empty dispatcher sweep" (readMVar idle)
+              sort <$> readIORef visited `shouldReturn` sort (map WorkspaceScope workspaces <> [GlobalScope])
+              beforeRevocation <- readIORef checks
+              beforeRevocation `shouldSatisfy` (not . null)
+              forM_ (zip beforeRevocation (drop 1 beforeRevocation)) $ \(previous, current) ->
+                current - previous `shouldSatisfy` (>= 1000000000)
+              Auth.deleteWorkspaceMembership pool workspace user `shouldReturn` True
+              putMVar release ()
+              frameType <$> declaredPhase "idle authorization revocation" (readChan frames >>= decodeFrame)
+                `shouldReturn` Just "access_revoked"
+              afterRevocation <- readIORef checks
+              length afterRevocation `shouldSatisfy` (> length beforeRevocation)
+              forM_ (zip afterRevocation (drop 1 afterRevocation)) $ \(previous, current) ->
+                current - previous `shouldSatisfy` (>= 1000000000)
+              -- This peer receives and acknowledges terminal Close before we
+              -- cancel its producer, rather than writing another Close after
+              -- the server's native retirement has already closed the socket.
+              declaredPhase "idle revoked peer acknowledged Close and joined" (wait peer)
+
+  it "continues pending replay on an acknowledged empty dispatcher turn" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "dispatch-empty-replay"
+      owner <- UUIDV4.nextRandom
+      let pool = ctx.deployedEnv.pool
+          st = ctx.deployedWSState
+          scope = WorkspaceScope workspace.id
+          principal = (grantPrincipal owner) { actorId = "empty-turn-replay", authority = PrincipalSyntheticLocalSuperadmin }
+          audience = TrustedAudience "local:empty-turn-replay"
+      original <- terminalResume ctx scope audience
+      seedCanonicalReplay ctx.deployedEnv workspace.id
+      idle <- newEmptyMVar
+      release <- newEmptyMVar
+      emptyRead <- newIORef False
+      let observe = \case
+            DispatchBatchRead rows -> when (all (\(_, _, count) -> count == 0) rows) $
+              atomicModifyIORef' emptyRead (const (True, ()))
+            DispatchIdle -> do
+              first <- tryPutMVar idle ()
+              when first (takeMVar release)
+            _ -> pure ()
+      bracket (startChangeStreamWorkerWithObserver observe pool testChangeStreamConfig st)
+        stopChangeStreamWorker $ \_ -> do
+          declaredPhase "outbox acknowledged before subscription" (readMVar idle)
+          atomicModifyIORef' emptyRead (const (False, ()))
+          ticket <- createCanonicalTicket st principal scope original
+          withWebSocketApplication st ctx.deployedApplication $ \port ->
+            withActivityFrames port ticket.ticket $ \frames -> do
+              declaredPhase "first bounded replay page" $ replicateM_ 500 $
+                (frameType <$> (readChan frames >>= decodeFrame)) `shouldReturn` Just "change"
+              canonicalReplayPending st `shouldReturn` True
+              validateCanonicalResumeToken pool scope audience original >>= (\result -> result `shouldSatisfy` either (const False) (const True))
+              putMVar release ()
+              declaredPhase "empty-turn replay remainder" $ replicateM_ 25 $
+                (frameType <$> (readChan frames >>= decodeFrame)) `shouldReturn` Just "change"
+              frameType <$> declaredPhase "empty-turn replay checkpoint" (readChan frames >>= decodeFrame) `shouldReturn` Just "checkpoint"
+              readIORef emptyRead `shouldReturn` True
+              let settled = canonicalReplayPending st >>= \pending -> when pending (threadDelay 1000 >> settled)
+              declaredPhase "empty-turn durable acknowledgement" settled
+
+  it "paces retained-prefix maintenance without sleeping on pending delivery" $
+    withLocalSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.localEnv "dispatch-retained-prefix"
+      let pool = ctx.localEnv.pool
+          scope = WorkspaceScope workspace.id
+      void $ Project.createProject pool (CreateProject workspace.id Nothing "recent prefix" Nothing Nothing Nothing)
+      void $ Project.createProject pool (CreateProject workspace.id Nothing "old behind prefix" Nothing Nothing Nothing)
+      old <- listOutboxAfter pool scope 0 10 >>= maybe (fail "missing old record") pure . safeLast
+      runSession pool $ Session.sql ("UPDATE change_stream_outbox SET occurred_at=clock_timestamp()-interval '2 days' WHERE scope='workspace' AND workspace_id='" <> Text.encodeUtf8 (UUID.toText workspace.id) <> "' AND cursor=" <> Text.encodeUtf8 (T.pack (show old.outboxCursor)))
+      seedReplayRows ctx.localEnv workspace.id "busy-retained-prefix" 2300
+      attempts <- newIORef (0 :: Int)
+      busyTurns <- newIORef (0 :: Int)
+      idleTurns <- newIORef []
+      observed <- newEmptyMVar
+      hold <- newEmptyMVar
+      let observe = \case
+            DispatchMaintenanceAttempt -> atomicModifyIORef' attempts (\count -> (count + 1, ()))
+            DispatchBatchRead rows -> when (any (\(_, _, count) -> count > 0) rows) $
+              atomicModifyIORef' busyTurns (\count -> (count + 1, ()))
+            DispatchIdle -> do
+              now <- getMonotonicTimeNSec
+              count <- readIORef attempts
+              prior <- atomicModifyIORef' idleTurns (\oldTurns -> (oldTurns <> [(count, now)], oldTurns))
+              when (not (null prior)) (putMVar observed () >> takeMVar hold)
+            _ -> pure ()
+      bracket (startChangeStreamWorkerWithObserver observe pool Config.defaultConfig.changeStream ctx.localWSState)
+        stopChangeStreamWorker $ \worker -> do
+          declaredPhase "paced no-progress retention" (takeMVar observed)
+          readIORef busyTurns >>= (`shouldSatisfy` (>= 3))
+          readIORef idleTurns >>= \case
+            [(first, began), (second, ended)] -> do
+              first `shouldBe` 1
+              second `shouldBe` 2
+              ended - began `shouldSatisfy` (>= 1000000000)
+            _ -> expectationFailure "unexpected idle maintenance sequence"
+          status <- readChangeStreamMaintenance worker
+          status.lastDeletedRows `shouldBe` 0
+          fmap (.expiredRowsLowerBound) status.backlog `shouldBe` Just 1
+          length <$> listOutboxAfter pool scope 0 1000 `shouldReturn` 1000
+
+  it "lets a healthy later population progress while the first batch producer is blocked" $
+    withLocalSandboxAppContext $ \ctx -> do
+      slowScope <- createTestWorkspace ctx.localEnv "dispatch-slow-scope"
+      healthyScope <- createTestWorkspace ctx.localEnv "dispatch-healthy-scope"
+      let pool = ctx.localEnv.pool
+          st = ctx.localWSState
+          principal = Principal { actorType = ActorUser, actorId = "healthy-batch", actorLabel = "healthy-batch", authority = PrincipalSyntheticLocalSuperadmin }
+      resume <- terminalLocalResume ctx (WorkspaceScope healthyScope.id) (TrustedAudience "local:healthy-batch")
+      ticket <- createCanonicalTicket st principal (WorkspaceScope healthyScope.id) resume
+      armed <- newIORef False
+      writing <- newEmptyMVar
+      release <- newEmptyMVar
+      ended <- newEmptyMVar
+      committed <- newEmptyMVar
+      hold <- newEmptyMVar
+      slowReady <- newEmptyMVar
+      let write send bytes = do
+            block <- atomicModifyIORef' armed (\enabled -> (False, enabled))
+            if not block then send bytes else
+              (putMVar writing () >> takeMVar release >> send bytes) `finally` putMVar ended ()
+          application request respond
+            | lookup "ticket" (Wai.queryString request) == Nothing = observeRawWebSocket ctx.localApplication write (pure ()) request respond
+            | otherwise = ctx.localApplication request respond
+          observe = \case
+            DispatchBatchCommitted rows -> putMVar committed rows >> takeMVar hold
+            _ -> pure ()
+      withWebSocketApplication st application $ \port ->
+        withAsync ((WS.runClient "127.0.0.1" port "/api/v1/ws" $ \conn ->
+          putMVar slowReady () >> forever (void (WS.receiveData conn :: IO Text))) `catch` \(_ :: WS.ConnectionException) -> pure ()) $ \_ -> do
+          declaredPhase "slow first legacy accepted" (takeMVar slowReady)
+          let registered = connectionCount st >>= \count -> when (count /= 1) (threadDelay 1000 >> registered)
+          declaredPhase "slow first legacy registered" registered
+          withActivityFrames port ticket.ticket $ \frames -> do
+            frameType <$> declaredPhase "healthy initial checkpoint" (readChan frames >>= decodeFrame) `shouldReturn` Just "checkpoint"
+            void $ Project.createProject pool (CreateProject slowScope.id Nothing "slow population change" Nothing Nothing Nothing)
+            healthy <- Project.createProject pool (CreateProject healthyScope.id Nothing "healthy population change" Nothing Nothing Nothing)
+            atomicModifyIORef' armed (const (True, ()))
+            bracket (startChangeStreamWorkerWithObserver observe pool testChangeStreamConfig st)
+              stopChangeStreamWorker $ \_ ->
+                (do
+                  declaredPhase "first producer write blocked" (takeMVar writing)
+                  awaitChangeChan frames healthy.id
+                  tryTakeMVar ended `shouldReturn` Nothing
+                  tryTakeMVar committed `shouldReturn` Nothing
+                  putMVar release ()
+                  rows <- declaredPhase "all batch producers completed" (takeMVar committed)
+                  map fst rows `shouldSatisfy` elem (WorkspaceScope slowScope.id)
+                  map fst rows `shouldSatisfy` elem (WorkspaceScope healthyScope.id)
+                  declaredPhase "blocked producer actually ended" (takeMVar ended))
+                `finally` void (tryPutMVar release ())
+
+  it "joins cancelled batch producers before retaining all process acknowledgements" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "dispatch-cancel-producers"
+      let pool = ctx.deployedEnv.pool
+          st = ctx.deployedWSState
+          scope = WorkspaceScope workspace.id
+          principal name = Principal { actorType = ActorUser, actorId = name, actorLabel = name, authority = PrincipalSyntheticLocalSuperadmin }
+      first <- canonicalTicketFor ctx (principal "cancel-first") scope (TrustedAudience "local:cancel-first")
+      second <- canonicalTicketFor ctx (principal "cancel-second") scope (TrustedAudience "local:cancel-second")
+      armed <- newIORef False
+      writing <- replicateM 2 newEmptyMVar
+      ended <- replicateM 2 newEmptyMVar
+      ownersEnded <- replicateM 2 newEmptyMVar
+      hold <- newEmptyMVar
+      commits <- newIORef (0 :: Int)
+      readBatch <- newEmptyMVar
+      let write index send bytes = do
+            block <- readIORef armed
+            if not block then send bytes else
+              (putMVar (writing !! index) () >> readMVar hold) `finally` putMVar (ended !! index) ()
+          application request respond = case lookup "ticket" (Wai.queryString request) of
+            Just (Just value) | value == Text.encodeUtf8 first.ticket -> observeRawWebSocket ctx.deployedApplication (write 0) (putMVar (ownersEnded !! 0) ()) request respond
+            Just (Just value) | value == Text.encodeUtf8 second.ticket -> observeRawWebSocket ctx.deployedApplication (write 1) (putMVar (ownersEnded !! 1) ()) request respond
+            _ -> ctx.deployedApplication request respond
+          observe = \case
+            DispatchBatchRead rows -> void (tryPutMVar readBatch rows)
+            DispatchBatchCommitted _ -> atomicModifyIORef' commits (\count -> (count + 1, ()))
+            _ -> pure ()
+      withWebSocketApplication st application $ \port ->
+        withActivityFrames port first.ticket $ \firstFrames ->
+          withActivityFrames port second.ticket $ \secondFrames -> do
+            forM_ [firstFrames, secondFrames] $ \frames ->
+              (frameType <$> declaredPhase "cancel peer initial checkpoint" (readChan frames >>= decodeFrame)) `shouldReturn` Just "checkpoint"
+            void $ Project.createProject pool (CreateProject workspace.id Nothing "cancelled managed batch" Nothing Nothing Nothing)
+            atomicModifyIORef' armed (const (True, ()))
+            bracket (startChangeStreamWorkerWithObserver observe pool testChangeStreamConfig st)
+              stopChangeStreamWorker $ \worker -> do
+                forM_ writing (declaredPhase "concurrent producer write entered" . takeMVar)
+                rows <- declaredPhase "unacknowledged batch read" (takeMVar readBatch)
+                forM_ rows $ \(_, previous, _) -> previous `shouldBe` 0
+                declaredPhase "cancelled dispatcher and producers joined" (stopChangeStreamWorker worker)
+                forM_ ended (declaredPhase "cancelled managed child ended" . takeMVar)
+                forM_ ownersEnded (declaredPhase "cancelled native owner ended" . takeMVar)
+                readIORef commits `shouldReturn` 0
 
   it "bounds activity ticket retention globally and prunes expired capabilities" $ do
     state <- newWSState
@@ -1657,9 +1990,16 @@ canonicalTicketFor ctx principal scope audience = do
   createCanonicalTicket ctx.deployedWSState principal scope resume
 
 seedCanonicalReplay :: TestEnv -> UUID.UUID -> IO ()
-seedCanonicalReplay env workspace = runSession env.pool $ Session.sql
-  ("INSERT INTO projects(workspace_id,name) SELECT '" <> Text.encodeUtf8 (UUID.toText workspace)
-    <> "'::uuid, 'paged-replay-' || n FROM generate_series(1,525) n")
+seedCanonicalReplay env workspace = seedReplayRows env workspace "paged-replay" 525
+
+seedReplayRows :: TestEnv -> UUID.UUID -> Text -> Int -> IO ()
+seedReplayRows env workspace prefix count =
+  -- Keep ordinary fixture setup within the existing 30-second statement
+  -- budget. Every project still commits its real core outbox trigger event.
+  forM_ [1,501..count] $ \first -> runSession env.pool $ Session.sql
+    ("INSERT INTO projects(workspace_id,name) SELECT '" <> Text.encodeUtf8 (UUID.toText workspace)
+      <> "'::uuid, '" <> Text.encodeUtf8 prefix <> "-' || n FROM generate_series("
+      <> Text.encodeUtf8 (T.pack (show first)) <> "," <> Text.encodeUtf8 (T.pack (show (min count (first + 499)))) <> ") n")
 
 observeRawWebSocket :: Application -> ((BS.ByteString -> IO ()) -> BS.ByteString -> IO ()) -> IO () -> Application
 observeRawWebSocket application write finished request respond =

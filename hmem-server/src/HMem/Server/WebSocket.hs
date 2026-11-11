@@ -20,6 +20,7 @@ module HMem.Server.WebSocket
   , eventVisibleToSubscription
   , resolveLocalWebSocketAccess
   , dispatchCanonicalOutbox
+  , dispatchOutboxBatch
   , canonicalReplayPending
   , reauthorizeCanonicalConnections
   , handleCanonicalDispatchFailure
@@ -29,11 +30,11 @@ module HMem.Server.WebSocket
   , wsMiddleware
   ) where
 
-import Control.Concurrent (MVar, newMVar, withMVar, threadDelay)
-import Control.Concurrent.Async (waitSTM, withAsync)
+import Control.Concurrent (MVar, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, putMVar, readMVar, withMVar, threadDelay)
+import Control.Concurrent.Async (asyncThreadId, cancel, waitAnyCatch, waitCatch, waitSTM, withAsync, withAsyncWithUnmask)
 import Control.Concurrent.STM (TVar, newTVarIO, readTVarIO, modifyTVar')
 import Control.Concurrent.STM qualified as STM
-import Control.Exception (SomeAsyncException, SomeException, bracket, catch, finally, fromException, mask, onException, throwIO)
+import Control.Exception (SomeAsyncException, SomeException, bracket, catch, finally, fromException, mask, onException, throwIO, try)
 import Control.Applicative ((<|>))
 import Data.Aeson (Value(..), encode, object, toJSON, (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -213,20 +214,32 @@ removeConnection st connId =
 -- fed only by committed durable outbox rows; REST handlers never call it.
 -- Canonical ticket connections are intentionally absent from this map.
 broadcastLegacyOutbox :: Pool Hasql.Connection -> WSState -> OutboxRecord -> IO ()
-broadcastLegacyOutbox pool st record = do
-  conns <- readTVarIO st.connections
-  let msg = encode (legacyProjection record.outboxEnvelope)
-  mapM_ (trySend msg) (filter (legacyVisible record.outboxEnvelope . snd) (Map.toList conns))
+broadcastLegacyOutbox pool st record = legacyOutboxActions pool st [record] >>= runDeliveryBatch
+
+legacyOutboxActions :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO [IO ()]
+legacyOutboxActions pool st records = do
+  clients <- Map.toList <$> readTVarIO st.connections
+  pure [deliver identifier client | (identifier, client) <- clients]
   where
-    trySend msg (identifier, client) =
-      runClientTurn client.clientNative
-        (removeConnection st identifier >> abortNativeConnection client.clientNative) $ \_ -> do
-          allowed <- case (client.clientPrincipal, client.clientSubscription) of
-            (Just principal, SubscribeWorkspace workspace) -> scopeAuthorized pool principal (WorkspaceScope workspace)
-            (Just principal, SubscribeAllWorkspaces) -> pure (isTrusted principal)
-            (Nothing, _) -> pure True
-          if allowed then WS.sendTextData client.clientConnection msg
-          else removeConnection st identifier >> abortNativeConnection client.clientNative
+    deliver identifier client = case filter (\record -> legacyVisible record.outboxEnvelope client) records of
+      [] -> pure ()
+      visible -> runClientTurn client.clientNative retire $ \turn -> send turn visible
+      where
+        retire = removeConnection st identifier >> abortNativeConnection client.clientNative
+        send _ [] = pure ()
+        send turn (record:rest) = do
+          yielding <- deliveryShouldYield turn
+          -- Legacy has no durable continuation. Retire rather than silently
+          -- leave a live compatibility socket behind an incomplete batch.
+          if yielding then retire else do
+            allowed <- case (client.clientPrincipal, client.clientSubscription) of
+              (Just principal, SubscribeWorkspace workspace) -> scopeAuthorized pool principal (WorkspaceScope workspace)
+              (Just principal, SubscribeAllWorkspaces) -> pure (isTrusted principal)
+              (Nothing, _) -> pure True
+            if allowed then do
+              WS.sendTextData client.clientConnection (encode (legacyProjection record.outboxEnvelope))
+              send turn rest
+            else retire
 
 legacyVisible :: Value -> WSClient -> Bool
 legacyVisible envelope client = case client.clientSubscription of
@@ -699,28 +712,43 @@ replaceInvalidations value _ = value
 -- process memory, eliminating the fetch/subscribe race on reconnect.
 dispatchCanonicalOutbox :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO ()
 dispatchCanonicalOutbox pool st records = do
-  dispatchActivityClients pool st records
+  activity <- activityOutboxActions pool st records
+  canonical <- canonicalOutboxActions pool st records
+  runDeliveryBatch (activity <> canonical)
+
+-- Each population is disjoint: one physical owner receives one action for
+-- this shared bounded batch, rather than a new turn for every scope/record.
+dispatchOutboxBatch :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO ()
+dispatchOutboxBatch pool st records = do
+  legacy <- legacyOutboxActions pool st records
+  activity <- activityOutboxActions pool st records
+  canonical <- canonicalOutboxActions pool st records
+  runDeliveryBatch (legacy <> activity <> canonical)
+
+canonicalOutboxActions :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO [IO ()]
+canonicalOutboxActions pool st records = do
   clients <- Map.toList <$> readTVarIO st.canonicalConnections
-  forM_ clients $ \(connId, client) -> do
-    let scopedRecords = filter (recordInScope client.canonicalClientScope) records
-        covered = catMaybes (map activityWorkspace scopedRecords)
-        hints = filter (`notElem` covered) activityWorkspaces
-        accessTargets = case client.canonicalClientPrincipal.authority of
-          PrincipalGrantUser user -> [workspace | (workspace, target) <- targetedUsers, user == target]
-          _ -> []
-    pending <- isJust <$> readTVarIO client.canonicalClientReplay
-    unless (not pending && null scopedRecords && null hints && null accessTargets) $
-      withLiveCanonicalClient st connId client $ \turn -> do
-        stillLive <- applyAccessControlsUnlocked pool st connId client accessTargets
-        when stillLive $ dispatchClient connId client scopedRecords hints (deliveryShouldYield turn)
+  pure [deliver connId client | (connId, client) <- clients]
   where
     targetedUsers = nub (concatMap targetedWorkspaceUsers records)
     activityWorkspaces = nub (catMaybes (map activityWorkspace records))
+    deliver connId client = do
+      let scopedRecords = filter (recordInScope client.canonicalClientScope) records
+          covered = catMaybes (map activityWorkspace scopedRecords)
+          hints = filter (`notElem` covered) activityWorkspaces
+          accessTargets = case client.canonicalClientPrincipal.authority of
+            PrincipalGrantUser user -> [workspace | (workspace, target) <- targetedUsers, user == target]
+            _ -> []
+      pending <- isJust <$> readTVarIO client.canonicalClientReplay
+      unless (not pending && null scopedRecords && null hints && null accessTargets) $
+        withLiveCanonicalClient st connId client $ \turn -> do
+          stillLive <- applyAccessControlsUnlocked pool st connId client accessTargets
+          when stillLive $ dispatchClient connId client scopedRecords hints (deliveryShouldYield turn)
 
     dispatchClient connId client scopedRecords hints shouldYield = do
       -- Selected-scope changes already replay canonically. Cross-scope hints
       -- wake bounded catalogue probes without widening that replay.
-      sendActivityHintsUnlocked pool client hints
+      sendActivityHintsUnlocked pool client shouldYield hints
       pending <- readTVarIO client.canonicalClientReplay
       case pending of
         Just replay -> do
@@ -760,11 +788,13 @@ canonicalReplayPending st = STM.atomically $ do
   clients <- Map.elems <$> STM.readTVar st.canonicalConnections
   anyM (fmap isJust . STM.readTVar . (.canonicalClientReplay)) clients
 
-dispatchActivityClients :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO ()
-dispatchActivityClients pool st records = do
-  clients <- Map.toList <$> readTVarIO st.activityConnections
-  forM_ clients $ \(_,client) -> forM_ client.activityConnection $ \conn ->
-    withLiveActivityClient client $ \_ -> do
+activityOutboxActions :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO [IO ()]
+activityOutboxActions _ _ [] = pure []
+activityOutboxActions pool st records = do
+  clients <- Map.elems <$> readTVarIO st.activityConnections
+  pure [deliver client conn | client <- clients, Just conn <- [client.activityConnection]]
+  where
+    deliver client conn = withLiveActivityClient client $ \turn -> do
         retired <- readTVarIO client.activityRetired
         valid <- activityPrincipalValid pool client.activityPrincipal
         now <- getCurrentTime
@@ -777,12 +807,12 @@ dispatchActivityClients pool st records = do
           else do
             -- A user may learn about changes to their own membership even
             -- after losing read access; another user's controls remain hidden.
-            forM_ (nub (concatMap targetedWorkspaceUsers records)) $ \(workspace,user) ->
+            forDeliveryRecords turn (nub (concatMap targetedWorkspaceUsers records)) $ \(workspace,user) ->
               when (client.activityPrincipal.authority == PrincipalGrantUser user) $ do
                 allowed <- scopeAuthorized pool client.activityPrincipal (WorkspaceScope workspace)
                 live <- activityMaySend pool client
                 when live $ sendFrameUnlocked conn (accessFrame (if allowed then "access_granted" else "access_revoked") workspace)
-            forM_ (nub (catMaybes (map activityWorkspace records))) $ \workspace -> do
+            forDeliveryRecords turn (nub (catMaybes (map activityWorkspace records))) $ \workspace -> do
               allowed <- scopeAuthorized pool client.activityPrincipal (WorkspaceScope workspace)
               live <- activityMaySend pool client
               when (allowed && live) $ sendFrameUnlocked conn $
@@ -792,13 +822,26 @@ dispatchActivityClients pool st records = do
 -- Each dispatcher batch is bounded; retain no subscription or historical IDs.
 -- Check current authority immediately before the serialized write. Mount and
 -- reconnect always establish the corresponding canonical HTTP baseline.
-sendActivityHintsUnlocked :: Pool Hasql.Connection -> CanonicalClient -> [UUID] -> IO ()
-sendActivityHintsUnlocked pool client workspaces =
-  forM_ workspaces $ \workspace -> do
-    allowed <- scopeAuthorized pool client.canonicalClientPrincipal (WorkspaceScope workspace)
-    remaining <- remainingCanonicalTtl client
-    when (allowed && remaining > 0) $ sendFrameUnlocked client.canonicalClientConnection $
-      object ["type" .= ("session_activity_changed" :: Text), "schema_version" .= (1 :: Int), "workspace_id" .= workspace]
+sendActivityHintsUnlocked :: Pool Hasql.Connection -> CanonicalClient -> IO Bool -> [UUID] -> IO ()
+sendActivityHintsUnlocked pool client shouldYield = send
+  where
+    send [] = pure ()
+    send (workspace:rest) = do
+      yielding <- shouldYield
+      unless yielding $ do
+        allowed <- scopeAuthorized pool client.canonicalClientPrincipal (WorkspaceScope workspace)
+        remaining <- remainingCanonicalTtl client
+        when (allowed && remaining > 0) $ sendFrameUnlocked client.canonicalClientConnection $
+          object ["type" .= ("session_activity_changed" :: Text), "schema_version" .= (1 :: Int), "workspace_id" .= workspace]
+        send rest
+
+forDeliveryRecords :: DeliveryTurn -> [a] -> (a -> IO ()) -> IO ()
+forDeliveryRecords turn records action = go records
+  where
+    go [] = pure ()
+    go (record:rest) = do
+      yielding <- deliveryShouldYield turn
+      unless yielding (action record >> go rest)
 
 activityWorkspace :: OutboxRecord -> Maybe UUID
 activityWorkspace record = do
@@ -997,28 +1040,69 @@ targetedWorkspaceUsers record = case jsonText "workspace_id" record.outboxEnvelo
 
 reauthorizeCanonicalConnections :: Pool Hasql.Connection -> WSState -> IO ()
 reauthorizeCanonicalConnections pool st = do
-  activity <- Map.toList <$> readTVarIO st.activityConnections
-  forM_ activity $ \(_,client) -> forM_ client.activityConnection $ \conn ->
-    withLiveActivityClient client $ \_ -> do
-        retired <- readTVarIO client.activityRetired
-        valid <- activityPrincipalValid pool client.activityPrincipal
-        when (not valid && not retired) $ do
-          retireActivityClient client
-          beforeDeadline <- activityBeforeDeadline client
-          when beforeDeadline $ sendFrameUnlocked conn (object ["type" .= ("access_revoked" :: Text),"schema_version" .= (1::Int)])
-          sendOwnedClose client.activityNative conn ("activity access revoked" :: Text)
+  activity <- Map.elems <$> readTVarIO st.activityConnections
   clients <- Map.toList <$> readTVarIO st.canonicalConnections
-  forM_ clients $ \(connId, client) ->
-    handleCanonicalDispatchFailure (retireCanonicalConnection st connId client) $ do
-      let authorized = scopeAuthorized pool client.canonicalClientPrincipal client.canonicalClientScope
-      allowed <- authorized
-      unless allowed $ withLiveCanonicalClient st connId client $ \_ -> do
-        -- An authorized peer need not wait for a concurrent replay. Recheck a
-        -- denial under the send lock before issuing terminal control.
-        stillAllowed <- authorized
-        unless stillAllowed $
-          closeCanonicalConnectionUnlocked st connId client
-            (object ["type" .= ("access_revoked" :: Text), "schema_version" .= (1 :: Int)]) "access revoked"
+  let activityChecks =
+        [ withLiveActivityClient client $ \_ -> do
+            retired <- readTVarIO client.activityRetired
+            valid <- activityPrincipalValid pool client.activityPrincipal
+            when (not valid && not retired) $ do
+              retireActivityClient client
+              beforeDeadline <- activityBeforeDeadline client
+              when beforeDeadline $ sendFrameUnlocked conn (object ["type" .= ("access_revoked" :: Text), "schema_version" .= (1 :: Int)])
+              sendOwnedClose client.activityNative conn ("activity access revoked" :: Text)
+        | client <- activity, Just conn <- [client.activityConnection] ]
+      canonicalChecks =
+        [ withLiveCanonicalClient st connId client $ \_ -> do
+            -- One fresh check under the send lock and managed lease. Idle
+            -- checks no longer query outside the delivery deadline and repeat
+            -- a denied query a second time after locking.
+            allowed <- scopeAuthorized pool client.canonicalClientPrincipal client.canonicalClientScope
+            unless allowed $ closeCanonicalConnectionUnlocked st connId client
+              (object ["type" .= ("access_revoked" :: Text), "schema_version" .= (1 :: Int)]) "access revoked"
+        | (connId, client) <- clients ]
+  runDeliveryBatch (activityChecks <> canonicalChecks)
+
+-- Four short-lived producers share the immutable batch and the existing
+-- bounded physical-client snapshot. There is no frame queue or client watcher.
+-- A producer owns its managed turn; all producers must actually finish before
+-- the dispatcher can acknowledge any of the batch's scopes.
+runDeliveryBatch :: [IO ()] -> IO ()
+runDeliveryBatch [] = pure ()
+runDeliveryBatch actions = mask $ \restore -> do
+  remaining <- newMVar actions
+  start <- newEmptyMVar
+  let produce = readMVar start >> loop
+        where
+          loop = do
+            next <- modifyMVar remaining $ \case
+              [] -> pure ([], Nothing)
+              action:rest -> pure (rest, Just action)
+            forM_ next (\action -> action >> loop)
+      withProducers 0 owned use = use owned
+      withProducers count owned use = withAsyncWithUnmask (\unmask -> unmask produce) $ \producer ->
+        withProducers (count - 1) (producer:owned) use
+      awaitAll [] = pure ()
+      awaitAll owned = do
+        (finished, result) <- waitAnyCatch owned
+        either throwIO pure result
+        awaitAll (filter ((/= asyncThreadId finished) . asyncThreadId) owned)
+      cancelAndJoin producer = do
+        result <- try @SomeAsyncException (cancel producer >> waitCatch producer)
+        -- Further cancellation cannot abandon a retained producer handle.
+        -- Its native turn keeps its original bounded cleanup deadline.
+        either (const (cancelAndJoin producer)) pure result
+  withProducers (min 4 (length actions)) [] $ \owned -> do
+    putMVar start ()
+    outcome <- try @SomeException (restore (awaitAll owned))
+    case outcome of
+      Right () -> pure ()
+      Left primary -> do
+        modifyMVar_ remaining (const (pure []))
+        joined <- mapM cancelAndJoin owned
+        case [failure | Left failure <- joined, uncleanDelivery failure] of
+          cleanupFailure:_ -> throwIO (DeliveryCleanupFailure primary cleanupFailure)
+          [] -> throwIO primary
 
 scopeAuthorized :: Pool Hasql.Connection -> Principal -> ChangeScope -> IO Bool
 scopeAuthorized _ principal _ | isTrusted principal = pure True

@@ -14,7 +14,8 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.FileEmbed (embedFile, makeRelativeToProject)
 import Data.Maybe (isJust)
 import Data.List (nub, sort)
-import Data.Pool (destroyAllResources)
+import Data.Pool (Pool, destroyAllResources)
+import Hasql.Connection qualified as Hasql
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Text (Text)
@@ -44,6 +45,8 @@ import Network.WebSockets qualified as WS
 import Network.WebSockets.Stream qualified as WSStream
 import System.Timeout (timeout)
 import System.IO (hPutStrLn, stderr)
+import System.Environment (lookupEnv)
+import System.Directory (getFileSize)
 import Test.Hspec
 
 import HMem.Config qualified as Config
@@ -174,6 +177,7 @@ spec = describe "canonical change-stream loopback" $ do
             `shouldBe` sort (map WorkspaceScope workspaces <> [GlobalScope])
           map (\(scope, _, _) -> scope) later `shouldSatisfy` elem (WorkspaceScope (last workspaces))
           readIORef sleeps `shouldReturn` 0
+          qualificationMetric "skewed-scopes" (object ["scopes" .= (length workspaces + 1), "turn_records" .= map (map (\(_, _, count) -> count)) turns, "idle_sleeps" .= (0 :: Int)])
 
   it "retains nonzero process watermarks and backs off a failed dispatcher batch" $
     withLocalSandboxAppContext $ \ctx -> do
@@ -270,6 +274,7 @@ spec = describe "canonical change-stream loopback" $ do
               when first (takeMVar release)
             _ -> pure ()
       frames <- newChan
+      sqlBefore <- qualificationSqlStats pool
       withWebSocketApplication st ctx.deployedApplication $ \port ->
         withAsync ((runPlainPeer port ticket.ticket $ \conn ->
           forever (WS.receiveData conn >>= writeChan frames))
@@ -295,6 +300,67 @@ spec = describe "canonical change-stream loopback" $ do
               -- cancel its producer, rather than writing another Close after
               -- the server's native retirement has already closed the socket.
               declaredPhase "idle revoked peer acknowledged Close and joined" (wait peer)
+              sqlAfter <- qualificationSqlStats pool
+              qualificationMetric "idle-authorization" (object ["scopes" .= (length workspaces + 1), "check_count" .= length afterRevocation, "check_intervals_ms" .= zipWith (\a b -> fromIntegral (b-a) / 1000000 :: Double) afterRevocation (drop 1 afterRevocation), "sql_before" .= sqlBefore, "sql_after" .= sqlAfter])
+
+  it "measures causal pool queueing and snapshot scope-lock contention" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "qualification-snapshot"
+      seedReplayRows ctx.deployedEnv workspace.id "qualification-row" 300
+      let scope = WorkspaceScope workspace.id
+          audience = TrustedAudience "qualification-snapshot"
+          newPool = DBPool.createPool ctx.deployedEnv.testDb.testDbConnStr 1 5.0 30000
+          lock = Session.sql ("SELECT hmem_change_stream_lock('workspace','" <> Text.encodeUtf8 (UUID.toText workspace.id) <> "')")
+      bracket newPool destroyAllResources $ \pool -> do
+        held <- newEmptyMVar
+        release <- newEmptyMVar
+        waiting <- newEmptyMVar
+        entered <- newEmptyMVar
+        withAsync (DBPool.withConn pool (\_ -> putMVar held () >> readMVar release)) $ \holder ->
+          (do
+            declaredPhase "qualification held pool lease" (takeMVar held)
+            withAsync (do
+              start <- getMonotonicTimeNSec
+              putMVar waiting ()
+              DBPool.withConn pool (\_ -> getMonotonicTimeNSec >>= putMVar entered)
+              pure start) $ \waiter -> do
+                declaredPhase "qualification waiter started" (takeMVar waiting)
+                threadDelay 100000
+                tryTakeMVar entered `shouldReturn` Nothing
+                putMVar release ()
+                start <- wait waiter
+                acquired <- takeMVar entered
+                qualificationMetric "pool-queue" (object ["pool_size" .= (1 :: Int), "before_withConn_to_callback_ms" .= milliseconds start acquired, "held_lease_minimum_ms" .= (100 :: Int)])
+            wait holder)
+          `finally` void (tryPutMVar release ())
+      bracket newPool destroyAllResources $ \holderPool ->
+        bracket newPool destroyAllResources $ \snapshotPool -> do
+          DBPool.withConn snapshotPool $ \connection -> Session.run (Session.sql "SET application_name='change-stream-qualification-snapshot'") connection >>= either (fail . show) pure
+          held <- newEmptyMVar
+          release <- newEmptyMVar
+          let holder = DBPool.withConn holderPool $ \connection ->
+                (Session.run (Session.sql "BEGIN" *> lock) connection >>= either (fail . show) pure >> putMVar held () >> readMVar release)
+                `finally` void (Session.run (Session.sql "ROLLBACK") connection)
+          sqlBefore <- qualificationSqlStats ctx.deployedEnv.pool
+          withAsync holder $ \holding ->
+            (do
+              declaredPhase "qualification held scope lock" (takeMVar held)
+              started <- getMonotonicTimeNSec
+              withAsync (beginResync snapshotPool 60 scope audience (materializeSnapshot scope)) $ \snapshot -> do
+                let awaitWait = do
+                      blocked <- runSession ctx.deployedEnv.pool $ Session.statement () qualificationLockWait
+                      if blocked then pure () else threadDelay 10000 >> awaitWait
+                declaredPhase "qualification observed snapshot lock waiter" awaitWait
+                observed <- getMonotonicTimeNSec
+                putMVar release ()
+                wait holding
+                begun <- wait snapshot >>= either (fail . show) pure
+                finished <- getMonotonicTimeNSec
+                page <- readSnapshotPageWithTtl snapshotPool 60 scope audience begun.snapshotToken 500 >>= either (fail . show) pure
+                length page.snapshotPageItems `shouldSatisfy` (>= 301)
+                sqlAfter <- qualificationSqlStats ctx.deployedEnv.pool
+                qualificationMetric "snapshot-lock" (object ["items" .= length page.snapshotPageItems, "start_to_observed_lock_wait_ms" .= milliseconds started observed, "release_to_complete_upper_bound_ms" .= milliseconds observed finished, "sql_before" .= sqlBefore, "sql_after" .= sqlAfter]))
+            `finally` void (tryPutMVar release ())
 
   it "continues pending replay on an acknowledged empty dispatcher turn" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -1047,17 +1113,23 @@ spec = describe "canonical change-stream loopback" $ do
                     declaredPhase "membership lock acquisition" (takeMVar entered)
                     Auth.hasWorkspaceRole failurePool (Just principal) workspace.id Auth.WorkspaceRoleRead
                       `shouldThrow` (\case DBPool.DBStatementTimeout -> True; _ -> False)
+                    failureStarted <- getMonotonicTimeNSec
                     declaredPhase "failed reauthorization" $
                       reauthorizeCanonicalConnections failurePool ctx.deployedWSState
                     declaredPhase "retired peer disconnect" (takeMVar disconnected) `shouldReturn` True
+                    retired <- getMonotonicTimeNSec
+                    qualificationMetric "database-failure-retirement" (object ["reauthorization_to_disconnect_ms" .= milliseconds failureStarted retired, "statement_timeout_ms" .= (100 :: Int)])
                     wait failed
                     putMVar release ()
                     wait holder
               validity <- validateCanonicalResumeToken ctx.deployedEnv.pool scope audience resume
               validity `shouldSatisfy` either (const False) (const True)
               reconnect <- createCanonicalTicket ctx.deployedWSState principal scope resume
+              recoveryStarted <- getMonotonicTimeNSec
               withActivityFrames port reconnect.ticket $ \reconnectedFrames -> do
                 frameType <$> awaitCanonical reconnectedFrames `shouldReturn` Just "checkpoint"
+                recovered <- getMonotonicTimeNSec
+                qualificationMetric "database-failure-reconnect" (object ["socket_open_to_checkpoint_ms" .= milliseconds recoveryStarted recovered])
                 project <- Project.createProject ctx.deployedEnv.pool
                   (CreateProject workspace.id Nothing "visible after failed authorization" Nothing Nothing Nothing)
                 record <- latestOutbox ctx scope
@@ -2027,16 +2099,22 @@ assertBlockedNativeWrite withListener runPeer ctx = do
   ownerEnded <- newEmptyMVar
   initial <- newEmptyMVar
   release <- newEmptyMVar
+  rawTimes <- newIORef Nothing
   let chunk = BS.replicate 65536 0
       write send bytes = do
         enabled <- readIORef armed
         if not enabled then send bytes else
           (do
+            rawStart <- getMonotonicTimeNSec
+            atomicModifyIORef' rawTimes (const (Just (rawStart, rawStart), ()))
             putMVar writing ()
             replicateM_ 1024 $ do
               send chunk
               atomicModifyIORef' chunks (\count -> (count + 1, ())))
-            `finally` putMVar writeEnded ()
+            `finally` (do
+              rawEnd <- getMonotonicTimeNSec
+              atomicModifyIORef' rawTimes (\value -> (fmap (\(begin, _) -> (begin, rawEnd)) value, ()))
+              putMVar writeEnded ())
       application request respond
         | lookup "ticket" (Wai.queryString request) == Just (Just (Text.encodeUtf8 slow.ticket)) =
             observeRawWebSocket ctx.deployedApplication write (putMVar ownerEnded ()) request respond
@@ -2065,9 +2143,46 @@ assertBlockedNativeWrite withListener runPeer ctx = do
         count `shouldSatisfy` (> 0)
         count `shouldSatisfy` (< 1024)
         (ended - started) `shouldSatisfy` (< 1500000000)
-        next >>= assertChangeIdentity record project.id)
+        next >>= assertChangeIdentity record project.id
+        received <- getMonotonicTimeNSec
+        raw <- readIORef rawTimes
+        qualificationMetric "native-blocked-peer" (object ["dispatch_ms" .= milliseconds started ended, "healthy_observed_ms" .= milliseconds started received, "raw_write_lifetime_ms" .= fmap (uncurry milliseconds) raw, "write_budget_ms" .= (250 :: Int), "work_budget_ms" .= (750 :: Int), "cleanup_budget_ms" .= (250 :: Int), "completed_64KiB_chunks_before_abort" .= count]))
         `finally` void (tryPutMVar release ())
       >> declaredPhase "nonreading peer closed" (wait slowWorker)
+
+milliseconds :: Integral a => a -> a -> Double
+milliseconds start end = fromIntegral (end - start) / 1000000
+
+qualificationMetric :: String -> Value -> IO ()
+qualificationMetric name value = do
+  enabled <- lookupEnv "HMEM_TEST_SESSION_DIAGNOSTICS"
+  when (enabled == Just "1") $ hPutStrLn stderr ("change_stream_qualification " <> T.unpack (Text.decodeUtf8 (LBS.toStrict (encode (object ["name" .= name, "observation" .= value])))))
+
+qualificationSqlStats :: Pool Hasql.Connection -> IO Value
+qualificationSqlStats pool = do
+  enabled <- lookupEnv "HMEM_TEST_SESSION_DIAGNOSTICS"
+  if enabled /= Just "1" then pure Null else do
+    available <- runSession pool $ Session.statement () $ Statement.Statement "SELECT current_setting('shared_preload_libraries') LIKE '%pg_stat_statements%'" Enc.noParams (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True
+    if not available then do
+      path <- lookupEnv "HMEM_TEST_SANDBOX_DB_LOG" >>= maybe (fail "missing owned PostgreSQL log") pure
+      size <- getFileSize path
+      size `shouldSatisfy` (<= 134217728)
+      rows <- T.lines . Text.decodeUtf8 <$> BS.readFile path
+      let statements = filter (\line -> "LOG:" `T.isInfixOf` line && ("statement:" `T.isInfixOf` line || "execute " `T.isInfixOf` line)) rows
+          count predicate = length (filter predicate statements)
+      pure $ object ["method" .= ("observed parameter-suppressed statement log" :: Text), "log_bytes" .= size,
+        "scope_scan_calls" .= count (T.isInfixOf "SELECT scope,workspace_id FROM"),
+        "authorization_calls" .= count (\line -> "SELECT" `T.isInfixOf` line && "workspace_memberships" `T.isInfixOf` line),
+        "snapshot_insert_calls" .= count (T.isInfixOf "INSERT INTO change_stream_snapshot_items")]
+    else do
+      runSession pool $ Session.sql "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
+      raw <- runSession pool $ Session.statement () $ Statement.Statement
+        "SELECT json_build_object('scope_scan_calls',coalesce(sum(calls) FILTER (WHERE query LIKE 'SELECT scope,workspace_id FROM%'),0),'authorization_calls',coalesce(sum(calls) FILTER (WHERE query ILIKE '%workspace_memberships%' AND query ILIKE 'SELECT%'),0),'snapshot_insert_calls',coalesce(sum(calls) FILTER (WHERE query ILIKE 'INSERT INTO change_stream_snapshot_items%'),0),'snapshot_insert_exec_ms',coalesce(sum(total_exec_time) FILTER (WHERE query ILIKE 'INSERT INTO change_stream_snapshot_items%'),0))::text FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())"
+        Enc.noParams (Dec.singleRow (Dec.column (Dec.nonNullable Dec.text))) True
+      maybe (fail "invalid qualification SQL counters") pure (decode (LBS.fromStrict (Text.encodeUtf8 raw)))
+
+qualificationLockWait :: Statement.Statement () Bool
+qualificationLockWait = Statement.Statement "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='change-stream-qualification-snapshot' AND wait_event_type='Lock')" Enc.noParams (Dec.singleRow (Dec.column (Dec.nonNullable Dec.bool))) True
 
 runPlainPeer :: Int -> Text -> (WS.Connection -> IO ()) -> IO ()
 runPlainPeer port ticket = WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket)

@@ -1,14 +1,17 @@
+{-# LANGUAGE TemplateHaskell #-}
+
 module HMem.Server.ChangeStreamSpec (spec) where
 
-import Control.Concurrent (Chan, MVar, newChan, newEmptyMVar, putMVar, readChan, takeMVar, threadDelay, throwTo, tryTakeMVar, writeChan)
-import Control.Concurrent.Async (Async, async, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch, withAsync)
-import Control.Exception (AsyncException(..), MaskingState(..), SomeException, bracket, catch, finally, fromException, getMaskingState, mask, throwIO, try)
-import Control.Monad (forM, forM_, replicateM_, replicateM, forever, void)
+import Control.Concurrent (Chan, MVar, myThreadId, newChan, newEmptyMVar, putMVar, readChan, takeMVar, threadDelay, throwTo, tryPutMVar, tryTakeMVar, writeChan)
+import Control.Concurrent.Async (Async, AsyncCancelled(..), async, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch, withAsync)
+import Control.Exception (AsyncException(..), IOException, MaskingState(..), SomeAsyncException, SomeException, bracket, catch, finally, fromException, getMaskingState, mask, throwIO, toException, try)
+import Control.Monad (forM, forM_, replicateM_, replicateM, forever, void, when)
 import Data.Aeson (FromJSON, Value(..), decode, encode, object, toJSON, (.=))
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.FileEmbed (embedFile, makeRelativeToProject)
 import Data.Maybe (isJust)
 import Data.List (sort)
 import Data.Pool (destroyAllResources)
@@ -26,11 +29,18 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import Network.HTTP.Types (Header, methodGet, methodPost, parseQuery, status200)
 import Network.HTTP.Types qualified as HTTP
+import Network.Socket qualified as Socket
+import Network.TLS qualified as TLS
+import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Network.Wai (Application, defaultRequest)
 import Network.Wai qualified as Wai
-import Network.Wai.Handler.Warp (testWithApplication)
+import Network.Wai.Handler.Warp (defaultSettings, defaultShouldDisplayException, openFreePort)
+import Network.Wai.Handler.Warp.Internal (Settings(..), socketConnection)
+import Network.Wai.Handler.WarpTLS (runTLSSocket, tlsSettingsMemory)
+import Network.Wai.Internal (Response(..))
 import Network.Wai.Test qualified as WaiTest
 import Network.WebSockets qualified as WS
+import Network.WebSockets.Stream qualified as WSStream
 import System.Timeout (timeout)
 import System.IO (hPutStrLn, stderr)
 import Test.Hspec
@@ -54,7 +64,8 @@ import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), cre
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.ChangeStream (ChangeStreamWorker, ChangeStreamMaintenance(..), startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker, readChangeStreamMaintenance, retentionScopeTurn, retentionDue)
 import HMem.Server.Snapshot (materializeSnapshot, materializeSnapshotWithProfile)
-import HMem.Server.WebSocket (newWSState, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
+import HMem.Server.WebSocket (WSState, newWSState, withNativeWebSocketSettings, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
+import HMem.Server.WebSocketTransport (newNativeTransport, runPlainSocket, runPlainSocketWith, withNativeTransportSettings)
 import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateTask(..), CreateWorkspaceGroup(..), Project(..), Task(..), SnapshotProfile(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
 
 spec :: Spec
@@ -166,7 +177,7 @@ spec = describe "canonical change-stream loopback" $ do
       issuedResponse <- apiRequest ctx.deployedApplication methodPost endpoint (cookies<>[("X-CSRF-Token","home-csrf")]) ""
       responseStatus issuedResponse `shouldBe` status200
       issued <- decodedTicket issuedResponse
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         withActivityFrames port issued.ticket $ \frames -> do
           readFrame frames `shouldReturn` ready
           identifier <- UUIDV4.nextRandom
@@ -269,7 +280,7 @@ spec = describe "canonical change-stream loopback" $ do
           projection=apiRequest ctx.deployedApplication methodGet ("/api/v1/session-activity?workspace_id="<>Text.encodeUtf8 (UUID.toText workspace.id)) (authHeaders memberToken.rawToken) "" >>= decodeResponse @Value
       permitted <- issue memberToken.rawToken
       denied <- issue outsideToken.rawToken
-      testWithApplication (pure ctx.deployedApplication) $ \port ->
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port ->
         withActivityFrames port permitted.ticket $ \memberFrames -> withActivityFrames port denied.ticket $ \outsideFrames -> do
           receive memberFrames `shouldReturn` ready
           receive outsideFrames `shouldReturn` ready
@@ -308,7 +319,7 @@ spec = describe "canonical change-stream loopback" $ do
           dispatchAfter before=listOutboxAfter ctx.deployedEnv.pool targetScope before 1000 >>= dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState
           assertHint frame=frame `shouldBe` object ["type" .= ("session_activity_changed" :: Text),"schema_version" .= (1::Int),"workspace_id" .= target.id]
       deniedTicket <- ticket outsider
-      testWithApplication (pure ctx.deployedApplication) $ \port ->
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port ->
         bracket (startOneFrameClient port deniedTicket.ticket) (\client -> joinClient "denied activity client" client.clientWorker) $ \denied -> do
           frameType <$> awaitFrame denied.clientInitial `shouldReturn` Just "checkpoint"
           let hinted :: IO a -> IO a
@@ -377,7 +388,7 @@ spec = describe "canonical change-stream loopback" $ do
       resume <- terminalResume ctx scope audience
       issued <- createCanonicalTicket ctx.deployedWSState (grantPrincipal user) scope resume
       otherTicket <- canonicalTicketFor ctx (grantPrincipal outsider) (WorkspaceScope other.id) (AuthenticatedAudience (UUID.toText outsider) outsider)
-      testWithApplication (pure ctx.deployedApplication) $ \port ->
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port ->
         bracket (startOneFrameClient port otherTicket.ticket) (\client -> joinClient "session other-scope client" client.clientWorker) $ \otherClient -> do
           frameType <$> awaitFrame otherClient.clientInitial `shouldReturn` Just "checkpoint"
           response <- post root (toJSON (AgentWire.CreateSessionRequest identifier "jsonl" "Test session work" Nothing Nothing initial.id))
@@ -505,7 +516,7 @@ spec = describe "canonical change-stream loopback" $ do
         responseStatus rejected `shouldBe` HTTP.status400
         body <- decodeResponse rejected :: IO Value
         jsonField "error" body `shouldBe` Just (String "invalid_bot_identity")
-      testWithApplication (pure ctx.localApplication) $ \port -> do
+      withWebSocketApplication ctx.localWSState ctx.localApplication $ \port -> do
         frames <- newChan
         let receive phase = declaredPhase phase (readChan frames >>= decodeFrame)
             start = asyncWithUnmask $ \unmask -> unmask $
@@ -585,22 +596,185 @@ spec = describe "canonical change-stream loopback" $ do
           timeout 2000000 (takeMVar entered) `shouldReturn` Just ()
           joined worker
 
-  it "rethrows cancellation from a deterministically blocked canonical dispatch" $ do
-    entered <- newEmptyMVar
-    cleanup <- newEmptyMVar
-    blocker <- newEmptyMVar
-    worker <- async $ handleCanonicalDispatchFailure (putMVar cleanup ()) $ do
-      putMVar entered ()
-      takeMVar blocker
-    takeMVar entered
-    throwTo (asyncThreadId worker) ThreadKilled
-    result <- waitCatch worker
-    case result of
-      Left err -> case fromException err :: Maybe AsyncException of
-        Just _ -> pure ()
-        Nothing -> expectationFailure "blocked canonical dispatch raised a synchronous exception"
-      Right () -> expectationFailure "blocked canonical dispatch swallowed cancellation"
-    tryTakeMVar cleanup `shouldReturn` Nothing
+  it "rethrows cancellation from a deterministically blocked canonical dispatch" $
+    forM_ [toException ThreadKilled, toException AsyncCancelled] $ \cancellation -> do
+      entered <- newEmptyMVar
+      cleanup <- newEmptyMVar
+      blocker <- newEmptyMVar
+      worker <- async $ handleCanonicalDispatchFailure (putMVar cleanup ()) $ do
+        putMVar entered ()
+        takeMVar blocker
+      takeMVar entered
+      throwTo (asyncThreadId worker) cancellation
+      result <- waitCatch worker
+      case result of
+        Left err -> case fromException err :: Maybe SomeAsyncException of
+          Just _ -> pure ()
+          Nothing -> expectationFailure "blocked canonical dispatch raised a synchronous exception"
+        Right () -> expectationFailure "blocked canonical dispatch swallowed cancellation"
+      tryTakeMVar cleanup `shouldReturn` Nothing
+
+  it "closes the accepted socket without allocating Warp resources after a failed fork hook" $ do
+    transport <- newNativeTransport
+    acceptedByHook <- newEmptyMVar
+    spawned <- newEmptyMVar
+    allowChild <- newEmptyMVar
+    connectionAllocated <- newEmptyMVar
+    let settings = defaultSettings
+          { settingsAccept = \listener -> do
+              accepted <- Socket.accept listener
+              putMVar acceptedByHook (fst accepted)
+              pure accepted
+          , settingsFork = \launch -> do
+              child <- asyncWithUnmask $ \unmask -> takeMVar allowChild >> launch unmask
+              putMVar spawned child
+              ioError (userError "injected original Warp fork failure")
+          }
+    bracket openFreePort (Socket.close . snd) $ \(port, listener) ->
+      bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \peer -> do
+        Socket.connect peer (Socket.SockAddrInet (fromIntegral port) (Socket.tupleToHostAddress (127,0,0,1)))
+        withNativeTransportSettings transport settings $ \native -> do
+          let allocate socket = putMVar connectionAllocated () >> socketConnection native socket
+              app _ respond = respond (Wai.responseLBS status200 [] "")
+          failure <- try @IOException $ runPlainSocketWith allocate native listener app
+          accepted <- declaredPhase "original hook accepted socket" (takeMVar acceptedByHook)
+          child <- declaredPhase "fork hook spawned delayed child" (takeMVar spawned)
+          flip finally (void (tryPutMVar allowChild ()) >> Socket.close peer >> joinClient "delayed fork child" child) $ do
+            failure `shouldSatisfy` either (const True) (const False)
+            closed <- try @IOException (Socket.getSocketName accepted)
+            closed `shouldSatisfy` either (const True) (const False)
+            putMVar allowChild ()
+            declaredPhase "cancelled startup child exited" (wait child)
+            tryTakeMVar connectionAllocated `shouldReturn` Nothing
+
+  it "retires an idle socket after a PostgreSQL authorization timeout and allows bearer reconnect" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "canonical-reauthorization-failure"
+      subscriber <- createDeployedSandboxUser ctx.deployedEnv False False
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+        (Auth.UpsertWorkspaceMembership subscriber Auth.WorkspaceRoleRead) Nothing
+      let principal = grantPrincipal subscriber
+          scope = WorkspaceScope workspace.id
+          audience = AuthenticatedAudience (UUID.toText subscriber) subscriber
+          trusted = principal { actorId = "healthy-peer", authority = PrincipalSyntheticLocalSuperadmin }
+          trustedAudience = TrustedAudience "local:healthy-peer"
+          connectionString = ctx.deployedEnv.testDb.testDbConnStr
+      resume <- terminalResume ctx scope audience
+      ticket <- createCanonicalTicket ctx.deployedWSState principal scope resume
+      healthy <- canonicalTicketFor ctx trusted scope trustedAudience
+      entered <- newEmptyMVar
+      release <- newEmptyMVar
+      initial <- newEmptyMVar
+      disconnected <- newEmptyMVar
+      let holdMemberships pool = DBPool.withConn pool $ \connection ->
+            (do
+              result <- Session.run (Session.sql "BEGIN; LOCK TABLE workspace_memberships IN ACCESS EXCLUSIVE MODE") connection
+              either (fail . show) pure result
+              putMVar entered ()
+              takeMVar release)
+            `finally` void (Session.run (Session.sql "ROLLBACK") connection)
+          failingPeer port =
+            WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket.ticket) $ \conn -> do
+              WS.receiveData conn >>= putMVar initial
+              result <- try @WS.ConnectionException (WS.receiveData conn :: IO Text)
+              putMVar disconnected (either (const True) (const False) result)
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port ->
+        withAsync (failingPeer port) $ \failed ->
+          withActivityFrames port healthy.ticket $ \healthyFrames -> do
+              let awaitCanonical frames = declaredPhase "canonical peer frame" (readChan frames >>= decodeFrame)
+              frameType <$> awaitFrame initial `shouldReturn` Just "checkpoint"
+              frameType <$> awaitCanonical healthyFrames `shouldReturn` Just "checkpoint"
+              bracket (DBPool.createPool connectionString 1 5.0 30000) destroyAllResources $ \holderPool ->
+                bracket (DBPool.createPool connectionString 1 5.0 100) destroyAllResources $ \failurePool ->
+                  withAsync (holdMemberships holderPool) $ \holder -> do
+                    declaredPhase "membership lock acquisition" (takeMVar entered)
+                    Auth.hasWorkspaceRole failurePool (Just principal) workspace.id Auth.WorkspaceRoleRead
+                      `shouldThrow` (\case DBPool.DBStatementTimeout -> True; _ -> False)
+                    declaredPhase "failed reauthorization" $
+                      reauthorizeCanonicalConnections failurePool ctx.deployedWSState
+                    declaredPhase "retired peer disconnect" (takeMVar disconnected) `shouldReturn` True
+                    wait failed
+                    putMVar release ()
+                    wait holder
+              validity <- validateCanonicalResumeToken ctx.deployedEnv.pool scope audience resume
+              validity `shouldSatisfy` either (const False) (const True)
+              reconnect <- createCanonicalTicket ctx.deployedWSState principal scope resume
+              withActivityFrames port reconnect.ticket $ \reconnectedFrames -> do
+                frameType <$> awaitCanonical reconnectedFrames `shouldReturn` Just "checkpoint"
+                project <- Project.createProject ctx.deployedEnv.pool
+                  (CreateProject workspace.id Nothing "visible after failed authorization" Nothing Nothing Nothing)
+                record <- latestOutbox ctx scope
+                dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [record]
+                awaitCanonical reconnectedFrames >>= assertChangeIdentity record project.id
+                awaitCanonical healthyFrames >>= assertChangeIdentity record project.id
+
+  it "retires the canonical owner when expiry output throws" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      armed <- newIORef False
+      attempted <- newEmptyMVar
+      ownerEnded <- newEmptyMVar
+      let write send bytes = do
+            failWrite <- readIORef armed
+            if failWrite then putMVar attempted () >> ioError (userError "injected canonical output failure")
+                         else send bytes
+          app = observeRawWebSocket ctx.deployedApplication write (putMVar ownerEnded ())
+      withExpiringCanonicalPeer ctx app $ \runPeer -> runPeer $ \conn -> do
+        let initial = declaredPhase "initial expiry checkpoint" (WS.receiveData conn >>= decodeFrame)
+        frameType <$> initial `shouldReturn` Just "checkpoint"
+        atomicModifyIORef' armed (const (True, ()))
+        declaredPhase "expiry write reached the transport" (takeMVar attempted)
+        result <- declaredPhase "failed expiry write disconnected peer" $
+          try @WS.ConnectionException (WS.receiveData conn :: IO Text)
+        result `shouldSatisfy` either (const True) (const False)
+        declaredPhase "failed expiry owner finalized" (takeMVar ownerEnded)
+
+  it "interrupts the exact TLS socket after canonical output fails with the peer still reading" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      armed <- newIORef False
+      attempted <- newEmptyMVar
+      ownerEnded <- newEmptyMVar
+      let write send bytes = do
+            failWrite <- readIORef armed
+            if failWrite then putMVar attempted () >> ioError (userError "injected TLS output failure")
+                         else send bytes
+          app = observeRawWebSocket ctx.deployedApplication write (putMVar ownerEnded ())
+      withTlsWebSocketApplication ctx.deployedWSState app $ \port -> do
+        ticket <- expiringCanonicalTicket ctx
+        runTlsPeer port ticket.ticket $ \conn -> do
+          let initial = declaredPhase "initial TLS expiry checkpoint" (WS.receiveData conn >>= decodeFrame)
+          frameType <$> initial `shouldReturn` Just "checkpoint"
+          atomicModifyIORef' armed (const (True, ()))
+          declaredPhase "TLS expiry write reached the transport" (takeMVar attempted)
+          ended <- declaredPhase "native TLS abort disconnected peer" $
+            (False <$ (WS.receiveData conn :: IO Text))
+              `catch` (\(_ :: WS.ConnectionException) -> pure True)
+              `catch` (\(_ :: TLS.TLSException) -> pure True)
+          ended `shouldBe` True
+          declaredPhase "failed TLS expiry owner finalized" (takeMVar ownerEnded)
+
+  it "joins the expiry writer when its canonical peer disconnects during terminal output" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      armed <- newIORef False
+      writing <- newEmptyMVar
+      release <- newEmptyMVar
+      writerEnded <- newEmptyMVar
+      ownerEnded <- newEmptyMVar
+      let write send bytes = do
+            holdWrite <- readIORef armed
+            if holdWrite
+              then (putMVar writing () >> takeMVar release) `finally` putMVar writerEnded ()
+              else send bytes
+          app = observeRawWebSocket ctx.deployedApplication write (putMVar ownerEnded ())
+      withExpiringCanonicalPeer ctx app $ \runPeer ->
+        (do
+          runPeer $ \conn -> do
+            let initial = declaredPhase "initial expiry checkpoint" (WS.receiveData conn >>= decodeFrame)
+            frameType <$> initial `shouldReturn` Just "checkpoint"
+            atomicModifyIORef' armed (const (True, ()))
+            declaredPhase "expiry writer entered before peer disconnect" (takeMVar writing)
+          declaredPhase "disconnected expiry writer joined" (takeMVar writerEnded)
+          declaredPhase "disconnected expiry owner finalized" (takeMVar ownerEnded))
+          `finally` void (tryPutMVar release ())
 
   it "never materializes global workspace-group membership rows" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -621,7 +795,7 @@ spec = describe "canonical change-stream loopback" $ do
       resume <- terminalLocalResume ctx scope audience
       issued <- createCanonicalTicket ctx.localWSState principal scope resume
       received <- newEmptyMVar
-      testWithApplication (pure ctx.localApplication) $ \port -> do
+      withWebSocketApplication ctx.localWSState ctx.localApplication $ \port -> do
         client <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket issued.ticket) $ \conn -> do
           WS.receiveData conn >>= putMVar received
           WS.sendClose conn ("done" :: Text)) `catch` \(_ :: WS.ConnectionException) -> pure ()
@@ -696,7 +870,7 @@ spec = describe "canonical change-stream loopback" $ do
       before <- do
         records <- listOutboxAfter ctx.deployedEnv.pool scope 0 100
         pure $ maybe 0 (.outboxCursor) (safeLast records)
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         firstClient <- startOneFrameClient port firstTicket.ticket
         secondClient <- startOneFrameClient port secondTicket.ticket
         unrelatedClient <- startOneFrameClient port unrelatedTicket.ticket
@@ -746,7 +920,7 @@ spec = describe "canonical change-stream loopback" $ do
       issued <- createCanonicalTicket ctx.deployedWSState principal scope replayResume
       initial <- newEmptyMVar
       live <- newEmptyMVar
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         client <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket issued.ticket) $ \conn -> do
           first <- WS.receiveData conn :: IO Text
           putMVar initial first
@@ -841,7 +1015,7 @@ spec = describe "canonical change-stream loopback" $ do
       durableRecord <- latestOutbox ctx (WorkspaceScope workspace.id)
       replayed <- newEmptyMVar
       checkpointed <- newEmptyMVar
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         client <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket.ticket) $ \conn -> do
           WS.receiveData conn >>= putMVar replayed
           WS.receiveData conn >>= putMVar checkpointed
@@ -877,7 +1051,7 @@ spec = describe "canonical change-stream loopback" $ do
       adminTicket <- canonicalTicketFor ctx (grantPrincipal adminId) (WorkspaceScope workspaceA.id) (workspaceAudience adminId)
       unrelatedTicket <- canonicalTicketFor ctx (grantPrincipal unrelatedId) (WorkspaceScope workspaceB.id) (workspaceAudience unrelatedId)
       globalTicket <- canonicalTicketFor ctx (grantPrincipal superadminId) GlobalScope (workspaceAudience superadminId)
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         memberClient <- startOneFrameClient port memberTicket.ticket
         adminClient <- startOneFrameClient port adminTicket.ticket
         unrelatedClient <- startOneFrameClient port unrelatedTicket.ticket
@@ -930,7 +1104,7 @@ spec = describe "canonical change-stream loopback" $ do
       issued <- createCanonicalTicket ctx.deployedWSState principal scope resume
       initial <- newEmptyMVar
       observed <- newEmptyMVar
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         client <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket issued.ticket) $ \conn -> do
           WS.receiveData conn >>= putMVar initial
           WS.receiveData conn >>= putMVar observed
@@ -967,7 +1141,7 @@ spec = describe "canonical change-stream loopback" $ do
       initial <- newEmptyMVar
       permitRead <- newEmptyMVar
       revoked <- newEmptyMVar
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         client <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket issued.ticket) $ \conn -> do
           WS.receiveData conn >>= putMVar initial
           takeMVar permitRead
@@ -993,7 +1167,7 @@ spec = describe "canonical change-stream loopback" $ do
       let principal = grantPrincipal subscriberId
           scope = WorkspaceScope workspace.id
           audience = AuthenticatedAudience (UUID.toText subscriberId) subscriberId
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         resume <- terminalResume ctx scope audience
         issued <- createCanonicalTicketWithTtl ctx.deployedWSState 0.3 principal scope resume
         bracket (startOneFrameClient port issued.ticket) (\client -> joinClient "expiry client" client.clientWorker) $ \client -> do
@@ -1016,7 +1190,7 @@ spec = describe "canonical change-stream loopback" $ do
       let principal = grantPrincipal subscriberId
           scope = WorkspaceScope workspace.id
           audience = AuthenticatedAudience (UUID.toText subscriberId) subscriberId
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         -- Start listening before the original durable lifetime begins. Real
         -- validation ages the bearer; ticket exchange preserves its expiry.
         resume <- terminalResumeWithTtl ctx 2.0 scope audience
@@ -1050,7 +1224,7 @@ spec = describe "canonical change-stream loopback" $ do
       initial <- newEmptyMVar
       permitGrant <- newEmptyMVar
       granted <- newEmptyMVar
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         client <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket issued.ticket) $ \conn -> do
           WS.receiveData conn >>= putMVar initial
           takeMVar permitGrant
@@ -1085,7 +1259,7 @@ spec = describe "canonical change-stream loopback" $ do
       retainedInitial <- newEmptyMVar
       retainedRevoke <- newEmptyMVar
       retainedLive <- newEmptyMVar
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         retainedClient <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket retainedTicket.ticket) $ \conn -> do
           WS.receiveData conn >>= putMVar retainedInitial
           WS.receiveData conn >>= putMVar retainedRevoke
@@ -1118,7 +1292,7 @@ spec = describe "canonical change-stream loopback" $ do
       resume <- terminalResume ctx scope audience
       firstTicket <- createCanonicalTicket ctx.deployedWSState principal scope resume
       firstFrame <- newEmptyMVar
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         first <- async $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket firstTicket.ticket) $ \conn -> do
           WS.receiveData conn >>= putMVar firstFrame
           WS.sendClose conn ("done" :: Text)) `catch` \(_ :: WS.ConnectionException) -> pure ()
@@ -1165,7 +1339,7 @@ spec = describe "canonical change-stream loopback" $ do
       initial <- newEmptyMVar
       liveFrames <- newChan
       expectedReplay <- newIORef Nothing
-      testWithApplication (pure ctx.deployedApplication) $ \port -> do
+      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
         bracket (asyncWithUnmask $ \unmask -> unmask $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket.ticket) $ \conn -> do
           WS.receiveData conn >>= putMVar initial
           let receiveReplay = do
@@ -1272,6 +1446,93 @@ canonicalTicketFor :: DeployedSandboxApp -> Principal -> ChangeScope -> ChangeAu
 canonicalTicketFor ctx principal scope audience = do
   resume <- terminalResume ctx scope audience
   createCanonicalTicket ctx.deployedWSState principal scope resume
+
+observeRawWebSocket :: Application -> ((BS.ByteString -> IO ()) -> BS.ByteString -> IO ()) -> IO () -> Application
+observeRawWebSocket application write finished request respond =
+  application request $ \case
+    ResponseRaw serve fallback ->
+      respond $ ResponseRaw (\source send -> serve source (write send) `finally` finished) fallback
+    response -> respond response
+
+withWebSocketApplication :: WSState -> Application -> (Int -> IO a) -> IO a
+withWebSocketApplication state = withSocketApplication state True runPlainSocket
+
+withTlsWebSocketApplication :: WSState -> Application -> (Int -> IO ()) -> IO ()
+withTlsWebSocketApplication state = withSocketApplication state False (runTLSSocket (tlsSettingsMemory cert key))
+  where
+    cert = $(makeRelativeToProject "test/fixtures/change-stream/loopback-test-cert.pem" >>= embedFile)
+    key = $(makeRelativeToProject "test/fixtures/change-stream/loopback-test-key.pem" >>= embedFile)
+
+withSocketApplication
+  :: WSState -> Bool -> (Settings -> Socket.Socket -> Application -> IO ()) -> Application -> (Int -> IO a) -> IO a
+withSocketApplication state forwardApplicationFailures runListener application use =
+  bracket openFreePort (Socket.close . snd) $ \(port, listener) -> do
+    testOwner <- myThreadId
+    ready <- newEmptyMVar
+    stopping <- newIORef False
+    let reportFailure
+          | forwardApplicationFailures = \_ failure -> do
+              closing <- readIORef stopping
+              when (not closing && defaultShouldDisplayException failure) (throwTo testOwner failure)
+          | otherwise = settingsOnException defaultSettings
+        settings = defaultSettings
+          { settingsBeforeMainLoop = putMVar ready ()
+          , settingsOnException = reportFailure
+          }
+        run = withNativeWebSocketSettings state settings $ \native -> runListener native listener application
+    withAsync run $ \server -> mask $ \restore -> do
+      primary <- try @SomeException $ restore (declaredPhase "loopback listener" (takeMVar ready) >> use port)
+      cleanup <- try @SomeException $ do
+        atomicModifyIORef' stopping (const (True, ()))
+        Socket.close listener
+        declaredPhase "loopback listener join" (wait server)
+      case primary of
+        Left failure -> do
+          case cleanup of
+            Left cleanupFailure -> hPutStrLn stderr ("loopback fixture cleanup failed: " <> show cleanupFailure)
+            Right () -> pure ()
+          throwIO failure
+        Right result -> either throwIO (const (pure result)) cleanup
+
+runTlsPeer :: Int -> Text -> (WS.Connection -> IO ()) -> IO ()
+runTlsPeer port ticket use =
+  bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \socket -> do
+    Socket.connect socket (Socket.SockAddrInet (fromIntegral port) (Socket.tupleToHostAddress (127,0,0,1)))
+    let defaults = TLS.defaultParamsClient "localhost" ""
+        -- This isolated peer intentionally trusts the embedded loopback
+        -- fixture; production TLS verification is not used or altered.
+        params = defaults
+          { TLS.clientHooks = defaults.clientHooks { TLS.onServerCertificate = \_ _ _ _ -> pure [] }
+          , TLS.clientSupported = defaults.clientSupported { TLS.supportedCiphers = ciphersuite_default }
+          }
+    context <- TLS.contextNew socket params
+    TLS.handshake context
+    let receive = do
+          bytes <- TLS.recvData context
+          pure (if BS.null bytes then Nothing else Just bytes)
+        send = mapM_ (TLS.sendData context)
+    stream <- WSStream.makeStream receive send
+    WS.runClientWithStream stream "localhost" ("/api/v1/ws?ticket=" <> showTicket ticket)
+      WS.defaultConnectionOptions [] use
+
+withExpiringCanonicalPeer
+  :: DeployedSandboxApp -> Application -> (((WS.Connection -> IO ()) -> IO ()) -> IO ()) -> IO ()
+withExpiringCanonicalPeer ctx application use =
+  withWebSocketApplication ctx.deployedWSState application $ \port -> do
+    ticket <- expiringCanonicalTicket ctx
+    use (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket.ticket))
+
+expiringCanonicalTicket :: DeployedSandboxApp -> IO WebSocketTicketResponse
+expiringCanonicalTicket ctx = do
+  workspace <- createTestWorkspace ctx.deployedEnv "canonical-expiry-transport"
+  subscriber <- createDeployedSandboxUser ctx.deployedEnv False False
+  _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+    (Auth.UpsertWorkspaceMembership subscriber Auth.WorkspaceRoleRead) Nothing
+  let scope = WorkspaceScope workspace.id
+      principal = grantPrincipal subscriber
+      audience = AuthenticatedAudience (UUID.toText subscriber) subscriber
+  resume <- terminalResume ctx scope audience
+  createCanonicalTicketWithTtl ctx.deployedWSState 2 principal scope resume
 
 data OneFrameClient = OneFrameClient
   { clientWorker :: !(Async ())

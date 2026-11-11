@@ -8,6 +8,8 @@ category:            Web
 data-files:
   - migrations/*.sql
 extra-source-files:
+  - test/fixtures/change-stream/loopback-test-cert.pem
+  - test/fixtures/change-stream/loopback-test-key.pem
   - test/fixtures/document-preview/first-frame.mp4
   - test/fixtures/embedding-gpu-viability/foundation-contract-v1.json
   - test/fixtures/embedding-gpu-viability/parity-probes-v1.json
@@ -70,6 +72,8 @@ when:
 
 library:
   source-dirs: src
+  dependencies:
+    - streaming-commons
 
 executables:
   hmem-server:
@@ -160,6 +164,7 @@ tests:
       - async
       - process
       - optparse-applicative
+      - tls
 
 default-extensions:
   - OverloadedStrings

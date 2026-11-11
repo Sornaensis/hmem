@@ -14,6 +14,8 @@ maintainer:     hmem contributors
 license:        MPL-2.0
 build-type:     Simple
 extra-source-files:
+    test/fixtures/change-stream/loopback-test-cert.pem
+    test/fixtures/change-stream/loopback-test-key.pem
     test/fixtures/document-preview/first-frame.mp4
     test/fixtures/embedding-gpu-viability/foundation-contract-v1.json
     test/fixtures/embedding-gpu-viability/parity-probes-v1.json
@@ -132,6 +134,7 @@ library
       HMem.Server.Snapshot
       HMem.Server.Static
       HMem.Server.WebSocket
+      HMem.Server.WebSocketTransport
   other-modules:
       Paths_hmem_server
   hs-source-dirs:
@@ -189,6 +192,7 @@ library
     , servant-openapi3
     , servant-server >=0.19
     , stm
+    , streaming-commons
     , text
     , time
     , uuid
@@ -634,6 +638,7 @@ test-suite hmem-server-test
     , stm
     , text
     , time
+    , tls
     , uuid
     , wai
     , wai-cors

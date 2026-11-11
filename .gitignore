@@ -55,6 +55,8 @@ Desktop.ini
 .envrc
 *.pem
 *.key
+!/hmem-server/test/fixtures/change-stream/loopback-test-cert.pem
+!/hmem-server/test/fixtures/change-stream/loopback-test-key.pem
 
 # Workspace marker
 .hmem.workspace

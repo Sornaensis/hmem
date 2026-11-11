@@ -10,7 +10,7 @@ import Control.Exception (SomeException, bracket, catch, finally, fromException,
 import Control.Monad (void, when)
 import Data.Pool (Pool, destroyAllResources)
 import GHC.Clock (getMonotonicTimeNSec)
-import Network.Wai.Handler.Warp (defaultSettings, runSettings, setHost, setPort, setTimeout, setGracefulShutdownTimeout)
+import Network.Wai.Handler.Warp (defaultSettings, setHost, setPort, setTimeout, setGracefulShutdownTimeout)
 import Network.Wai.Handler.WarpTLS (runTLS, tlsSettings)
 import Options.Applicative
 import System.Directory (createDirectoryIfMissing)
@@ -53,7 +53,7 @@ import HMem.Server.Embedding.Worker
 import HMem.Server.LogRotation (preRotateLogFileIfNeeded)
 import HMem.Server.Logging (newLogger, parseLogLevel, logInfo, logWarn, jsonRequestLogger)
 import HMem.Server.Static (resolveStaticDir)
-import HMem.Server.WebSocket (newWSState)
+import HMem.Server.WebSocket (newWSState, runPlainWithNativeWebSockets, withNativeWebSocketSettings)
 
 ------------------------------------------------------------------------
 -- CLI
@@ -184,7 +184,8 @@ runDevMode opts = do
 
     (bracket (newPrefixRegistry pool) closePrefixRegistry $ \prefixes -> do
       app <- mkAppWithPrefixProofs prefixes Nothing Config.defaultConfig.changeStream requestLogger devAuth devCors devRateLimit pool tracker wsState mStaticDir pgvec
-      bracket (startSessionReaper pool) stopSessionReaper (\_ -> runSettings settings app)) `finally` shutdown
+      bracket (startSessionReaper pool) stopSessionReaper $ \_ ->
+        runPlainWithNativeWebSockets wsState settings app) `finally` shutdown
 
 -- | Seed some sample data for dev mode so the UI has something to show.
 seedDevData :: Pool Hasql.Connection -> IO ()
@@ -427,11 +428,15 @@ runNormalMode opts = do
         documentAuthority <- newDocumentAuthority pool cfg.auth
           (Config.ServerConfig {Config.host=cfg.server.host,Config.port=port}) cfg.documentDelivery
         app <- mkAppWithDocumentAuthority documentAuthority (Just prefixes) (Just discovery) cfg.changeStream requestLogger cfg.auth cfg.cors cfg.rateLimit pool tracker wsState mStaticDir pgvec
-        let runServer = case (mTlsCert, mTlsKey) of
-              (Just cert, Just key) -> logInfo logger ("TLS enabled: cert=" <> T.pack cert <> " key=" <> T.pack key) >> runTLS (tlsSettings cert key) settings app
-              (Just _, Nothing) -> logWarn logger "--tls-cert provided without --tls-key; running plain HTTP" >> runSettings settings app
-              (Nothing, Just _) -> logWarn logger "--tls-key provided without --tls-cert; running plain HTTP" >> runSettings settings app
-              (Nothing, Nothing) -> logInfo logger "TLS disabled (no cert/key configured)" >> runSettings settings app
+        let runPlain = runPlainWithNativeWebSockets wsState settings app
+            runServer = case (mTlsCert, mTlsKey) of
+              (Just cert, Just key) -> do
+                logInfo logger ("TLS enabled: cert=" <> T.pack cert <> " key=" <> T.pack key)
+                withNativeWebSocketSettings wsState settings $ \native ->
+                  runTLS (tlsSettings cert key) native app
+              (Just _, Nothing) -> logWarn logger "--tls-cert provided without --tls-key; running plain HTTP" >> runPlain
+              (Nothing, Just _) -> logWarn logger "--tls-key provided without --tls-cert; running plain HTTP" >> runPlain
+              (Nothing, Nothing) -> logInfo logger "TLS disabled (no cert/key configured)" >> runPlain
         withPreviewListener documentAuthority cfg.rateLimit requestLogger $
           withPreviewWorker pool cfg.documentPreviews runServer
   bracket (startArchiveWorker pool)

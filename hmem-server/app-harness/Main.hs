@@ -30,7 +30,6 @@ import Hasql.Session qualified as S
 import Hasql.Statement qualified as St
 import Network.Wai.Handler.Warp
   ( defaultSettings
-  , runSettings
   , setBeforeMainLoop
   , setGracefulShutdownTimeout
   , setHost
@@ -64,7 +63,7 @@ import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker
 import HMem.Server.SessionReaper (startSessionReaper, stopSessionReaper)
 import HMem.Server.Archive.Worker (ArchiveWorker, startArchiveWorker, stopArchiveWorker)
 import HMem.Server.Logging (jsonRequestLogger, logInfo, logWarn, newLogger, parseLogLevel)
-import HMem.Server.WebSocket (newWSState)
+import HMem.Server.WebSocket (newWSState, runPlainWithNativeWebSockets)
 
 data HarnessMode
   = LocalMode
@@ -275,7 +274,7 @@ runHarnessEnvWith qualified opts env = do
                         pure ()
 
             (bracket (startSessionReaper env.pool) stopSessionReaper $ \_ -> withHarnessThread qualified
-                (try (runSettings settings app) >>= putMVar serverDone)
+                (try (runPlainWithNativeWebSockets wsState settings app) >>= putMVar serverDone)
                 (\serverThread -> case qualified of
                   Just controls -> do
                     -- The qualifier's caller owns stdin directly. A failed

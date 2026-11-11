@@ -2,6 +2,8 @@ module HMem.Server.WebSocket
   ( -- * State
     WSState
   , newWSState
+  , withNativeWebSocketSettings
+  , runPlainWithNativeWebSockets
   , connectionCount
   , WorkspaceSubscription(..)
   , createTicket
@@ -24,11 +26,11 @@ module HMem.Server.WebSocket
   , wsMiddleware
   ) where
 
-import Control.Concurrent (MVar, forkIO, newEmptyMVar, newMVar, takeMVar, tryPutMVar, withMVar, threadDelay)
-import Control.Concurrent.Async (withAsync)
+import Control.Concurrent (MVar, newMVar, withMVar, threadDelay)
+import Control.Concurrent.Async (waitSTM, withAsync)
 import Control.Concurrent.STM (TVar, newTVarIO, readTVarIO, modifyTVar')
 import Control.Concurrent.STM qualified as STM
-import Control.Exception (AsyncException, catch, finally, fromException, throwIO)
+import Control.Exception (SomeAsyncException, bracket, catch, finally, fromException, mask, onException, throwIO)
 import Control.Applicative ((<|>))
 import Data.Aeson (Value(..), encode, object, toJSON, (.=))
 import Data.Aeson.KeyMap qualified as KeyMap
@@ -49,6 +51,7 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUIDv4
 import Network.HTTP.Types.URI (parseQuery)
 import Network.Wai qualified as Wai
+import Network.Wai.Handler.Warp (Settings)
 import Network.Wai.Handler.WebSockets (websocketsOr)
 import Network.WebSockets qualified as WS
 import Control.Monad (forM, forM_, unless, void, when)
@@ -63,6 +66,7 @@ import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(
 import HMem.DB.Auth qualified as Auth
 import HMem.Server.Event (ChangeEvent(..), EntityType(..))
 import HMem.Server.BotIdentity (requestBotIdentity)
+import HMem.Server.WebSocketTransport (NativeTransport, abortNativeConnection, currentNativeConnection, newNativeTransport, runNativePlain, withNativeTransportSettings)
 import Network.HTTP.Types (hContentType, status400)
 import HMem.Types (WebSocketTicketResponse(..))
 
@@ -75,6 +79,7 @@ data WSState = WSState
   , canonicalConnections :: !(TVar (Map UUID CanonicalClient))
   , activityTickets :: !(TVar (Map Text ActivityTicket))
   , activityConnections :: !(TVar (Map UUID ActivityClient))
+  , nativeTransport :: !NativeTransport
   }
 
 data WSClient = WSClient
@@ -120,6 +125,7 @@ data CanonicalClient = CanonicalClient
   , canonicalClientResumeTtl :: !NominalDiffTime
   , canonicalClientExpiresAt :: !UTCTime
   , canonicalClientSendLock :: !(MVar ())
+  , canonicalClientRetired :: !(STM.TMVar ())
   }
 
 data ActivityTicket = ActivityTicket
@@ -140,7 +146,15 @@ data ActivityClient = ActivityClient
 
 -- | Create a fresh (empty) WebSocket state.
 newWSState :: IO WSState
-newWSState = WSState <$> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty
+newWSState =
+  WSState <$> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty
+    <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newNativeTransport
+
+withNativeWebSocketSettings :: WSState -> Settings -> (Settings -> IO a) -> IO a
+withNativeWebSocketSettings st = withNativeTransportSettings st.nativeTransport
+
+runPlainWithNativeWebSockets :: WSState -> Settings -> Wai.Application -> IO ()
+runPlainWithNativeWebSockets st = runNativePlain st.nativeTransport
 
 -- | Number of currently connected clients.
 connectionCount :: WSState -> IO Int
@@ -472,17 +486,29 @@ wsApp authCfg pool st pending = case ticketFromRequest (WS.pendingRequest pendin
     -- A canonical ticket is never routed through the legacy in-memory
     -- broadcast map.  It first drains the retained durable outbox and only
     -- then acknowledges catch-up with an opaque replacement token.
-    acceptCanonical canonicalTicket = do
-      conn <- WS.acceptRequest pending
-      connId <- addCanonicalConnection st conn canonicalTicket.canonicalPrincipal canonicalTicket.canonicalScope canonicalTicket.canonicalResumeToken canonicalTicket.canonicalResumeTtl canonicalTicket.canonicalResumeExpiresAt
-      mClient <- Map.lookup connId <$> readTVarIO st.canonicalConnections
-      forM_ mClient (advanceCanonicalClient pool st connId True)
-      stillLive <- Map.member connId <$> readTVarIO st.canonicalConnections
-      forM_ mClient $ \client -> when stillLive $ WS.withPingThread conn 30 (pure ()) $
-        do
-          finished <- newEmptyMVar
-          _ <- forkIO $ expireCanonicalConnection st connId client finished
-          sinkMessages conn `finally` (void (tryPutMVar finished ()) >> removeCanonicalConnection st connId)
+    acceptCanonical canonicalTicket = currentNativeConnection st.nativeTransport >>= \case
+      Nothing -> WS.rejectRequestWith pending WS.defaultRejectRequest
+        { WS.rejectCode=503, WS.rejectMessage="Service Unavailable", WS.rejectHeaders=[("Retry-After","1")] }
+      Just native -> do
+        conn <- WS.acceptRequest pending
+        bracket
+          (addCanonicalConnection st conn canonicalTicket.canonicalPrincipal canonicalTicket.canonicalScope
+            canonicalTicket.canonicalResumeToken canonicalTicket.canonicalResumeTtl canonicalTicket.canonicalResumeExpiresAt)
+          (removeCanonicalConnection st . fst) $ \(connId, client) -> do
+            let serve = do
+                  withLiveCanonicalClient st connId client $
+                    advanceCanonicalClientUnlocked pool st connId True client
+                  WS.withPingThread conn 30 (pure ()) $
+                    withAsync (expireCanonicalConnection st connId client) $ \_ ->
+                      sinkMessages conn
+                waitForRetirement driver = STM.atomically $
+                  (True <$ STM.readTMVar client.canonicalClientRetired)
+                    `STM.orElse` (False <$ waitSTM driver)
+            mask $ \restore -> withAsync (restore serve) $ \driver ->
+              (do
+                retired <- restore (waitForRetirement driver)
+                when retired $ abortNativeConnection native)
+              `onException` abortNativeConnection native
 
     acceptActivity activityTicket = do
       allowed <- activityPrincipalValid pool activityTicket.activityTicketPrincipal
@@ -515,17 +541,42 @@ wsApp authCfg pool st pending = case ticketFromRequest (WS.pendingRequest pendin
           sendFrameUnlocked conn (object ["type" .= ("session_activity_expired" :: Text),"schema_version" .= (1::Int)])
           WS.sendClose conn ("activity capability expired" :: Text)
 
-addCanonicalConnection :: WSState -> WS.Connection -> Principal -> ChangeScope -> ResumeToken -> NominalDiffTime -> UTCTime -> IO UUID
+addCanonicalConnection :: WSState -> WS.Connection -> Principal -> ChangeScope -> ResumeToken -> NominalDiffTime -> UTCTime -> IO (UUID, CanonicalClient)
 addCanonicalConnection st conn principal scope token resumeTtl expiresAt = do
   connId <- UUIDv4.nextRandom
   bearer <- newTVarIO token
   sendLock <- newMVar ()
-  STM.atomically $ modifyTVar' st.canonicalConnections (Map.insert connId (CanonicalClient conn principal scope bearer resumeTtl expiresAt sendLock))
-  pure connId
+  retired <- STM.newEmptyTMVarIO
+  let client = CanonicalClient conn principal scope bearer resumeTtl expiresAt sendLock retired
+  STM.atomically $ modifyTVar' st.canonicalConnections (Map.insert connId client)
+  pure (connId, client)
 
 removeCanonicalConnection :: WSState -> UUID -> IO ()
 removeCanonicalConnection st connId =
   STM.atomically $ modifyTVar' st.canonicalConnections (Map.delete connId)
+
+-- Unregister the exact client and wake its owning application atomically.
+-- This path needs no successful write to end the transport.
+retireCanonicalConnection :: WSState -> UUID -> CanonicalClient -> IO ()
+retireCanonicalConnection st connId client = STM.atomically $ do
+  modifyTVar' st.canonicalConnections (Map.delete connId)
+  void $ STM.tryPutTMVar client.canonicalClientRetired ()
+
+withLiveCanonicalClient :: WSState -> UUID -> CanonicalClient -> IO () -> IO ()
+withLiveCanonicalClient st connId client action =
+  withMVar client.canonicalClientSendLock $ \_ -> do
+    live <- Map.member connId <$> readTVarIO st.canonicalConnections
+    when live $ handleCanonicalDispatchFailure (retireCanonicalConnection st connId client) action
+
+-- Successful terminal delivery retains the peer Close handshake. A failed
+-- control or Close write is handled by the surrounding delivery turn.
+closeCanonicalConnectionUnlocked :: WSState -> UUID -> CanonicalClient -> Value -> Text -> IO ()
+closeCanonicalConnectionUnlocked st connId client frame reason =
+  (do
+    removeCanonicalConnection st connId
+    sendFrameUnlocked client.canonicalClientConnection frame
+    WS.sendClose client.canonicalClientConnection reason)
+  `onException` retireCanonicalConnection st connId client
 
 -- The only write path for a canonical client.  A page is scanned and its
 -- replacement bearer is retained even when every record is hidden; callers
@@ -578,9 +629,6 @@ terminalFrame :: ChangeStreamError -> Text
 terminalFrame ResyncUnauthorized = "access_revoked"
 terminalFrame _ = "resync_required"
 
-sendFrame :: WS.Connection -> MVar () -> Value -> IO ()
-sendFrame conn lock value = withMVar lock $ \_ -> sendFrameUnlocked conn value
-
 sendFrameUnlocked :: WS.Connection -> Value -> IO ()
 sendFrameUnlocked conn value = WS.sendTextData conn (encode value)
 
@@ -623,29 +671,34 @@ dispatchCanonicalOutbox :: Pool Hasql.Connection -> WSState -> [OutboxRecord] ->
 dispatchCanonicalOutbox pool st records = do
   dispatchActivityClients pool st records
   clients <- Map.toList <$> readTVarIO st.canonicalConnections
-  forM_ clients $ \(connId, _) -> dispatchClient connId records
+  forM_ clients $ \(connId, client) -> do
+    let scopedRecords = filter (recordInScope client.canonicalClientScope) records
+        covered = catMaybes (map activityWorkspace scopedRecords)
+        hints = filter (`notElem` covered) activityWorkspaces
+        accessTargets = case client.canonicalClientPrincipal.authority of
+          PrincipalGrantUser user -> [workspace | (workspace, target) <- targetedUsers, user == target]
+          _ -> []
+    unless (null scopedRecords && null hints && null accessTargets) $
+      withLiveCanonicalClient st connId client $ do
+        stillLive <- applyAccessControlsUnlocked pool st connId client accessTargets
+        when stillLive $ dispatchClient connId client scopedRecords hints
   where
-    dispatchClient _ [] = pure ()
-    dispatchClient connId batch = do
-      mClient <- Map.lookup connId <$> readTVarIO st.canonicalConnections
-      forM_ mClient $ \client -> do
-        handleCanonicalDispatchFailure (removeCanonicalConnection st connId) $
-          applyAccessControls pool st connId client batch
-        stillConnected <- Map.member connId <$> readTVarIO st.canonicalConnections
-        when stillConnected $ do
-          -- Selected-scope changes already replay canonically. Cross-scope
-          -- hints wake bounded catalogue probes without widening that replay.
-          handleCanonicalDispatchFailure (removeCanonicalConnection st connId) $
-            sendActivityHints pool client batch
-          visible <- anyM (isVisible client) (filter (recordInScope client.canonicalClientScope) batch)
-          -- A single replay drains the batch through a fixed high-water and
-          -- emits one visible replacement checkpoint. Hidden-only activity is
-          -- deliberately left behind the bearer: it cannot change a connected
-          -- client's cadence, and a reconnect can safely scan it later.
-          if visible
-            then advanceCanonicalClient pool st connId False client
-            else forM_ (filter (recordInScope client.canonicalClientScope) batch) $ \record ->
-              rebaseCanonicalClient pool st connId client record.outboxCursor
+    targetedUsers = nub (concatMap targetedWorkspaceUsers records)
+    activityWorkspaces = nub (catMaybes (map activityWorkspace records))
+
+    dispatchClient connId client scopedRecords hints = do
+      -- Selected-scope changes already replay canonically. Cross-scope hints
+      -- wake bounded catalogue probes without widening that replay.
+      sendActivityHintsUnlocked pool client hints
+      visible <- anyM (isVisible client) scopedRecords
+      if visible
+        then advanceCanonicalClientUnlocked pool st connId False client
+        else rebaseHidden connId client scopedRecords
+
+    rebaseHidden _ _ [] = pure ()
+    rebaseHidden connId client (record:rest) = do
+      stillLive <- rebaseCanonicalClientUnlocked pool st connId client record.outboxCursor
+      when stillLive $ rebaseHidden connId client rest
 
     isVisible client record = isJust <$> projectRecord pool client.canonicalClientPrincipal client.canonicalClientScope record
 
@@ -682,17 +735,13 @@ dispatchActivityClients pool st records = do
 -- Each dispatcher batch is bounded; retain no subscription or historical IDs.
 -- Check current authority immediately before the serialized write. Mount and
 -- reconnect always establish the corresponding canonical HTTP baseline.
-sendActivityHints :: Pool Hasql.Connection -> CanonicalClient -> [OutboxRecord] -> IO ()
-sendActivityHints pool client records =
-  forM_ (nub (catMaybes (map activityWorkspace records))) $ \workspace ->
-    unless (workspace `elem` covered) $
-      withMVar client.canonicalClientSendLock $ \_ -> do
-        allowed <- scopeAuthorized pool client.canonicalClientPrincipal (WorkspaceScope workspace)
-        remaining <- remainingCanonicalTtl client
-        when (allowed && remaining > 0) $ sendFrameUnlocked client.canonicalClientConnection $
-          object ["type" .= ("session_activity_changed" :: Text), "schema_version" .= (1 :: Int), "workspace_id" .= workspace]
-  where
-    covered=nub (catMaybes (map activityWorkspace (filter (recordInScope client.canonicalClientScope) records)))
+sendActivityHintsUnlocked :: Pool Hasql.Connection -> CanonicalClient -> [UUID] -> IO ()
+sendActivityHintsUnlocked pool client workspaces =
+  forM_ workspaces $ \workspace -> do
+    allowed <- scopeAuthorized pool client.canonicalClientPrincipal (WorkspaceScope workspace)
+    remaining <- remainingCanonicalTtl client
+    when (allowed && remaining > 0) $ sendFrameUnlocked client.canonicalClientConnection $
+      object ["type" .= ("session_activity_changed" :: Text), "schema_version" .= (1 :: Int), "workspace_id" .= workspace]
 
 activityWorkspace :: OutboxRecord -> Maybe UUID
 activityWorkspace record = do
@@ -714,15 +763,18 @@ activityWorkspace record = do
       | entityType record.outboxEnvelope == Just "workspace" = entityId record.outboxEnvelope >>= UUID.fromText
       | otherwise = Nothing
 
-rebaseCanonicalClient :: Pool Hasql.Connection -> WSState -> UUID -> CanonicalClient -> Int64 -> IO ()
-rebaseCanonicalClient pool st connId client hiddenThrough = withMVar client.canonicalClientSendLock $ \_ -> do
+rebaseCanonicalClientUnlocked :: Pool Hasql.Connection -> WSState -> UUID -> CanonicalClient -> Int64 -> IO Bool
+rebaseCanonicalClientUnlocked pool st connId client hiddenThrough = do
   oldToken <- readTVarIO client.canonicalClientToken
   rebased <- rebaseResumeTokenAfterHidden pool client.canonicalClientResumeTtl client.canonicalClientScope (audienceFor client.canonicalClientPrincipal) oldToken hiddenThrough
   case rebased of
-    Right token -> STM.atomically $ STM.writeTVar client.canonicalClientToken token
+    Right token -> do
+      STM.atomically $ STM.writeTVar client.canonicalClientToken token
+      pure True
     Left err -> do
       sendFrameUnlocked client.canonicalClientConnection (object ["type" .= terminalFrame err, "schema_version" .= (1 :: Int)])
-      removeCanonicalConnection st connId
+      retireCanonicalConnection st connId client
+      pure False
 
 -- The worker scans a shared durable outbox, but canonical replay is scoped.
 -- Targeted access controls are intentionally considered separately above;
@@ -733,25 +785,19 @@ recordInScope scope record = case (scope, jsonText "workspace_id" record.outboxE
   (GlobalScope, Nothing) -> True
   _ -> False
 
-advanceCanonicalClient :: Pool Hasql.Connection -> WSState -> UUID -> Bool -> CanonicalClient -> IO ()
-advanceCanonicalClient pool st connId forceCheckpoint client =
-  handleCanonicalDispatchFailure (removeCanonicalConnection st connId) $
-    withMVar client.canonicalClientSendLock $ \_ -> do
-      -- Reading, acknowledging, and storing this bearer occurs under the same
-      -- client lock. A dispatcher tick that races initial replay starts only
-       -- after the replacement has been retained.
-       oldToken <- readTVarIO client.canonicalClientToken
-       remainingTtl <- remainingCanonicalTtl client
-       if remainingTtl <= 0
-         then do
-           sendFrameUnlocked client.canonicalClientConnection (object ["type" .= ("resync_required" :: Text), "schema_version" .= (1 :: Int)])
-           removeCanonicalConnection st connId
-           ignoreSynchronous $ WS.sendClose client.canonicalClientConnection ("canonical resume expired" :: Text)
-         else do
-           replacement <- replayUnlocked pool remainingTtl client.canonicalClientConnection client.canonicalClientPrincipal client.canonicalClientScope oldToken forceCheckpoint
-           case replacement of
-             Nothing -> removeCanonicalConnection st connId
-             Just token -> STM.atomically $ STM.writeTVar client.canonicalClientToken token
+advanceCanonicalClientUnlocked :: Pool Hasql.Connection -> WSState -> UUID -> Bool -> CanonicalClient -> IO ()
+advanceCanonicalClientUnlocked pool st connId forceCheckpoint client = do
+  -- The caller holds the client lock through durable acknowledgement and the
+  -- local bearer update, including when dispatch races the initial replay.
+  oldToken <- readTVarIO client.canonicalClientToken
+  remainingTtl <- remainingCanonicalTtl client
+  if remainingTtl <= 0
+    then closeCanonicalConnectionUnlocked st connId client canonicalExpiryFrame "canonical resume expired"
+    else do
+      replacement <- replayUnlocked pool remainingTtl client.canonicalClientConnection client.canonicalClientPrincipal client.canonicalClientScope oldToken forceCheckpoint
+      case replacement of
+        Nothing -> retireCanonicalConnection st connId client
+        Just token -> STM.atomically $ STM.writeTVar client.canonicalClientToken token
 
 -- | A connected canonical client has one fixed delivery deadline. Visible
 -- activity may rotate its bearer for acknowledgement, but cannot prolong the
@@ -762,65 +808,53 @@ remainingCanonicalTtl client = do
   now <- getCurrentTime
   pure $ max 0 (diffUTCTime client.canonicalClientExpiresAt now)
 
-expireCanonicalConnection :: WSState -> UUID -> CanonicalClient -> MVar () -> IO ()
-expireCanonicalConnection st connId client finished = do
+expireCanonicalConnection :: WSState -> UUID -> CanonicalClient -> IO ()
+expireCanonicalConnection st connId client = do
   remaining <- remainingCanonicalTtl client
-  expired <- waitForCanonicalExpiry remaining finished
-  when expired $ do
-    live <- Map.member connId <$> readTVarIO st.canonicalConnections
-    when live $ do
-      sendFrame client.canonicalClientConnection client.canonicalClientSendLock
-        (object ["type" .= ("resync_required" :: Text), "schema_version" .= (1 :: Int)])
-      removeCanonicalConnection st connId
-      ignoreSynchronous $ WS.sendClose client.canonicalClientConnection ("canonical resume expired" :: Text)
+  waitForCanonicalExpiry remaining
+  withLiveCanonicalClient st connId client $
+    closeCanonicalConnectionUnlocked st connId client canonicalExpiryFrame "canonical resume expired"
+
+canonicalExpiryFrame :: Value
+canonicalExpiryFrame = object ["type" .= ("resync_required" :: Text), "schema_version" .= (1 :: Int)]
 
 -- 'threadDelay' is platform-bounded.  Long configured resume TTLs therefore
 -- wait in bounded chunks instead of overflowing into an immediate expiry on
--- Windows, while a disconnect still wakes the timer promptly.
-waitForCanonicalExpiry :: NominalDiffTime -> MVar () -> IO Bool
-waitForCanonicalExpiry remaining finished
-  | remaining <= 0 = pure True
-  | otherwise = do
-      let chunk = min remaining 60
-      completed <- timeout (floor (chunk * 1000000)) (takeMVar finished)
-      case completed of
-        Just () -> pure False
-        Nothing -> waitForCanonicalExpiry (remaining - chunk) finished
+-- Windows. The connection owner cancels this scoped timer when it exits.
+waitForCanonicalExpiry :: NominalDiffTime -> IO ()
+waitForCanonicalExpiry remaining = when (remaining > 0) $ do
+  let chunk = min remaining 60
+  threadDelay (floor (chunk * 1000000))
+  waitForCanonicalExpiry (remaining - chunk)
 
 -- | Recover only synchronous delivery failures. Dispatcher cancellation is a
 -- control-flow signal and must reach the supervising worker unchanged.
 handleCanonicalDispatchFailure :: IO () -> IO () -> IO ()
 handleCanonicalDispatchFailure cleanup action = action `catch` \err ->
-  case fromException err :: Maybe AsyncException of
+  case fromException err :: Maybe SomeAsyncException of
     Just _ -> throwIO err
     Nothing -> cleanup
 
 -- Membership invalidations carry a user-targeted catalogue/session audience.
 -- Emit controls only to that user's already-authenticated canonical socket;
 -- the frame contains the scope identifier but never membership row data.
-applyAccessControls :: Pool Hasql.Connection -> WSState -> UUID -> CanonicalClient -> [OutboxRecord] -> IO ()
-applyAccessControls pool st connId client records = do
-  let targets = nub (concatMap targetedWorkspaceUsers records)
-  forM_ targets $ \(workspace, userId) -> case client.canonicalClientPrincipal.authority of
-    PrincipalGrantUser currentUser | currentUser == userId -> do
+applyAccessControlsUnlocked :: Pool Hasql.Connection -> WSState -> UUID -> CanonicalClient -> [UUID] -> IO Bool
+applyAccessControlsUnlocked pool st connId client = go
+  where
+    go [] = pure True
+    go (workspace:rest) = do
       allowed <- scopeAuthorized pool client.canonicalClientPrincipal (WorkspaceScope workspace)
       case client.canonicalClientScope of
-        WorkspaceScope current | current == workspace ->
-          unless allowed $ do
-            -- A revoke can terminate only the connection actually subscribed
-            -- to that workspace. Another scoped socket for the same user must
-            -- remain live and learn no cross-scope revocation activity.
-            sendFrame client.canonicalClientConnection client.canonicalClientSendLock (accessFrame "access_revoked" workspace)
-            removeCanonicalConnection st connId
-            ignoreSynchronous $ WS.sendClose client.canonicalClientConnection ("access revoked" :: Text)
-        _ ->
-          -- Cross-scope controls update this user's catalogue/session state
-          -- without changing the socket's subscription. A revoke therefore
-          -- remains observable to the matching user, while this retained
-          -- scope stays connected and can continue to receive its own work.
-          sendFrame client.canonicalClientConnection client.canonicalClientSendLock
+        WorkspaceScope current | current == workspace && not allowed -> do
+          closeCanonicalConnectionUnlocked st connId client (accessFrame "access_revoked" workspace) "access revoked"
+          pure False
+        WorkspaceScope current | current == workspace -> go rest
+        _ -> do
+          -- Cross-scope controls update the matching user's catalogue while
+          -- the subscribed workspace continues to receive its own changes.
+          sendFrameUnlocked client.canonicalClientConnection
             (accessFrame (if allowed then "access_granted" else "access_revoked") workspace)
-    _ -> pure ()
+          go rest
 
 accessFrame :: Text -> UUID -> Value
 accessFrame frame workspace = object
@@ -853,12 +887,17 @@ reauthorizeCanonicalConnections pool st = do
           when beforeDeadline $ sendFrameUnlocked conn (object ["type" .= ("access_revoked" :: Text),"schema_version" .= (1::Int)])
           ignoreSynchronous $ WS.sendClose conn ("activity access revoked" :: Text)
   clients <- Map.toList <$> readTVarIO st.canonicalConnections
-  forM_ clients $ \(connId, client) -> do
-    allowed <- scopeAuthorized pool client.canonicalClientPrincipal client.canonicalClientScope
-    unless allowed $ do
-      sendFrame client.canonicalClientConnection client.canonicalClientSendLock (object ["type" .= ("access_revoked" :: Text), "schema_version" .= (1 :: Int)])
-      removeCanonicalConnection st connId
-      ignoreSynchronous $ WS.sendClose client.canonicalClientConnection ("access revoked" :: Text)
+  forM_ clients $ \(connId, client) ->
+    handleCanonicalDispatchFailure (retireCanonicalConnection st connId client) $ do
+      let authorized = scopeAuthorized pool client.canonicalClientPrincipal client.canonicalClientScope
+      allowed <- authorized
+      unless allowed $ withLiveCanonicalClient st connId client $ do
+        -- An authorized peer need not wait for a concurrent replay. Recheck a
+        -- denial under the send lock before issuing terminal control.
+        stillAllowed <- authorized
+        unless stillAllowed $
+          closeCanonicalConnectionUnlocked st connId client
+            (object ["type" .= ("access_revoked" :: Text), "schema_version" .= (1 :: Int)]) "access revoked"
 
 scopeAuthorized :: Pool Hasql.Connection -> Principal -> ChangeScope -> IO Bool
 scopeAuthorized _ principal _ | isTrusted principal = pure True
@@ -874,7 +913,7 @@ anyM predicate (value:values) = do
 
 ignoreSynchronous :: IO () -> IO ()
 ignoreSynchronous action = action `catch` \err ->
-  case fromException err :: Maybe AsyncException of
+  case fromException err :: Maybe SomeAsyncException of
     Just _ -> throwIO err
     Nothing -> pure ()
 

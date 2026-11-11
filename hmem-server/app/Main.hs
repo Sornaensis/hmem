@@ -53,7 +53,7 @@ import HMem.Server.Embedding.Worker
 import HMem.Server.LogRotation (preRotateLogFileIfNeeded)
 import HMem.Server.Logging (newLogger, parseLogLevel, logInfo, logWarn, jsonRequestLogger)
 import HMem.Server.Static (resolveStaticDir)
-import HMem.Server.WebSocket (newWSState, runPlainWithNativeWebSockets, withNativeWebSocketSettings)
+import HMem.Server.WebSocket (newWSState, runPlainWithNativeWebSockets, withNativeWebSocketSettings, beginWebSocketShutdown, awaitWebSocketDrain)
 
 ------------------------------------------------------------------------
 -- CLI
@@ -124,7 +124,12 @@ runDevMode :: Opts -> IO ()
 runDevMode opts = do
   hPutStrLn stderr "[dev] Starting sandboxed PostgreSQL..."
   lifetime <- newSandboxLifetime
-  withSandboxedTestEnvBorrowed lifetime (startArchiveWorker . (.pool)) stopArchiveWorker $ \env _archiveWorker -> do
+  wsState <- newWSState
+  let drainBorrower archiveWorker = do
+        beginWebSocketShutdown wsState
+        awaitWebSocketDrain wsState 5000000
+        stopArchiveWorker archiveWorker
+  withSandboxedTestEnvBorrowed lifetime (startArchiveWorker . (.pool)) drainBorrower $ \env _archiveWorker -> do
     let port = fromMaybe 8420 opts.optPort
         pool = env.pool
         TestEnv { testDb = db } = env
@@ -134,8 +139,6 @@ runDevMode opts = do
 
     tracker <- newAccessTracker pool 5
     pgvec <- Pool.checkPgvector pool
-    wsState <- newWSState
-    streamWorker <- startChangeStreamWorker pool Config.defaultConfig.changeStream wsState
     mStaticDir <- resolveStaticDir (Just "hmem-server/static")
 
     (logAction, cleanupLog) <- newFastLogger (LogStderr defaultBufSize)
@@ -169,11 +172,6 @@ runDevMode opts = do
           }
         devRateLimit = Config.RateLimitConfig { rlEnabled = False, rlRequestsPerSecond = 100, rlBurst = 200 }
         settings = setHost (fromString "127.0.0.1") $ setPort port $ setTimeout 60 $ setGracefulShutdownTimeout (Just 5) $ defaultSettings
-        shutdown = do
-          logInfo logger "[dev] Shutting down..."
-          flushNow pool tracker `catch` \(_ :: SomeException) -> pure ()
-          stopChangeStreamWorker streamWorker
-          cleanupLog
 
     case Config.localImplicitBootstrapStartupError devConfigForPolicy of
       Just err -> do
@@ -182,6 +180,15 @@ runDevMode opts = do
         exitFailure
       Nothing -> pure ()
 
+    streamWorker <- startChangeStreamWorker pool Config.defaultConfig.changeStream wsState
+      `onException` cleanupLog
+    let shutdown = do
+          logInfo logger "[dev] Shutting down..."
+          beginWebSocketShutdown wsState
+          stopChangeStreamWorker streamWorker
+          awaitWebSocketDrain wsState 5000000
+          flushNow pool tracker `catch` \(_ :: SomeException) -> pure ()
+          cleanupLog
     (bracket (newPrefixRegistry pool) closePrefixRegistry $ \prefixes -> do
       app <- mkAppWithPrefixProofs prefixes Nothing Config.defaultConfig.changeStream requestLogger devAuth devCors devRateLimit pool tracker wsState mStaticDir pgvec
       bracket (startSessionReaper pool) stopSessionReaper $ \_ ->
@@ -327,11 +334,13 @@ runNormalMode opts = do
                $ defaultSettings
   let shutdownDatabase = do
         logInfo logger "hmem-server: shutting down..."
+        beginWebSocketShutdown wsState
+        stopChangeStreamWorker streamWorker
+        awaitWebSocketDrain wsState 5000000
         flushNow pool tracker
           `catch` \(_ :: SomeException) -> logWarn logger "failed to flush access tracker"
         runAllReleases
-          [ stopChangeStreamWorker streamWorker
-          , destroyAllResources pool
+          [ destroyAllResources pool
           , cleanupLog
           ]
 

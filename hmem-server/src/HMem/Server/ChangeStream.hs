@@ -24,6 +24,7 @@ import HMem.Config (ChangeStreamConfig(..))
 import HMem.DB.ChangeStream (ChangeScope, OutboxRecord(..), OutboxBacklog(..), cleanupChangeStream, listOutboxAfter, listOutboxScopes, listRetentionScopes, outboxBacklog, pruneOutboxScopeBefore)
 import HMem.DB.Pool (DBException(..))
 import HMem.Server.WebSocket (WSState, broadcastLegacyOutbox, dispatchCanonicalOutbox, reauthorizeCanonicalConnections)
+import HMem.Server.WebSocketDelivery (DeliveryFailure(..), DeliveryCleanupFailure(..))
 
 data ChangeStreamMaintenance = ChangeStreamMaintenance
   { lastAttemptAt :: !(Maybe UTCTime)
@@ -133,7 +134,7 @@ startChangeStreamWorkerWithStartupHook startupHook pool config wsState = mask_ $
       let acknowledged = Map.findWithDefault 0 scope acknowledgements
       delivered <- catchSynchronous (do
         records <- listOutboxAfter pool scope acknowledged 1000
-        mapM_ (broadcastLegacyOutbox wsState) records
+        mapM_ (broadcastLegacyOutbox pool wsState) records
         dispatchCanonicalOutbox pool wsState records
         reauthorizeCanonicalConnections pool wsState
         pure records) (pure [])
@@ -142,13 +143,26 @@ startChangeStreamWorkerWithStartupHook startupHook pool config wsState = mask_ $
         records -> Map.insert scope (maximum (map (.outboxCursor) records)) acknowledgements
 
 stopChangeStreamWorker :: ChangeStreamWorker -> IO ()
-stopChangeStreamWorker (ChangeStreamWorker worker finished _) = killThread worker >> readMVar finished >> pure ()
+stopChangeStreamWorker (ChangeStreamWorker worker finished _) = do
+  killThread worker
+  readMVar finished >>= \case
+    Left failure | isUncleanDelivery failure -> throwIO failure
+    _ -> pure ()
 
 trySynchronous :: IO a -> IO (Either SomeException a)
 trySynchronous action = (Right <$> action) `catch` \err ->
   case fromException err :: Maybe SomeAsyncException of
     Just _ -> throwIO err
-    Nothing -> pure (Left err)
+    Nothing | isUncleanDelivery err -> throwIO err
+            | otherwise -> pure (Left err)
+
+isUncleanDelivery :: SomeException -> Bool
+isUncleanDelivery err
+  | Just (_ :: DeliveryCleanupFailure) <- fromException err = True
+  | otherwise = case fromException err of
+    Just DeliveryUnconfirmed -> True
+    Just DeliveryQuarantined -> True
+    _ -> False
 
 catchSynchronous :: IO a -> IO a -> IO a
 catchSynchronous action fallback = trySynchronous action >>= either (const fallback) pure

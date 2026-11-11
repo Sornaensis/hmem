@@ -134,6 +134,7 @@ library
       HMem.Server.Snapshot
       HMem.Server.Static
       HMem.Server.WebSocket
+      HMem.Server.WebSocketDelivery
       HMem.Server.WebSocketTransport
   other-modules:
       Paths_hmem_server
@@ -573,6 +574,7 @@ test-suite hmem-server-test
       HMem.Server.SessionPrefixSpec
       HMem.Server.SessionReaperSpec
       HMem.Server.TestHarness
+      HMem.Server.WebSocketDeliverySpec
       SpecHook
       Paths_hmem_server
   hs-source-dirs:

@@ -2,7 +2,7 @@
 
 module HMem.Server.ChangeStreamSpec (spec) where
 
-import Control.Concurrent (Chan, MVar, myThreadId, newChan, newEmptyMVar, putMVar, readChan, takeMVar, threadDelay, throwTo, tryPutMVar, tryTakeMVar, writeChan)
+import Control.Concurrent (Chan, MVar, myThreadId, newChan, newEmptyMVar, putMVar, readChan, readMVar, takeMVar, threadDelay, throwTo, tryPutMVar, tryTakeMVar, writeChan)
 import Control.Concurrent.Async (Async, AsyncCancelled(..), async, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch, withAsync)
 import Control.Exception (AsyncException(..), IOException, MaskingState(..), SomeAsyncException, SomeException, bracket, catch, finally, fromException, getMaskingState, mask, throwIO, toException, try)
 import Control.Monad (forM, forM_, replicateM_, replicateM, forever, void, when)
@@ -30,6 +30,7 @@ import Hasql.Statement qualified as Statement
 import Network.HTTP.Types (Header, methodGet, methodPost, parseQuery, status200)
 import Network.HTTP.Types qualified as HTTP
 import Network.Socket qualified as Socket
+import Network.Socket.ByteString qualified as SocketBytes
 import Network.TLS qualified as TLS
 import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Network.Wai (Application, defaultRequest)
@@ -64,7 +65,8 @@ import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), cre
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.ChangeStream (ChangeStreamWorker, ChangeStreamMaintenance(..), startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker, readChangeStreamMaintenance, retentionScopeTurn, retentionDue)
 import HMem.Server.Snapshot (materializeSnapshot, materializeSnapshotWithProfile)
-import HMem.Server.WebSocket (WSState, newWSState, withNativeWebSocketSettings, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
+import HMem.Server.WebSocket (WSState, newWSState, withNativeWebSocketSettings, awaitWebSocketDrain, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
+import HMem.Server.WebSocketDelivery (DeliveryCleanupFailure(..), DeliveryFailure(..))
 import HMem.Server.WebSocketTransport (newNativeTransport, runPlainSocket, runPlainSocketWith, withNativeTransportSettings)
 import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateTask(..), CreateWorkspaceGroup(..), Project(..), Task(..), SnapshotProfile(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
 
@@ -596,6 +598,28 @@ spec = describe "canonical change-stream loopback" $ do
           timeout 2000000 (takeMVar entered) `shouldReturn` Just ()
           joined worker
 
+  it "reports failed delivery cleanup from dispatcher stop with its cancellation cause" $
+    withLocalSandboxAppContext $ \ctx -> do
+      entered <- newEmptyMVar
+      swallowed <- newEmptyMVar
+      let failure = DeliveryCleanupFailure (toException AsyncCancelled) (toException DeliveryUnconfirmed)
+          startup = mask $ \_ -> do
+            putMVar entered ()
+            handleCanonicalDispatchFailure (putMVar swallowed ()) (throwIO failure)
+          stopped worker = do
+            outcome <- declaredPhase "unclean dispatcher stop" (try @DeliveryCleanupFailure (stopChangeStreamWorker worker))
+            case outcome of
+              Left (DeliveryCleanupFailure original cleanup) -> do
+                fromException original `shouldBe` Just AsyncCancelled
+                fromException cleanup `shouldBe` Just DeliveryUnconfirmed
+              Right () -> expectationFailure "dispatcher stop hid unconfirmed cleanup"
+      bracket
+        (startChangeStreamWorkerWithStartupHook startup ctx.localEnv.pool testChangeStreamConfig ctx.localWSState)
+        stopped $ \worker -> do
+          declaredPhase "unclean dispatcher startup" (takeMVar entered)
+          stopped worker
+          tryTakeMVar swallowed `shouldReturn` Nothing
+
   it "rethrows cancellation from a deterministically blocked canonical dispatch" $
     forM_ [toException ThreadKilled, toException AsyncCancelled] $ \cancellation -> do
       entered <- newEmptyMVar
@@ -751,6 +775,58 @@ spec = describe "canonical change-stream loopback" $ do
               `catch` (\(_ :: TLS.TLSException) -> pure True)
           ended `shouldBe` True
           declaredPhase "failed TLS expiry owner finalized" (takeMVar ownerEnded)
+
+  it "bounds an actual plain native write while a healthy peer progresses" $
+    withDeployedSandboxAppContext $ \ctx ->
+      assertBlockedNativeWrite withWebSocketApplication runPlainPeer ctx
+
+  it "bounds an actual TLS native write while a healthy peer progresses" $
+    withDeployedSandboxAppContext $ \ctx ->
+      assertBlockedNativeWrite withTlsWebSocketApplication runTlsPeer ctx
+
+  it "rejects the thirty-third physical connection before upgrade" $
+    withLocalSandboxAppContext $ \ctx ->
+      withWebSocketApplication ctx.localWSState ctx.localApplication $ \port ->
+        withHeldLegacyPeers port 32 $ do
+          headers <- upgradeResponseHeaders port
+          headers `shouldSatisfy` BS.isInfixOf "503 Service Unavailable"
+          headers `shouldSatisfy` BS.isInfixOf "Retry-After: 1"
+          headers `shouldSatisfy` (not . BS.isInfixOf "Sec-WebSocket-Accept")
+
+  it "keeps a successful Close physically admitted until its peer acknowledges" $
+    withLocalSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.localEnv "native-close-physical-lifetime"
+      let scope = WorkspaceScope workspace.id
+          principal = Principal
+            { actorType = ActorUser, actorId = "local-user", actorLabel = "Local User"
+            , authority = PrincipalSyntheticLocalSuperadmin }
+      resume <- terminalLocalResume ctx scope (TrustedAudience "local:local-user")
+      ticket <- createCanonicalTicketWithTtl ctx.localWSState 0.5 principal scope resume
+      closing <- newEmptyMVar
+      acknowledge <- newEmptyMVar
+      withWebSocketApplication ctx.localWSState ctx.localApplication $ \port ->
+        withHeldLegacyPeers port 31 $ do
+          let peer = runPlainPeer port ticket.ticket $ \conn -> do
+                first <- WS.receiveData conn >>= decodeFrame
+                frameType first `shouldBe` Just "checkpoint"
+                expired <- WS.receiveData conn >>= decodeFrame
+                frameType expired `shouldBe` Just "resync_required"
+                putMVar closing ()
+                takeMVar acknowledge
+                void (try @WS.ConnectionException (WS.receiveData conn :: IO Text))
+          withAsync peer $ \worker -> do
+            declaredPhase "successful Close written" (takeMVar closing)
+            (do
+              headers <- upgradeResponseHeaders port
+              headers `shouldSatisfy` BS.isInfixOf "503 Service Unavailable")
+              `finally` void (tryPutMVar acknowledge ())
+            declaredPhase "closing peer acknowledged" (wait worker)
+            let released = do
+                  headers <- upgradeResponseHeaders port
+                  if "503 Service Unavailable" `BS.isInfixOf` headers
+                    then threadDelay 10000 >> released
+                    else headers `shouldSatisfy` BS.isInfixOf "HTTP/1.1 101 "
+            declaredPhase "physical admission released after owner exit" released
 
   it "joins the expiry writer when its canonical peer disconnects during terminal output" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -1398,12 +1474,20 @@ spec = describe "canonical change-stream loopback" $ do
       issued <- createCanonicalTicket st principal scope resume
       withWebSocketApplication st ctx.deployedApplication $ \port ->
         withActivityFrames port issued.ticket $ \frames -> do
-          declaredPhase "first page before revocation" $ replicateM_ 500 $
-            (frameType <$> (readChan frames >>= decodeFrame)) `shouldReturn` Just "change"
+          frameType <$> declaredPhase "first record before revocation" (readChan frames >>= decodeFrame)
+            `shouldReturn` Just "change"
           canonicalReplayPending st `shouldReturn` True
           Auth.deleteWorkspaceMembership pool workspace.id user `shouldReturn` True
-          declaredPhase "reauthorization between replay pages" (dispatchCanonicalOutbox pool st [])
-          frameType <$> declaredPhase "terminal revocation" (readChan frames >>= decodeFrame) `shouldReturn` Just "access_revoked"
+          declaredPhase "reauthorization between bounded replay turns" (dispatchCanonicalOutbox pool st [])
+          -- A record authorized before the membership commit may already be
+          -- buffered. No checkpoint may certify this unfinished replay.
+          let awaitRevocation count = do
+                frame <- readChan frames >>= decodeFrame
+                case frameType frame of
+                  Just "change" -> awaitRevocation (count + 1)
+                  kind -> (kind `shouldBe` Just "access_revoked") >> pure count
+          delivered <- declaredPhase "terminal revocation" (awaitRevocation (1 :: Int))
+          delivered `shouldSatisfy` (< 525)
           canonicalReplayPending st `shouldReturn` False
 
   it "leaves the original bearer usable when the final checkpoint write fails" $
@@ -1458,36 +1542,38 @@ spec = describe "canonical change-stream loopback" $ do
           scope = WorkspaceScope workspace.id
           audience = AuthenticatedAudience (UUID.toText userId) userId
       resume <- terminalResume ctx scope audience
-      ticket <- createCanonicalTicket ctx.deployedWSState principal scope resume
-      initial <- newEmptyMVar
-      liveFrames <- newChan
-      expectedReplay <- newIORef Nothing
-      withWebSocketApplication ctx.deployedWSState ctx.deployedApplication $ \port -> do
-        bracket (asyncWithUnmask $ \unmask -> unmask $ (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket.ticket) $ \conn -> do
-          WS.receiveData conn >>= putMVar initial
-          let receiveReplay = do
-                frame <- WS.receiveData conn :: IO Text
-                expected <- readIORef expectedReplay
-                let entityId = (decode (LBS.fromStrict (Text.encodeUtf8 frame)) :: Maybe Value)
-                      >>= jsonField "event" >>= jsonField "entity" >>= jsonField "id"
-                if expected /= Nothing && entityId == expected
-                  then WS.sendClose conn ("replay received" :: Text) >> writeChan liveFrames frame
-                  else writeChan liveFrames frame >> receiveReplay
-          receiveReplay) `catch` \(_ :: WS.ConnectionException) -> pure ())
-          (joinClient "restart client") $ \_client -> do
-            _ <- awaitFrame initial
-            withDispatcherFixture ctx "first dispatcher" $ \fixture -> do
-              beforeRestart <- Project.createProject ctx.deployedEnv.pool CreateProject
-                { workspaceId = workspace.id, parentId = Nothing, name = "before-restart"
-                , description = Nothing, priority = Nothing, metadata = Nothing }
-              awaitChangeChan liveFrames beforeRestart.id
-              stopDispatcherFixture ctx "first explicit stop" fixture
-              duringRestart <- Project.createProject ctx.deployedEnv.pool CreateProject
-                { workspaceId = workspace.id, parentId = Nothing, name = "during-restart"
-                , description = Nothing, priority = Nothing, metadata = Nothing }
-              atomicModifyIORef' expectedReplay (const (Just (String (UUID.toText duringRestart.id)), ()))
-              withDispatcherFixture ctx "replacement dispatcher" $ \_ -> do
-                awaitChangeChan liveFrames duringRestart.id
+      let pool = ctx.deployedEnv.pool
+          st = ctx.deployedWSState
+          receive frames = declaredPhase "dispatcher frame" (readChan frames >>= decodeFrame)
+      ticket <- createCanonicalTicket st principal scope resume
+      withWebSocketApplication st ctx.deployedApplication $ \port -> do
+        settled <- withDispatcherFixture ctx "first dispatcher" $ \fixture ->
+          withActivityFrames port ticket.ticket $ \frames -> do
+            frameType <$> receive frames `shouldReturn` Just "checkpoint"
+            beforeRestart <- Project.createProject pool CreateProject
+              { workspaceId = workspace.id, parentId = Nothing, name = "before-restart"
+              , description = Nothing, priority = Nothing, metadata = Nothing }
+            awaitChangeChan frames beforeRestart.id
+            checkpoint <- receive frames
+            frameType checkpoint `shouldBe` Just "checkpoint"
+            token <- checkpointResume checkpoint
+            let awaitAck = validateCanonicalResumeToken pool scope audience resume >>= \case
+                  Left ResumeSuperseded -> pure ()
+                  _ -> threadDelay 1000 >> awaitAck
+            declaredPhase "durable checkpoint before restart" awaitAck
+            -- Cancellation of an active delivery owns native retirement. The
+            -- reconnect contract is the durable checkpoint, not socket survival.
+            stopDispatcherFixture ctx "first explicit stop" fixture
+            pure token
+        duringRestart <- Project.createProject pool CreateProject
+          { workspaceId = workspace.id, parentId = Nothing, name = "during-restart"
+          , description = Nothing, priority = Nothing, metadata = Nothing }
+        reconnect <- createCanonicalTicket st principal scope settled
+        withDispatcherFixture ctx "replacement dispatcher" $ \_ ->
+          withActivityFrames port reconnect.ticket $ \frames -> do
+            awaitChangeChan frames duringRestart.id
+            frameType <$> receive frames `shouldReturn` Just "checkpoint"
+
       withDispatcherFixture ctx "fresh dispatcher" $ \fixture ->
         stopDispatcherFixture ctx "fresh explicit stop" fixture
 
@@ -1582,6 +1668,100 @@ observeRawWebSocket application write finished request respond =
       respond $ ResponseRaw (\source send -> serve source (write send) `finally` finished) fallback
     response -> respond response
 
+assertBlockedNativeWrite
+  :: (WSState -> Application -> (Int -> IO ()) -> IO ())
+  -> (Int -> Text -> (WS.Connection -> IO ()) -> IO ())
+  -> DeployedSandboxApp -> IO ()
+assertBlockedNativeWrite withListener runPeer ctx = do
+  workspace <- createTestWorkspace ctx.deployedEnv "native-write-backpressure"
+  let scope = WorkspaceScope workspace.id
+      principal name = Principal
+        { actorType = ActorUser, actorId = name, actorLabel = name
+        , authority = PrincipalSyntheticLocalSuperadmin }
+  slow <- canonicalTicketFor ctx (principal "slow-native") scope (TrustedAudience "local:slow-native")
+  healthy <- canonicalTicketFor ctx (principal "healthy-native") scope (TrustedAudience "local:healthy-native")
+  armed <- newIORef False
+  chunks <- newIORef (0 :: Int)
+  writing <- newEmptyMVar
+  writeEnded <- newEmptyMVar
+  ownerEnded <- newEmptyMVar
+  initial <- newEmptyMVar
+  release <- newEmptyMVar
+  let chunk = BS.replicate 65536 0
+      write send bytes = do
+        enabled <- readIORef armed
+        if not enabled then send bytes else
+          (do
+            putMVar writing ()
+            replicateM_ 1024 $ do
+              send chunk
+              atomicModifyIORef' chunks (\count -> (count + 1, ())))
+            `finally` putMVar writeEnded ()
+      application request respond
+        | lookup "ticket" (Wai.queryString request) == Just (Just (Text.encodeUtf8 slow.ticket)) =
+            observeRawWebSocket ctx.deployedApplication write (putMVar ownerEnded ()) request respond
+        | otherwise = ctx.deployedApplication request respond
+      slowPeer port = runPeer port slow.ticket $ \conn -> do
+        WS.receiveData conn >>= putMVar initial
+        readMVar release
+  withListener ctx.deployedWSState application $ \port ->
+    withAsync (slowPeer port) $ \slowWorker ->
+      (withPeerFrames runPeer port healthy.ticket $ \frames -> do
+        let next = declaredPhase "healthy native peer frame" (readChan frames >>= decodeFrame)
+        frameType <$> awaitFrame initial `shouldReturn` Just "checkpoint"
+        frameType <$> next `shouldReturn` Just "checkpoint"
+        atomicModifyIORef' armed (const (True, ()))
+        project <- Project.createProject ctx.deployedEnv.pool
+          (CreateProject workspace.id Nothing "healthy during blocked write" Nothing Nothing Nothing)
+        record <- latestOutbox ctx scope
+        started <- getMonotonicTimeNSec
+        declaredPhase "bounded native dispatch" $
+          dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [record]
+        ended <- getMonotonicTimeNSec
+        declaredPhase "native raw write entered" (takeMVar writing)
+        declaredPhase "native raw write ended" (takeMVar writeEnded)
+        declaredPhase "native owner ended before peer release" (takeMVar ownerEnded)
+        count <- readIORef chunks
+        count `shouldSatisfy` (> 0)
+        count `shouldSatisfy` (< 1024)
+        (ended - started) `shouldSatisfy` (< 1500000000)
+        next >>= assertChangeIdentity record project.id)
+        `finally` void (tryPutMVar release ())
+      >> declaredPhase "nonreading peer closed" (wait slowWorker)
+
+runPlainPeer :: Int -> Text -> (WS.Connection -> IO ()) -> IO ()
+runPlainPeer port ticket = WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket ticket)
+
+withHeldLegacyPeers :: Int -> Int -> IO () -> IO ()
+withHeldLegacyPeers _ 0 use = use
+withHeldLegacyPeers port count use = do
+  ready <- newEmptyMVar
+  release <- newEmptyMVar
+  let peer = WS.runClient "127.0.0.1" port "/api/v1/ws" $ \conn -> do
+        putMVar ready ()
+        takeMVar release
+        WS.sendClose conn ("capacity fixture complete" :: Text)
+        void (try @WS.ConnectionException (WS.receiveData conn :: IO Text))
+  withAsync peer $ \worker -> do
+    declaredPhase "physical peer accepted" (takeMVar ready)
+    withHeldLegacyPeers port (count - 1) use
+      `finally` void (tryPutMVar release ())
+    declaredPhase "physical peer joined" (wait worker)
+
+upgradeResponseHeaders :: Int -> IO BS.ByteString
+upgradeResponseHeaders port =
+  bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \socket -> do
+    Socket.connect socket (Socket.SockAddrInet (fromIntegral port) (Socket.tupleToHostAddress (127,0,0,1)))
+    SocketBytes.sendAll socket
+      "GET /api/v1/ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    let receive bytes
+          | "\r\n\r\n" `BS.isInfixOf` bytes = pure bytes
+          | BS.length bytes >= 8192 = fail "upgrade response header limit exceeded"
+          | otherwise = do
+              next <- SocketBytes.recv socket 4096
+              if BS.null next then fail "upgrade response ended before its headers" else receive (bytes <> next)
+    declaredPhase "physical rejection headers" (receive BS.empty)
+
 withWebSocketApplication :: WSState -> Application -> (Int -> IO a) -> IO a
 withWebSocketApplication state = withSocketApplication state True runPlainSocket
 
@@ -1614,6 +1794,7 @@ withSocketApplication state forwardApplicationFailures runListener application u
         atomicModifyIORef' stopping (const (True, ()))
         Socket.close listener
         declaredPhase "loopback listener join" (wait server)
+        declaredPhase "native worker drain" (awaitWebSocketDrain state 2000000)
       case primary of
         Left failure -> do
           case cleanup of
@@ -1679,11 +1860,16 @@ startOneFrameClient port ticket = do
   pure OneFrameClient { clientWorker = worker, clientInitial = initial, clientObserved = observed }
 
 withActivityFrames :: Int -> Text -> (Chan Text -> IO a) -> IO a
-withActivityFrames port ticket use = mask $ \restore -> do
+withActivityFrames = withPeerFrames runPlainPeer
+
+withPeerFrames
+  :: (Int -> Text -> (WS.Connection -> IO ()) -> IO ())
+  -> Int -> Text -> (Chan Text -> IO a) -> IO a
+withPeerFrames runPeer port ticket use = mask $ \restore -> do
   frames <- newChan
   stop <- newEmptyMVar
   worker <- asyncWithUnmask $ \unmask -> unmask $
-    (WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket="<>showTicket ticket) $ \conn ->
+    (runPeer port ticket $ \conn ->
       withAsync (forever (WS.receiveData conn >>= writeChan frames)) $ \reader -> do
         takeMVar stop
         WS.sendClose conn ("activity fixture complete" :: Text)

@@ -10,31 +10,49 @@ module HMem.Server.WebSocketTransport
   , runPlainSocketWith
   , currentNativeConnection
   , abortNativeConnection
+  , reservePhysicalConnection
+  , beginNativeShutdown
+  , awaitNativeDrain
+  , DeliveryTurn
+  , DeliveryResult(..)
+  , DeliveryFailure(..)
+  , DeliveryCleanupFailure(..)
+  , withDeliveryTurn
+  , deliveryShouldYield
+  , installControlledWriter
+  , sendOwnedClose
   ) where
 
-import Control.Concurrent (MVar, ThreadId, modifyMVarMasked, myThreadId, newMVar)
+import Control.Concurrent (ThreadId, myThreadId)
 import Control.Concurrent.STM
-import Control.Exception (IOException, SomeException, bracket, catch, finally, mask_, onException, throwIO, try)
+import Control.Exception (IOException, bracket, bracket_, catch, finally, mask_, onException, throwIO)
 import Control.Monad (forM_, when)
 import Data.Map.Strict qualified as Map
 import Data.Streaming.Network (bindPortTCP)
+import Data.Text (Text)
 import Data.Unique (Unique, newUnique)
 import Network.Socket qualified as Socket
 import Network.Wai (Application)
 import Network.Wai.Handler.Warp.Internal
   ( Connection, Settings(..), runSettingsConnectionMaker, setSocketCloseOnExec, socketConnection )
+import Network.WebSockets qualified as WS
+import Network.WebSockets.Connection qualified as WSConnection
+import System.Timeout (timeout)
+
+import HMem.Server.WebSocketDelivery
+  ( DeliveryFailure(..), DeliveryCleanupFailure(..), DeliveryResult(..), DeliveryTurn, deliveryShouldYield )
+import HMem.Server.WebSocketDelivery qualified as Delivery
 
 data NativeTransport = NativeTransport
   { acceptedSockets :: !(TVar (Map.Map ThreadId Socket.Socket))
   , startingSockets :: !(TVar (Map.Map Unique Startup))
   , workerSockets :: !(TVar (Map.Map ThreadId NativeConnection))
   , unclosedSockets :: !(TVar [Socket.Socket])
+  , deliveryHub :: !Delivery.DeliveryHub
+  , runningScopes :: !(TVar Int)
   }
 
-data NativeConnection = NativeConnection
-  { nativeSocket :: !Socket.Socket
-  , abortResult :: !(MVar (Maybe (Either SomeException ())))
-  }
+newtype NativeConnection = NativeConnection Delivery.DeliveryOwner
 
 data Startup = Startup !Socket.Socket !(TVar StartupState)
 
@@ -43,7 +61,7 @@ data StartupState = AwaitingFork | ForkReturned | Claimed | Cancelled
 newNativeTransport :: IO NativeTransport
 newNativeTransport =
   NativeTransport <$> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty
-    <*> newTVarIO []
+    <*> newTVarIO [] <*> Delivery.newDeliveryHub <*> newTVarIO 0
 
 runNativePlain :: NativeTransport -> Settings -> Application -> IO ()
 runNativePlain transport settings application = Socket.withSocketsDo $
@@ -75,13 +93,26 @@ runPlainSocketWith makeConnection settings listener application = do
 -- unmask behavior, and bind the real socket before its connection maker runs.
 withNativeTransportSettings :: NativeTransport -> Settings -> (Settings -> IO a) -> IO a
 withNativeTransportSettings transport settings run =
-  run settings
-    { settingsAccept = trackedAccept
-    , settingsFork = trackedFork
-    , settingsOnException = \request failure ->
-        disposeAccepted transport `finally` settingsOnException settings request failure
-    } `finally` disposeUnclaimed transport
+  bracket_ acquireScope releaseScope $
+    run settings
+      { settingsAccept = trackedAccept
+      , settingsFork = trackedFork
+      , settingsOnException = \request failure ->
+          disposeAccepted transport `finally` settingsOnException settings request failure
+      , settingsInstallShutdownHandler = \stopListener ->
+          settingsInstallShutdownHandler settings
+            (beginNativeShutdown transport `finally` stopListener)
+      }
   where
+    acquireScope = atomically $ do
+      closed <- Delivery.deliveryClosed transport.deliveryHub
+      when closed $ throwSTM DeliveryUnconfirmed
+      modifyTVar' transport.runningScopes (+ 1)
+
+    releaseScope = do
+      beginNativeShutdown transport `finally` disposeUnclaimed transport
+      atomically $ modifyTVar' transport.runningScopes (subtract 1)
+
     trackedAccept listener = mask_ $ do
       disposeAccepted transport
       (socket, address) <- settingsAccept settings listener
@@ -106,7 +137,7 @@ startWorker transport settings acceptor socket start = do
   (key, state, owner) <- (do
     key <- newUnique
     state <- newTVarIO AwaitingFork
-    owner <- NativeConnection socket <$> newMVar Nothing
+    owner <- NativeConnection <$> Delivery.newDeliveryOwner transport.deliveryHub (abortSocket socket)
     atomically $ modifyTVar' transport.startingSockets (Map.insert key (Startup socket state))
     pure (key, state, owner)) `onException` closeUnclaimed transport socket
   let cancel = cancelStartup transport key socket state
@@ -119,8 +150,10 @@ startWorker transport settings acceptor socket start = do
           start unmask `finally` do
             -- Warp normally closes the connection itself. Also cover an
             -- exception before its connection maker installs that finalizer.
-            Socket.close' socket
-            atomically $ modifyTVar' transport.workerSockets (Map.delete worker)
+            let NativeConnection deliveryOwner = owner
+            Socket.close' socket `onException` Delivery.retainFailedOwner deliveryOwner
+            Delivery.finishDeliveryOwnerWith deliveryOwner $
+              modifyTVar' transport.workerSockets (Map.delete worker)
   (do
     settingsFork settings launch
     atomically $ readTVar state >>= \case
@@ -184,15 +217,40 @@ currentNativeConnection transport = do
 -- The first caller interrupts the real socket before any driver join. Later
 -- callers observe that operation's result, including a failed interruption.
 abortNativeConnection :: NativeConnection -> IO ()
-abortNativeConnection owner = do
-  result <- modifyMVarMasked owner.abortResult $ \case
-    Just previous -> pure (Just previous, previous)
-    Nothing -> do
-      interrupted <- try $ do
-        Socket.shutdown owner.nativeSocket Socket.ShutdownBoth
-          `catch` \(_ :: IOException) -> pure ()
-        -- On Windows, shutdown alone does not cancel an already pending
-        -- overlapped receive. Close the same accepted Socket before joining.
-        Socket.close' owner.nativeSocket
-      pure (Just interrupted, interrupted)
-  either throwIO pure result
+abortNativeConnection (NativeConnection owner) = Delivery.abortDeliveryOwner owner
+
+abortSocket :: Socket.Socket -> IO ()
+abortSocket socket =
+  (Socket.shutdown socket Socket.ShutdownBoth `catch` \(_ :: IOException) -> pure ())
+    `finally` Socket.close' socket
+
+reservePhysicalConnection :: NativeConnection -> Text -> IO Bool
+reservePhysicalConnection (NativeConnection owner) = Delivery.reservePhysicalConnection owner
+
+withDeliveryTurn :: NativeConnection -> (DeliveryTurn -> IO a) -> IO (DeliveryResult a)
+withDeliveryTurn (NativeConnection owner) = Delivery.withDeliveryTurn owner
+
+installControlledWriter :: NativeConnection -> WS.Connection -> WS.Connection
+installControlledWriter (NativeConnection owner) original =
+  original { WSConnection.connectionWrite = \messages ->
+    Delivery.controlledWrite owner (WSConnection.connectionWrite original messages) }
+
+sendOwnedClose :: WS.WebSocketsData a => NativeConnection -> WS.Connection -> a -> IO ()
+sendOwnedClose (NativeConnection owner) connection payload =
+  Delivery.ownedClose owner (WS.sendClose connection payload)
+
+beginNativeShutdown :: NativeTransport -> IO ()
+beginNativeShutdown transport = Delivery.beginDeliveryShutdown transport.deliveryHub
+
+awaitNativeDrain :: NativeTransport -> Int -> IO ()
+awaitNativeDrain transport micros = do
+  result <- timeout micros $ atomically $ do
+    Delivery.deliveryDrained transport.deliveryHub
+    unclosed <- readTVar transport.unclosedSockets
+    when (not (null unclosed)) $ throwSTM DeliveryUnconfirmed
+    active <- readTVar transport.workerSockets
+    scopes <- readTVar transport.runningScopes
+    check (Map.null active && scopes == 0)
+  case result of
+    Just () -> pure ()
+    Nothing -> throwIO DeliveryUnconfirmed

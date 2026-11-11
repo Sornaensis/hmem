@@ -63,7 +63,8 @@ import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker
 import HMem.Server.SessionReaper (startSessionReaper, stopSessionReaper)
 import HMem.Server.Archive.Worker (ArchiveWorker, startArchiveWorker, stopArchiveWorker)
 import HMem.Server.Logging (jsonRequestLogger, logInfo, logWarn, newLogger, parseLogLevel)
-import HMem.Server.WebSocket (newWSState, runPlainWithNativeWebSockets)
+import HMem.Server.WebSocket (WSState, newWSState, runPlainWithNativeWebSockets, beginWebSocketShutdown, awaitWebSocketDrain)
+import HMem.Server.WebSocketTransport (DeliveryFailure(..))
 
 data HarnessMode
   = LocalMode
@@ -179,8 +180,12 @@ modeReader = eitherReader $ \case
 runHarness :: Opts -> IO ()
 runHarness opts = do
   lifetime <- newSandboxLifetime
+  wsState <- newWSState
+  let drainNative = beginWebSocketShutdown wsState >> awaitWebSocketDrain wsState 5000000
   case opts.optArchiveQualificationRoot of
-    Nothing -> withSandboxedTestEnvBorrowed lifetime (startArchiveWorker . (.pool)) stopArchiveWorker $ \env _archiveWorker -> runHarnessEnv opts env
+    Nothing -> withSandboxedTestEnvBorrowed lifetime (startArchiveWorker . (.pool))
+      (\archiveWorker -> drainNative >> stopArchiveWorker archiveWorker) $ \env _archiveWorker ->
+        runHarnessEnv wsState opts env
     Just root -> do
       qualificationPhase "root-validation-begin"
       verifyQualificationRoot root
@@ -190,20 +195,21 @@ runHarness opts = do
       observeStartup <- qualificationStartupObserver privateTemp acquired
       qualifiedLifetime <- newSandboxLifetimeWithReleaseHooks (pure ()) observeStartup
       qualificationPhase "borrowed-sandbox-begin"
-      outcome <- try @SomeException $ withSandboxedTestEnvBorrowed qualifiedLifetime (acquireQualification root) drainQualification $ \env qualified -> do
+      outcome <- try @SomeException $ withSandboxedTestEnvBorrowed qualifiedLifetime (acquireQualification root)
+        (\qualified -> drainNative >> drainQualification qualified) $ \env qualified -> do
         writeIORef acquired True
         qualificationPhase "qualified-database-acquired"
         startQualification qualified
-        runHarnessEnvWith (Just qualified) opts (env {pool=qualified.runtimePool})
+        runHarnessEnvWith (Just qualified) wsState opts (env {pool=qualified.runtimePool})
       case outcome of
         Right () -> pure ()
         Left primary -> recoverQualification qualifiedLifetime primary
 
-runHarnessEnv :: Opts -> TestEnv -> IO ()
+runHarnessEnv :: WSState -> Opts -> TestEnv -> IO ()
 runHarnessEnv = runHarnessEnvWith Nothing
 
-runHarnessEnvWith :: Maybe Qualification -> Opts -> TestEnv -> IO ()
-runHarnessEnvWith qualified opts env = do
+runHarnessEnvWith :: Maybe Qualification -> WSState -> Opts -> TestEnv -> IO ()
+runHarnessEnvWith qualified wsState opts env = do
   let TestEnv { testSandbox = sandbox } = env
       TestSandbox { sandboxConfigDir = configDir, sandboxLogDir = logDir } = sandbox
   port <- maybe (randomRIO (49152, 65535)) pure opts.optPort
@@ -225,7 +231,6 @@ runHarnessEnvWith qualified opts env = do
   LBS.writeFile configPath (encode cfg)
 
   tracker <- newAccessTracker env.pool 5
-  wsState <- newWSState
   let logPath = logDir </> "hmem-test-harness.log"
       fileSpec = FileLogSpec
         { log_file = logPath
@@ -234,7 +239,10 @@ runHarnessEnvWith qualified opts env = do
         }
   withPreviewWorker env.pool cfg.documentPreviews $ (bracket
       (startChangeStreamWorker env.pool cfg.changeStream wsState)
-      stopChangeStreamWorker
+      (\worker -> do
+        beginWebSocketShutdown wsState
+        stopChangeStreamWorker worker
+        awaitWebSocketDrain wsState 5000000)
       (\_streamWorker ->
         bracket
           (newFastLogger (LogFile fileSpec defaultBufSize))
@@ -260,6 +268,16 @@ runHarnessEnvWith qualified opts env = do
                   logInfo logger "[sandbox] Shutting down interactive harness..."
                   flushNow env.pool tracker `catch` \(_ :: SomeException) ->
                     logWarn logger "failed to flush access tracker"
+                stopServer serverThread = do
+                  beginWebSocketShutdown wsState
+                  stopped <- timeout 5000000 (killThread serverThread >> readMVar serverDone)
+                  case stopped of
+                    Nothing -> throwIO DeliveryUnconfirmed
+                    Just (Left failure) -> case fromException failure :: Maybe SomeAsyncException of
+                      Just _ -> pure ()
+                      Nothing -> throwIO failure
+                    Just (Right ()) -> pure ()
+                  awaitWebSocketDrain wsState 5000000
                 runInput = do
                     inputResult <- try getLine
                     case inputResult of
@@ -274,8 +292,8 @@ runHarnessEnvWith qualified opts env = do
                         pure ()
 
             (bracket (startSessionReaper env.pool) stopSessionReaper $ \_ -> withHarnessThread qualified
-                (try (runPlainWithNativeWebSockets wsState settings app) >>= putMVar serverDone)
-                (\serverThread -> case qualified of
+                (mask $ \restore -> try (restore (runPlainWithNativeWebSockets wsState settings app)) >>= putMVar serverDone)
+                (\serverThread -> (case qualified of
                   Just controls -> do
                     -- The qualifier's caller owns stdin directly. A failed
                     -- input-child join therefore cannot compete with recovery
@@ -284,13 +302,15 @@ runHarnessEnvWith qualified opts env = do
                     qualificationPhase "http-ready"
                     printBanner opts env cfg serverUrl logPath configPath seed
                     qualificationInput controls inputDone serverDone
+                    beginWebSocketShutdown wsState
                     killThread serverThread
                   Nothing -> withHarnessThread Nothing
                     runInput
                     (\_inputThread -> do
                       waitUntilReady ready serverDone
                       printBanner opts env cfg serverUrl logPath configPath seed
-                      waitForStop inputDone serverDone serverThread)))
+                      waitForStop (beginWebSocketShutdown wsState) inputDone serverDone serverThread))
+                    `finally` stopServer serverThread))
               `finally` flushForShutdown)))
   when opts.optPreserve $
     throwIO PreserveSandboxExit
@@ -453,23 +473,23 @@ waitUntilReady ready serverDone = do
   case mReady of
     Just () -> pure ()
     Nothing -> do
-      mDone <- tryTakeMVar serverDone
+      mDone <- tryReadMVar serverDone
       case mDone of
         Just (Left err) -> throwIO err
         Just (Right ()) -> fail "hmem-test-harness server stopped before it became ready"
         Nothing -> threadDelay 100000 >> waitUntilReady ready serverDone
 
-waitForStop :: MVar () -> MVar (Either SomeException ()) -> ThreadId -> IO ()
-waitForStop inputDone serverDone serverThread = do
-  mDone <- tryTakeMVar serverDone
+waitForStop :: IO () -> MVar () -> MVar (Either SomeException ()) -> ThreadId -> IO ()
+waitForStop beginShutdown inputDone serverDone serverThread = do
+  mDone <- tryReadMVar serverDone
   case mDone of
     Just (Left err) -> throwIO err
     Just (Right ()) -> fail "hmem-test-harness server stopped unexpectedly"
     Nothing -> do
       mInput <- tryTakeMVar inputDone
       case mInput of
-        Just () -> killThread serverThread
-        Nothing -> threadDelay 100000 >> waitForStop inputDone serverDone serverThread
+        Just () -> beginShutdown >> killThread serverThread
+        Nothing -> threadDelay 100000 >> waitForStop beginShutdown inputDone serverDone serverThread
 
 printBanner :: Opts -> TestEnv -> Config.HMemConfig -> Text -> FilePath -> FilePath -> SeedInfo -> IO ()
 printBanner opts env cfg serverUrl logPath configPath seed = do

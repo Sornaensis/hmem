@@ -604,10 +604,9 @@ const canonicalScopeAudiences = new Map()
 function canonicalScopeKey(scope, workspaceId) { return scope === 'global' ? 'global' : `workspace:${workspaceId}` }
 const canonicalFrameBatcher = createCanonicalFrameBatcher({
   onBatch: function (scope, workspaceId, frames) {
-    if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'frames', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, frames }))
-  },
-  onIncomplete: function (scope, workspaceId) {
-    if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'frame', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, frame: { schema_version: 1, type: 'resync_required' } }))
+    if (!app.ports.wsMessage) return false
+    app.ports.wsMessage.send(JSON.stringify({ transport: 'frames', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, frames }))
+    return true
   }
 })
 function clearCanonicalFrameBatch(scope, workspaceId) { canonicalFrameBatcher.clear(scope, workspaceId) }
@@ -635,7 +634,9 @@ const canonicalStreams = createChangeStreamManager({
   }),
   onSnapshot: function (scope, workspaceId, snapshot) {
     clearCanonicalFrameBatch(scope, workspaceId)
-    if (app.ports.wsMessage) app.ports.wsMessage.send(JSON.stringify({ transport: 'snapshot', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, items: snapshot.items, resume_token: snapshot.resumeToken, snapshot_profile: snapshot.snapshotProfile }))
+    if (!app.ports.wsMessage) return false
+    app.ports.wsMessage.send(JSON.stringify({ transport: 'snapshot', schema_version: 1, scope: scope === 'global' ? { scope: 'global' } : { scope: 'workspace', workspace_id: workspaceId }, items: snapshot.items, resume_token: snapshot.resumeToken, snapshot_profile: snapshot.snapshotProfile }))
+    return true
   },
   onFrame: function (scope, workspaceId, frame) {
     let parsedFrame = null
@@ -644,7 +645,7 @@ const canonicalStreams = createChangeStreamManager({
       // This authorized hint is outside canonical event/checkpoint delivery.
       // Do not flush or leave an unfinished canonical batch waiting on it.
       app.ports.wsMessage.send(JSON.stringify({transport:'frame',schema_version:1,scope:scope==='global'?{scope:'global'}:{scope:'workspace',workspace_id:workspaceId},frame:parsedFrame}))
-    }else canonicalFrameBatcher.queue(scope, workspaceId, parsedFrame)
+    }else return canonicalFrameBatcher.queue(scope, workspaceId, parsedFrame)
   }
 })
 

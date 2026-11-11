@@ -46,6 +46,16 @@ suite =
                 changed = ChangeStream.reduceFrame (Api.CanonicalChange membership) (ChangeStream.init (ChangeStream.Workspace "w") []) |> Tuple.second
             in Expect.equal {progress=[ChangeStream.RefreshAgentSessionProgress "w" agentId],lists=True,activity=True,membershipProgress=False,documentCounts=True}
                 {progress=progress,lists=List.member (ChangeStream.RefreshAgentSessionList "w") changed,activity=List.member (ChangeStream.RefreshSessionActivityMembership "w") changed,membershipProgress=List.member (ChangeStream.RefreshAgentSessionProgress "w" agentId) changed,documentCounts=List.member (ChangeStream.RefreshDocumentCounts "w") changed}
+        , test "incremental replay invalidations remain replaying and duplicate-safe until their terminal checkpoint" <| \_ ->
+            let
+                frame = Api.CanonicalChange (sessionEvent False)
+                ( partial, changes ) = ChangeStream.reduceFrames [ frame ] (ChangeStream.init (ChangeStream.Workspace "w") [])
+                ( replayed, duplicates ) = ChangeStream.reduceFrames [ frame ] partial
+                ( final, terminalActions ) = ChangeStream.reduceFrames [ Api.CanonicalCheckpoint "accepted" ] replayed
+            in
+            Expect.equal
+                { partial = ( False, Nothing, [ ChangeStream.RefreshAgentSessionProgress "w" agentId ] ), duplicates = [], final = ( True, Just "accepted", [] ) }
+                { partial = ( partial.live, partial.resumeToken, changes ), duplicates = duplicates, final = ( final.live, final.resumeToken, terminalActions ) }
         , test "raw Source removal and preview publication coalesce into a targeted refresh" <| \_ ->
             let
                 hints = [ ( "entity", "task:" ++ linkedTaskId ), ( "collection", "task_documents:" ++ linkedTaskId ) ]

@@ -7,6 +7,9 @@ export const MAX_EVENT_IDS = 128
 export const FULL_SNAPSHOT_PROFILE = 'full_v1'
 export const WORKSPACE_SHELL_SNAPSHOT_PROFILE = 'workspace_shell_v1'
 const MAX_RETRIES = 6
+export const STREAM_PHASE_TIMEOUT_MS = 30000
+export const MAX_PENDING_FRAMES = 128
+export const MAX_PENDING_FRAME_BYTES = 262144
 const SNAPSHOT_KINDS = new Set(['workspace', 'workspace_group', 'project', 'task', 'task_dependency', 'observation'])
 
 export function opaqueAudienceKey(audienceId) {
@@ -68,9 +71,11 @@ export function canonicalEndpoint(apiUrl, path) {
   return url.toString()
 }
 
-export function createCanonicalFrameBatcher({ onBatch, onIncomplete = () => {}, setTimer = setTimeout, clearTimer = clearTimeout, incompleteDelay = 1000 }) {
+export function createCanonicalFrameBatcher({ onBatch, setTimer = setTimeout, clearTimer = clearTimeout }) {
   const batches = new Map()
+  const versions = new Map()
   const failedScopes = new Set()
+  let epoch = 0
   const scopeKey = (scope, workspaceId) => scope === 'global' ? 'global' : `workspace:${workspaceId}`
 
   function flushKey(key) {
@@ -78,7 +83,13 @@ export function createCanonicalFrameBatcher({ onBatch, onIncomplete = () => {}, 
     if (!pending) return
     if (pending.timer != null) clearTimer(pending.timer)
     batches.delete(key)
-    onBatch(pending.scope, pending.workspaceId, pending.frames)
+    const version = versions.get(key)
+    const currentEpoch = epoch
+    try {
+      if (onBatch(pending.scope, pending.workspaceId, pending.frames) !== false) return true
+    } catch (_) { /* The next frame or progress deadline recovers this scope. */ }
+    if (epoch === currentEpoch && versions.get(key) === version) failedScopes.add(key)
+    return false
   }
 
   function clear(scope, workspaceId) {
@@ -86,35 +97,40 @@ export function createCanonicalFrameBatcher({ onBatch, onIncomplete = () => {}, 
     const pending = batches.get(key)
     if (pending && pending.timer != null) clearTimer(pending.timer)
     batches.delete(key)
+    versions.delete(key)
     failedScopes.delete(key)
   }
 
   return {
     queue(scope, workspaceId, frame) {
       const key = scopeKey(scope, workspaceId)
-      if (failedScopes.has(key)) return
-      const pending = batches.get(key) || { scope, workspaceId, frames: [], timer: null }
+      if (failedScopes.has(key)) return false
+      const version = versions.get(key) || {}
+      versions.set(key, version)
+      const currentEpoch = epoch
+      const bytes = JSON.stringify(frame).length * 2
+      const existing = batches.get(key)
+      if (existing && existing.bytes + bytes > MAX_PENDING_FRAME_BYTES) {
+        if (!flushKey(key) || epoch !== currentEpoch || versions.get(key) !== version) return false
+      }
+      const pending = batches.get(key) || { scope, workspaceId, frames: [], bytes: 0, timer: null }
       pending.frames.push(frame)
-      if (pending.timer != null) clearTimer(pending.timer)
+      pending.bytes += bytes
       batches.set(key, pending)
       const closesDelivery = frame && frame.schema_version === 1 && ['checkpoint', 'access_granted', 'access_revoked', 'resync_required'].includes(frame.type)
-      if (closesDelivery) {
-        pending.timer = null
-        flushKey(key)
-      } else {
-        pending.timer = setTimer(() => {
-          if (batches.get(key) !== pending) return
-          batches.delete(key)
-          failedScopes.add(key)
-          onIncomplete(scope, workspaceId)
-        }, incompleteDelay)
+      if (closesDelivery || pending.frames.length >= MAX_PENDING_FRAMES || pending.bytes >= MAX_PENDING_FRAME_BYTES) {
+        return flushKey(key) && epoch === currentEpoch && versions.get(key) === version
       }
+      if (pending.timer == null) pending.timer = setTimer(() => { if (batches.get(key) === pending) flushKey(key) }, 0)
+      return true
     },
     clear,
     clearAll() {
       for (const pending of batches.values()) if (pending.timer != null) clearTimer(pending.timer)
       batches.clear()
+      versions.clear()
       failedScopes.clear()
+      epoch += 1
     }
   }
 }
@@ -139,8 +155,18 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
   function key(scope, workspaceId) { return scope === 'global' ? 'global' : `workspace:${workspaceId}` }
   function isCurrent(entry, generation) { return sockets.get(key(entry.scope, entry.workspaceId)) === entry && entry.generation === generation }
   function cancelled() { const error = new Error('cancelled'); error.cancelled = true; return error }
+  function clearWatchdog(entry) {
+    if (entry.watchdogTimer != null) clearTimer(entry.watchdogTimer)
+    entry.watchdogTimer = null
+  }
+  function watchProgress(entry, generation) {
+    clearWatchdog(entry)
+    entry.watchdogTimer = setTimer(() => recover(entry, generation), STREAM_PHASE_TIMEOUT_MS)
+    entry.watchdogTimer?.unref?.()
+  }
   function stop(entry) {
     entry.generation += 1
+    clearWatchdog(entry)
     if (entry.timer != null) clearTimer(entry.timer)
     entry.timer = null
     if (entry.retryDelayTimer != null) clearTimer(entry.retryDelayTimer)
@@ -148,23 +174,40 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     const rejectDelay = entry.retryDelayReject
     entry.retryDelayReject = null
     if (rejectDelay) rejectDelay()
-    if (entry.abortController) { entry.abortController.abort(); entry.abortController = null }
-    if (entry.socket) { entry.socket.close(); entry.socket = null }
+    if (entry.request) entry.request.cancel()
+    const socket = entry.socket
+    entry.socket = null
+    if (socket) socket.close()
   }
-  async function guardedFetch(entry, generation, url, options) {
+  function guardedFetch(entry, generation, url, options) {
     if (!isCurrent(entry, generation)) throw cancelled()
     const controller = typeof AbortControllerImpl === 'function' ? new AbortControllerImpl() : null
-    if (controller) entry.abortController = controller
-    try {
-      const response = await fetchImpl(url, { ...options, ...(controller ? { signal: controller.signal } : {}) })
-      if (!isCurrent(entry, generation)) throw cancelled()
-      return response
-    } catch (error) {
-      if (!isCurrent(entry, generation) || (error && error.name === 'AbortError')) throw cancelled()
-      throw error
-    } finally {
-      if (entry.abortController === controller) entry.abortController = null
-    }
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const request = { timer: null, cancel: () => { controller?.abort(); finish(cancelled()) } }
+      function finish(error, value) {
+        if (settled) return
+        settled = true
+        if (request.timer != null) clearTimer(request.timer)
+        if (entry.request === request) entry.request = null
+        if (error) reject(error)
+        else resolve(value)
+      }
+      entry.request = request
+      request.timer = setTimer(() => { controller?.abort(); finish(new Error('transport_timeout')) }, STREAM_PHASE_TIMEOUT_MS)
+      request.timer?.unref?.()
+      ;(async () => {
+        try {
+          const response = await fetchImpl(url, { ...options, ...(controller ? { signal: controller.signal } : {}) })
+          if (!isCurrent(entry, generation) || settled) throw cancelled()
+          const body = response.ok ? await response.json() : null
+          if (!isCurrent(entry, generation)) throw cancelled()
+          finish(null, { response, body })
+        } catch (error) {
+          finish(!isCurrent(entry, generation) ? cancelled() : error)
+        }
+      })()
+    })
   }
   function throwForAuthorization(status) {
     if (status === 401) throw new Error('unauthenticated')
@@ -199,15 +242,13 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     })
   }
   async function obtainTicket(entry, generation) {
-    const response = await guardedFetch(entry, generation, endpoint('/api/v1/change-stream/ticket'), {
+    const { response, body } = await guardedFetch(entry, generation, endpoint('/api/v1/change-stream/ticket'), {
       method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(entry.headers || {}) },
       body: JSON.stringify(canonicalTicketBody(entry.scope, entry.workspaceId, entry.resumeToken))
     })
     if (response.status === 409) throw new Error('resync_required')
     throwForAuthorization(response.status)
     if (!response.ok) throw new Error(`ticket_${response.status}`)
-    const body = await response.json()
-    if (!isCurrent(entry, generation)) throw cancelled()
     if (!body || typeof body.ticket !== 'string' || !body.ticket) throw new Error('invalid_ticket')
     return body.ticket
   }
@@ -254,11 +295,10 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     // server's atomic snapshot/replay hand-off at the transport boundary.
     for (let attempts = 0; attempts < 256; attempts += 1) {
       const body = pageToken ? { scope: canonicalTicketBody(entry.scope, entry.workspaceId, 'x').scope, page_token: pageToken } : { scope: canonicalTicketBody(entry.scope, entry.workspaceId, 'x').scope, snapshot_profile: entry.snapshotProfile, page_size: 100, start_idempotency_key: startKey }
-      const response = await postResyncPage(entry, generation, body)
+      const { response, body: page } = await postResyncPage(entry, generation, body)
       if (response.status === 409) throw new Error('resync_required')
       throwForAuthorization(response.status)
       if (!response.ok) throw new Error(`resync_${response.status}`)
-      const page = await response.json()
       if (!isCurrent(entry, generation)) throw cancelled()
       if (!page || page.snapshot_profile !== entry.snapshotProfile || !Array.isArray(page.items) || page.items.some(item => !validSnapshotItem(entry, item)) || typeof page.has_more !== 'boolean') throw new Error('invalid_snapshot')
       if (page.has_more) {
@@ -275,12 +315,12 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     }
     if (!resumeToken) throw new Error('resync_exhausted')
     if (!isCurrent(entry, generation)) throw cancelled()
-    entry.resumeToken = resumeToken
     // The Elm port delivery is synchronous.  Emitting the fully accumulated
     // snapshot before requesting a ticket prevents replay from racing a
     // partial model replacement.
-    onSnapshot(entry.scope, entry.workspaceId, { items, resumeToken, snapshotProfile: entry.snapshotProfile })
+    if (onSnapshot(entry.scope, entry.workspaceId, { items, resumeToken, snapshotProfile: entry.snapshotProfile }) === false) throw new Error('snapshot_delivery_failed')
     if (!isCurrent(entry, generation)) throw cancelled()
+    entry.resumeToken = resumeToken
     writeCheckpoint(storage, entry.audienceId, entry.scope, entry.workspaceId, resumeToken, [])
   }
   async function postResyncPage(entry, generation, body) {
@@ -289,8 +329,9 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
       let retryResponse = null
       try {
-        const response = await guardedFetch(entry, generation, endpoint('/api/v1/change-stream/resync'), { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(entry.headers || {}) }, body: requestBody })
-        if (response.status === 409 || response.status === 401 || response.status === 403 || response.ok || (response.status < 500 && response.status !== 408 && response.status !== 429)) return response
+        const result = await guardedFetch(entry, generation, endpoint('/api/v1/change-stream/resync'), { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', ...(entry.headers || {}) }, body: requestBody })
+        const { response } = result
+        if (response.status === 409 || response.status === 401 || response.status === 403 || response.ok || (response.status < 500 && response.status !== 408 && response.status !== 429)) return result
         lastError = new Error(`resync_${response.status}`)
         retryResponse = response
       } catch (error) {
@@ -308,29 +349,51 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
       const ticket = await obtainTicket(entry, generation)
       if (!isCurrent(entry, generation)) return
       const socket = new WebSocketImpl(socketUrl(ticket)); entry.socket = socket
-      socket.onopen = () => { if (isCurrent(entry, generation)) onState(entry.scope, entry.workspaceId, 'replaying') }
+      watchProgress(entry, generation)
+      socket.onopen = () => {
+        if (!isCurrent(entry, generation)) return
+        watchProgress(entry, generation)
+        onState(entry.scope, entry.workspaceId, 'replaying')
+      }
       socket.onmessage = event => {
         if (!isCurrent(entry, generation)) return
+        let frame = null
+        try { frame = JSON.parse(event.data) } catch (_) { /* Elm validates malformed delivery. */ }
+        const checkpoint = frame && frame.schema_version === 1 && frame.type === 'checkpoint'
+          && typeof frame.resume_token === 'string' && frame.resume_token && frame.catch_up === 'complete'
+        const change = frame && frame.schema_version === 1 && frame.type === 'change'
+          && frame.event && typeof frame.event.event_id === 'string'
+        const revokesThisWorkspace = frame && frame.schema_version === 1 && frame.type === 'access_revoked'
+          && entry.scope === 'workspace' && (!frame.workspace_id || frame.workspace_id === entry.workspaceId)
+        if (revokesThisWorkspace || (frame && frame.schema_version === 1 && frame.type === 'resync_required')) {
+          entry.closedByControl = true
+          clearWatchdog(entry)
+          clearCheckpoint(storage, entry.audienceId, entry.scope, entry.workspaceId)
+        }
         try {
-          const frame = JSON.parse(event.data)
-          if (frame && frame.schema_version === 1 && frame.type === 'checkpoint' && typeof frame.resume_token === 'string' && frame.resume_token && frame.catch_up === 'complete') {
-            entry.resumeToken = frame.resume_token; entry.attempt = 0
-            entry.eventIds = Array.from(new Set([...entry.eventIds, ...entry.pendingEventIds])).slice(-MAX_EVENT_IDS)
-            entry.pendingEventIds = []
-            writeCheckpoint(storage, entry.audienceId, entry.scope, entry.workspaceId, entry.resumeToken, entry.eventIds || [])
+          if (onFrame(entry.scope, entry.workspaceId, event.data) === false) {
+            recover(entry, generation)
+            return
           }
-          if (frame && frame.schema_version === 1 && frame.type === 'change' && frame.event && typeof frame.event.event_id === 'string') entry.pendingEventIds = Array.from(new Set([...entry.pendingEventIds, frame.event.event_id])).slice(-MAX_EVENT_IDS)
-          const revokesThisWorkspace = frame && frame.schema_version === 1 && frame.type === 'access_revoked' && entry.scope === 'workspace' && (!frame.workspace_id || frame.workspace_id === entry.workspaceId)
-          if (revokesThisWorkspace) {
-            entry.closedByControl = true
-            clearCheckpoint(storage, entry.audienceId, entry.scope, entry.workspaceId)
-          }
-          if (frame && frame.schema_version === 1 && frame.type === 'resync_required') {
-            entry.closedByControl = true
-            clearCheckpoint(storage, entry.audienceId, entry.scope, entry.workspaceId)
-          }
-        } catch (_) { /* Elm will fail closed and request a resync. */ }
-        onFrame(entry.scope, entry.workspaceId, event.data)
+        } catch (_) {
+          recover(entry, generation)
+          return
+        }
+        if (!isCurrent(entry, generation)) return
+        // Progress means new accepted delivery, not traffic. Keep bounded
+        // recent-ID windows; replayed checkpoint IDs and
+        // repeated pending IDs cannot postpone a stalled replay's deadline.
+        if (change && !entry.eventIds.includes(frame.event.event_id) && !entry.pendingEventIds.includes(frame.event.event_id)) {
+          entry.pendingEventIds = [...entry.pendingEventIds, frame.event.event_id].slice(-MAX_EVENT_IDS)
+          watchProgress(entry, generation)
+        }
+        if (checkpoint) {
+          clearWatchdog(entry)
+          entry.resumeToken = frame.resume_token; entry.attempt = 0
+          entry.eventIds = Array.from(new Set([...entry.eventIds, ...entry.pendingEventIds])).slice(-MAX_EVENT_IDS)
+          entry.pendingEventIds = []
+          writeCheckpoint(storage, entry.audienceId, entry.scope, entry.workspaceId, entry.resumeToken, entry.eventIds)
+        }
       }
       socket.onclose = () => {
         if (!isCurrent(entry, generation)) return
@@ -350,6 +413,13 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
       stop(entry)
       retry(entry)
     }
+  }
+  function recover(entry, generation) {
+    if (!isCurrent(entry, generation)) return
+    stop(entry)
+    entry.pendingEventIds = []
+    if (entry.closedByControl) onState(entry.scope, entry.workspaceId, 'control_closed')
+    else retry(entry)
   }
   function retry(entry) {
     if (entry.attempt >= MAX_RETRIES) {
@@ -398,7 +468,7 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
       // safe for a caller that retained its corresponding projections.
       const resolvedProfile = snapshotProfile || (scope === 'workspace' ? WORKSPACE_SHELL_SNAPSHOT_PROFILE : FULL_SNAPSHOT_PROFILE)
       if ((scope === 'global' && resolvedProfile !== FULL_SNAPSHOT_PROFILE) || ![FULL_SNAPSHOT_PROFILE, WORKSPACE_SHELL_SNAPSHOT_PROFILE].includes(resolvedProfile)) throw new Error('invalid snapshot profile')
-      const entry = { audienceId, scope, workspaceId, resumeToken: resumeToken || null, eventIds: resumeToken && storageValue ? storageValue.eventIds : [], pendingEventIds: [], headers, snapshotProfile: resolvedProfile, generation: 0, attempt: 0, socket: null, timer: null, abortController: null, closedByControl: false, restartable: false }
+      const entry = { audienceId, scope, workspaceId, resumeToken: resumeToken || null, eventIds: resumeToken && storageValue ? storageValue.eventIds : [], pendingEventIds: [], headers, snapshotProfile: resolvedProfile, generation: 0, attempt: 0, socket: null, timer: null, watchdogTimer: null, request: null, closedByControl: false, restartable: false }
       if (old) stop(old)
       sockets.set(entryKey, entry)
       begin(entry)
@@ -406,6 +476,7 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     checkpoint(scope, workspaceId, resumeToken, eventIds = []) {
       const entry = sockets.get(key(scope, workspaceId)); if (!entry) return false
       if (typeof resumeToken !== 'string' || !resumeToken) return false
+      clearWatchdog(entry)
       entry.resumeToken = resumeToken; entry.attempt = 0
       entry.eventIds = Array.from(new Set(eventIds)).slice(-MAX_EVENT_IDS); entry.pendingEventIds = []
       return writeCheckpoint(storage, entry.audienceId, scope, workspaceId, resumeToken, eventIds)

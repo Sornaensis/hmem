@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { canonicalEndpoint, canonicalTicketBody, clearCheckpoint, createCanonicalFrameBatcher, createCanonicalStateHandler, createChangeStreamManager, opaqueAudienceKey, readCheckpoint, scopeStorageKey, startIdempotencyKey, writeCheckpoint } from '../src/change-stream.js'
+import { canonicalEndpoint, canonicalTicketBody, clearCheckpoint, createCanonicalFrameBatcher, createCanonicalStateHandler, createChangeStreamManager, opaqueAudienceKey, readCheckpoint, scopeStorageKey, startIdempotencyKey, writeCheckpoint, STREAM_PHASE_TIMEOUT_MS, MAX_EVENT_IDS, MAX_PENDING_FRAMES, MAX_PENDING_FRAME_BYTES } from '../src/change-stream.js'
 
 function storage() { const values = new Map(); return { getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key) } }
 
@@ -90,7 +90,7 @@ test('production state boundary discards incomplete old delivery and preserves i
 test('authorization failure and revoked control closure never retry on repeated connect', async () => {
   for (const status of [401, 403]) {
     const states = []; let requests = 0; let retries = 0
-    const manager = createChangeStreamManager({ apiUrl: 'https://api.example', wsUrl: 'wss://api.example/ws', storage: storage(), WebSocketImpl: class {}, fetchImpl: async () => { requests += 1; return { ok: false, status } }, onState: (...args) => states.push(args), setTimer: () => { retries += 1 }, clearTimer: () => {} })
+    const manager = createChangeStreamManager({ apiUrl: 'https://api.example', wsUrl: 'wss://api.example/ws', storage: storage(), WebSocketImpl: class {}, fetchImpl: async () => { requests += 1; return { ok: false, status } }, onState: (...args) => states.push(args), setTimer: (_fn, milliseconds) => { if (milliseconds < STREAM_PHASE_TIMEOUT_MS) retries += 1 }, clearTimer: () => {} })
     const config = { audienceId: 'actor', scope: 'global', resumeToken: 'accepted' }
     manager.connect(config); await settled(); manager.connect(config); await settled()
     assert.equal(requests, 1); assert.equal(retries, 0)
@@ -150,9 +150,10 @@ test('socket close automatically reconnects with the latest checkpoint and a fre
   await new Promise(resolve => setTimeout(resolve, 0))
   sockets[0].onmessage({ data: JSON.stringify({ schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'latest-token' }) })
   sockets[0].onclose()
-  assert.equal(timers.length, 1)
-  assert.equal(timers[0].milliseconds, 500)
-  timers[0].fn()
+  const retries = timers.filter(timer => timer.milliseconds < STREAM_PHASE_TIMEOUT_MS)
+  assert.equal(retries.length, 1)
+  assert.equal(retries[0].milliseconds, 500)
+  retries[0].fn()
   await new Promise(resolve => setTimeout(resolve, 0))
   assert.deepEqual(requests.map(request => request.resume_token), ['initial-token', 'latest-token'])
   assert.deepEqual(sockets.map(socket => new URL(socket.url).searchParams.get('ticket')), ['one-use-1', 'one-use-2'])
@@ -182,16 +183,16 @@ test('resync accumulates every page before ticketing and keeps snapshot material
 test('access revocation clears only its scope and cannot schedule a reconnect', async () => {
   const s = storage(); const timers = []; const sockets = []
   class FakeSocket { constructor() { sockets.push(this); queueMicrotask(() => this.onopen()) } close() {} }
-  const manager = createChangeStreamManager({ apiUrl: 'https://api.example', wsUrl: 'wss://ws.example/ws', storage: s, WebSocketImpl: FakeSocket, fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ ticket: 'ticket' }) }), setTimer: fn => { timers.push(fn); return timers.length }, clearTimer: () => {} })
+  const manager = createChangeStreamManager({ apiUrl: 'https://api.example', wsUrl: 'wss://ws.example/ws', storage: s, WebSocketImpl: FakeSocket, fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ ticket: 'ticket' }) }), setTimer: (fn, milliseconds) => { timers.push({ fn, milliseconds }); return timers.length }, clearTimer: () => {} })
   writeCheckpoint(s, 'actor', 'workspace', 'a', 'a-token', []); writeCheckpoint(s, 'actor', 'workspace', 'b', 'b-token', []); writeCheckpoint(s, 'actor', 'global', null, 'global-token', [])
   manager.connect({ audienceId: 'actor', scope: 'workspace', workspaceId: 'a', resumeToken: 'a-token' }); manager.connect({ audienceId: 'actor', scope: 'workspace', workspaceId: 'b', resumeToken: 'b-token' }); manager.connect({ audienceId: 'actor', scope: 'global', resumeToken: 'global-token' }); await new Promise(resolve => setTimeout(resolve, 0))
   sockets[2].onmessage({ data: JSON.stringify({ schema_version: 1, type: 'access_revoked', workspace_id: 'a' }) }); assert.deepEqual(readCheckpoint(s, 'actor', 'global', null), { resumeToken: 'global-token', eventIds: [] })
   sockets[0].onmessage({ data: JSON.stringify({ schema_version: 1, type: 'access_revoked', workspace_id: 'a' }) }); sockets[0].onclose()
   assert.equal(readCheckpoint(s, 'actor', 'workspace', 'a'), null)
   assert.deepEqual(readCheckpoint(s, 'actor', 'workspace', 'b'), { resumeToken: 'b-token', eventIds: [] })
-  assert.equal(timers.length, 0)
+  assert.equal(timers.filter(timer => timer.milliseconds < STREAM_PHASE_TIMEOUT_MS).length, 0)
   manager.disconnect('workspace', 'b'); manager.clear('workspace', 'b', 'actor'); assert.equal(readCheckpoint(s, 'actor', 'workspace', 'b'), null)
-  sockets[2].onclose(); assert.equal(timers.length, 1)
+  sockets[2].onclose(); assert.equal(timers.filter(timer => timer.milliseconds < STREAM_PHASE_TIMEOUT_MS).length, 1)
 })
 
 test('canonical HTTP endpoints preserve root and configured deployment prefixes', () => {
@@ -238,26 +239,20 @@ test('standalone access grant is an immediate boundary without failing its carri
   assert.deepEqual(incomplete, [])
 })
 
-test('an incomplete delivery times out into scoped recovery without applying partial frames', () => {
-  const delivered = []; const incomplete = []; const timers = new Map(); let nextTimer = 0
+test('partial delivery flushes on the event loop without inventing a checkpoint or invalidation', () => {
+  const delivered = []; const timers = new Map(); let nextTimer = 0
   const batcher = createCanonicalFrameBatcher({
     onBatch: (...args) => delivered.push(args),
-    onIncomplete: (...args) => incomplete.push(args),
     setTimer: (fn, milliseconds) => { nextTimer += 1; timers.set(nextTimer, { fn, milliseconds }); return nextTimer },
-    clearTimer: timer => timers.delete(timer),
-    incompleteDelay: 750
+    clearTimer: timer => timers.delete(timer)
   })
   const change = { schema_version: 1, type: 'change', event: { event_id: 'one' } }
   const checkpoint = { schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'opaque' }
   batcher.queue('workspace', 'a', change)
-  assert.equal(timers.get(1).milliseconds, 750)
+  assert.equal(timers.get(1).milliseconds, 0)
   timers.get(1).fn()
   batcher.queue('workspace', 'a', checkpoint)
-  assert.deepEqual(delivered, [])
-  assert.deepEqual(incomplete, [['workspace', 'a']])
-  batcher.clear('workspace', 'a')
-  batcher.queue('workspace', 'a', checkpoint)
-  assert.deepEqual(delivered, [['workspace', 'a', [checkpoint]]])
+  assert.deepEqual(delivered, [['workspace', 'a', [change]], ['workspace', 'a', [checkpoint]]])
 })
 
 test('cancelled resync aborts and cannot emit snapshot, state, socket, or storage writes', async () => {
@@ -338,7 +333,7 @@ test('resync retry classes are bounded and deterministic', async () => {
     const manager = createChangeStreamManager({
       apiUrl: 'https://api.example', wsUrl: 'wss://api.example/ws', storage: storage(), WebSocketImpl: class {},
       fetchImpl: async () => { attempts += 1; return { ok: false, status } }, onState: (...args) => states.push(args),
-      setTimer: (fn, milliseconds) => { delays.push(milliseconds); queueMicrotask(fn); return delays.length }, clearTimer: () => {}
+      setTimer: (fn, milliseconds) => { if (milliseconds === STREAM_PHASE_TIMEOUT_MS) return Symbol('deadline'); delays.push(milliseconds); queueMicrotask(fn); return delays.length }, clearTimer: () => {}
     })
     manager.connect({ audienceId: 'actor', scope: 'workspace', workspaceId: 'a' })
     await new Promise(resolve => setTimeout(resolve, 10))
@@ -362,7 +357,7 @@ test('resync retries preserve each page body and continuation token byte-for-byt
       if (resyncAttempt === 2) return { ok: true, status: 200, json: async () => ({ snapshot_profile: 'workspace_shell_v1', items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: true, next_page_token: 'continuation' }) }
       return { ok: true, status: 200, json: async () => ({ snapshot_profile: 'workspace_shell_v1', items: [], has_more: false, resume_token: 'resume' }) }
     },
-    setTimer: (fn, milliseconds) => { delays.push(milliseconds); queueMicrotask(fn); return delays.length }, clearTimer: () => {}
+    setTimer: (fn, milliseconds) => { if (milliseconds === STREAM_PHASE_TIMEOUT_MS) return Symbol('deadline'); delays.push(milliseconds); queueMicrotask(fn); return delays.length }, clearTimer: () => {}
   })
   manager.connect({ audienceId: 'actor', scope: 'workspace', workspaceId: 'a' })
   await new Promise(resolve => setTimeout(resolve, 10))
@@ -385,10 +380,11 @@ test('disconnect cancels an in-progress resync backoff before another fetch', as
   manager.connect({ audienceId: 'actor', scope: 'workspace', workspaceId: 'a' })
   await new Promise(resolve => setTimeout(resolve, 0))
   assert.equal(attempts, 1)
-  assert.equal(timers[0].milliseconds, 100)
+  const retry = timers.find(timer => timer.milliseconds === 100)
+  assert.ok(retry)
   manager.disconnect('workspace', 'a')
-  assert.equal(timers[0].cleared, true)
-  timers[0].fn()
+  assert.equal(retry.cleared, true)
+  retry.fn()
   await new Promise(resolve => setTimeout(resolve, 0))
   assert.equal(attempts, 1)
   assert.deepEqual(states, [['workspace', 'a', 'resyncing']])
@@ -496,4 +492,251 @@ test('a delayed Observation v2 continuation cannot complete after scoped retirem
   h.manager.disconnect('workspace', 'a'); release(snapshotPage([observationSnapshot()])); await settled()
   assert.deepEqual(h.snapshots, []); assert.equal(h.sockets.length, 0)
   assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+})
+
+function phaseClock() {
+  let time = 0
+  let next = 0
+  const timers = new Map()
+  return {
+    timers,
+    setTimer(fn, milliseconds) {
+      const id = ++next
+      timers.set(id, { fn, at: time + milliseconds, milliseconds })
+      return id
+    },
+    clearTimer(id) { timers.delete(id) },
+    advance(milliseconds) {
+      const end = time + milliseconds
+      for (;;) {
+        const due = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0]
+        if (!due) break
+        timers.delete(due[0])
+        time = due[1].at
+        due[1].fn()
+      }
+      time = end
+    }
+  }
+}
+
+function recoveryHarness({ fetchImpl, onFrame = () => {}, onSnapshot = () => {}, onState = () => {} } = {}) {
+  const clock = phaseClock(), requests = [], sockets = [], states = [], saved = storage()
+  class Socket {
+    constructor() { sockets.push(this) }
+    close() { this.closed = true }
+  }
+  const ticket = () => ({ ok: true, status: 200, json: async () => ({ ticket: 'one-use' }) })
+  const manager = createChangeStreamManager({ apiUrl: 'https://api.example', wsUrl: 'wss://api.example/ws', storage: saved,
+    WebSocketImpl: Socket, setTimer: clock.setTimer, clearTimer: clock.clearTimer, onFrame, onSnapshot,
+    onState: (...args) => { states.push(args); onState(...args) },
+    fetchImpl: (url, options) => { requests.push({ url, ...options }); return fetchImpl ? fetchImpl(url, options, requests.length) : ticket() }
+  })
+  return { manager, clock, requests, sockets, states, storage: saved, ticket,
+    connect: (extra = {}) => manager.connect({ audienceId: 'actor', scope: 'workspace', workspaceId: 'a', resumeToken: 'accepted', ...extra }) }
+}
+
+for (const phase of ['headers', 'body']) test(`a stalled ticket ${phase} times out and late completion cannot create a socket`, async () => {
+  let release
+  const h = recoveryHarness({ fetchImpl: (_url, _options, attempt) => {
+    if (attempt > 1) return h.ticket()
+    if (phase === 'headers') return new Promise(resolve => { release = () => resolve(h.ticket()) })
+    return { ok: true, status: 200, json: () => new Promise(resolve => { release = () => resolve({ ticket: 'late' }) }) }
+  } })
+  h.connect(); await settled()
+  h.clock.advance(STREAM_PHASE_TIMEOUT_MS); await settled()
+  assert.equal(h.requests[0].signal.aborted, true)
+  assert.equal(h.states.at(-1)[2], 'reconnecting')
+  release(); await settled()
+  assert.equal(h.sockets.length, 0)
+  h.clock.advance(500); await settled()
+  assert.equal(h.sockets.length, 1)
+  assert.deepEqual(h.requests.map(request => JSON.parse(request.body).resume_token), ['accepted', 'accepted'])
+  h.manager.disconnectAll()
+})
+
+for (const phase of ['headers', 'body']) test(`a stalled snapshot ${phase} retries the identical page before any ticket`, async () => {
+  let release
+  const page = { snapshot_profile: 'workspace_shell_v1', items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: false, resume_token: 'snapshot' }
+  const snapshots = []
+  const h = recoveryHarness({ onSnapshot: (...args) => snapshots.push(args), fetchImpl: (url, _options, attempt) => {
+    if (url.endsWith('/ticket')) return h.ticket()
+    if (attempt > 1) return { ok: true, status: 200, json: async () => page }
+    if (phase === 'headers') return new Promise(resolve => { release = () => resolve({ ok: true, status: 200, json: async () => page }) })
+    return { ok: true, status: 200, json: () => new Promise(resolve => { release = () => resolve(page) }) }
+  } })
+  h.connect({ resumeToken: undefined }); await settled()
+  h.clock.advance(STREAM_PHASE_TIMEOUT_MS); await settled()
+  assert.equal(h.requests[0].signal.aborted, true)
+  assert.equal(h.sockets.length, 0)
+  assert.equal(snapshots.length, 0)
+  h.clock.advance(100); await settled()
+  assert.equal(h.requests[0].body, h.requests[1].body)
+  assert.equal(snapshots.length, 1)
+  assert.equal(h.sockets.length, 1)
+  release(); await settled()
+  assert.equal(snapshots.length, 1)
+  h.manager.disconnectAll()
+})
+
+test('Upgrade and initial replay stalls reconnect on the accepted bearer and fence retired socket callbacks', async () => {
+  const h = recoveryHarness()
+  h.connect(); await settled()
+  const old = h.sockets[0]
+  const staleTimer = [...h.clock.timers.values()][0].fn
+  h.clock.advance(STREAM_PHASE_TIMEOUT_MS); await settled()
+  assert.equal(old.closed, true)
+  old.onopen(); old.onmessage({ data: checkpoint('late') }); staleTimer()
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+  h.clock.advance(500); await settled()
+  h.sockets[1].onopen()
+  h.clock.advance(STREAM_PHASE_TIMEOUT_MS); await settled()
+  assert.equal(h.sockets[1].closed, true)
+  h.clock.advance(1000); await settled()
+  assert.deepEqual(h.requests.map(request => JSON.parse(request.body).resume_token), ['accepted', 'accepted', 'accepted'])
+  h.manager.disconnectAll()
+})
+
+test('slow progressing replay flushes bounded changes and quiet live sockets have no watchdog cadence', async () => {
+  const delivered = []
+  let batcher
+  const h = recoveryHarness({ onFrame: (scope, workspace, raw) => batcher.queue(scope, workspace, JSON.parse(raw)),
+    onState: (scope, workspace) => batcher.clear(scope, workspace) })
+  batcher = createCanonicalFrameBatcher({ onBatch: (_scope, _workspace, frames) => delivered.push(frames), setTimer: h.clock.setTimer, clearTimer: h.clock.clearTimer })
+  h.connect(); await settled(); h.sockets[0].onopen()
+  h.sockets[0].onmessage({ data: JSON.stringify({ schema_version: 1, type: 'change', event: { event_id: 'one' } }) })
+  h.clock.advance(1500)
+  assert.deepEqual(delivered.map(frames => frames.map(frame => frame.type)), [['change']])
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+  h.sockets[0].onmessage({ data: JSON.stringify({ schema_version: 1, type: 'change', event: { event_id: 'two' } }) })
+  h.clock.advance(STREAM_PHASE_TIMEOUT_MS - 1)
+  assert.equal(h.requests.length, 1)
+  h.sockets[0].onmessage({ data: checkpoint('complete') })
+  h.clock.advance(STREAM_PHASE_TIMEOUT_MS * 2)
+  h.sockets[0].onmessage({ data: JSON.stringify({ schema_version: 1, type: 'session_activity_changed', workspace_id: 'a' }) })
+  h.clock.advance(STREAM_PHASE_TIMEOUT_MS * 2)
+  assert.equal(h.requests.length, 1)
+  assert.deepEqual(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), { resumeToken: 'complete', eventIds: ['one', 'two'] })
+  h.manager.disconnectAll()
+})
+
+test('partial replay stalls recover with the last checkpoint without persisting unfinished event IDs', async () => {
+  const h = recoveryHarness()
+  h.connect(); await settled(); h.sockets[0].onopen()
+  h.sockets[0].onmessage({ data: checkpoint('live') })
+  h.sockets[0].onmessage({ data: JSON.stringify({ schema_version: 1, type: 'change', event: { event_id: 'unfinished' } }) })
+  h.clock.advance(STREAM_PHASE_TIMEOUT_MS); await settled()
+  h.clock.advance(500); await settled()
+  assert.equal(JSON.parse(h.requests.at(-1).body).resume_token, 'live')
+  assert.deepEqual(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), { resumeToken: 'live', eventIds: [] })
+  h.manager.disconnectAll()
+})
+
+for (const retained of [false, true]) test(`repeated ${retained ? 'checkpointed' : 'pending'} event IDs cannot hide a stalled replay`, async () => {
+  const h = recoveryHarness()
+  h.connect(); await settled(); h.sockets[0].onopen()
+  const frame = JSON.stringify({ schema_version: 1, type: 'change', event: { event_id: 'repeated' } })
+  h.sockets[0].onmessage({ data: frame })
+  if (retained) {
+    h.sockets[0].onmessage({ data: checkpoint('retained') })
+    h.sockets[0].onclose()
+    h.clock.advance(500); await settled(); h.sockets[1].onopen()
+  }
+  const socket = h.sockets.at(-1)
+  for (let index = 0; index < 2; index += 1) {
+    h.clock.advance(10000)
+    socket.onmessage({ data: frame })
+  }
+  h.clock.advance(10000); await settled()
+  assert.equal(socket.closed, true, 'Repeated IDs must not restart the original 30-second progress deadline')
+  h.clock.advance(retained ? 1000 : 500); await settled()
+  assert.equal(JSON.parse(h.requests.at(-1).body).resume_token, retained ? 'retained' : 'accepted')
+  h.manager.disconnectAll()
+})
+
+test('distinct slow progress may exceed the bounded recent-ID window before its checkpoint', async () => {
+  const h = recoveryHarness()
+  h.connect(); await settled(); h.sockets[0].onopen()
+  for (let index = 0; index < MAX_EVENT_IDS + 2; index += 1) {
+    h.clock.advance(STREAM_PHASE_TIMEOUT_MS - 1)
+    h.sockets[0].onmessage({ data: JSON.stringify({ schema_version: 1, type: 'change', event: { event_id: String(index) } }) })
+  }
+  h.sockets[0].onmessage({ data: checkpoint('complete') })
+  assert.equal(h.requests.length, 1)
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a').eventIds.length, MAX_EVENT_IDS)
+  assert.equal(h.clock.timers.size, 0)
+  h.manager.disconnectAll()
+})
+
+test('frame batches bound retained frame count and bytes while preserving order and an individual wide frame', () => {
+  const delivered = [], clock = phaseClock()
+  const batcher = createCanonicalFrameBatcher({ onBatch: (_scope, _workspace, frames) => delivered.push(frames), setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+  const changes = Array.from({ length: MAX_PENDING_FRAMES * 3 + 1 }, (_, index) => ({ schema_version: 1, type: 'change', event: { event_id: String(index) } }))
+  for (const frame of changes) batcher.queue('workspace', 'a', frame)
+  const wide = { schema_version: 1, type: 'change', event: { event_id: 'wide', value: 'x'.repeat(MAX_PENDING_FRAME_BYTES) } }
+  batcher.queue('workspace', 'a', wide)
+  const terminal = JSON.parse(checkpoint('complete'))
+  batcher.queue('workspace', 'a', terminal)
+  clock.advance(0)
+  assert.deepEqual(delivered.flat(), [...changes, wide, terminal])
+  for (const frames of delivered) {
+    assert.ok(frames.length <= MAX_PENDING_FRAMES)
+    assert.ok(frames.length === 1 || frames.reduce((sum, frame) => sum + JSON.stringify(frame).length * 2, 0) <= MAX_PENDING_FRAME_BYTES)
+  }
+})
+
+for (const failure of ['throw', 'reject', 'generation']) test(`checkpoint delivery ${failure} cannot persist an abandoned token`, async () => {
+  const h = recoveryHarness({ onFrame: () => {
+    if (failure === 'throw') throw new Error('application delivery failed')
+    if (failure === 'reject') return false
+    h.manager.connect({ audienceId: 'replacement', scope: 'workspace', workspaceId: 'a', resumeToken: 'replacement' })
+  } })
+  h.connect(); await settled()
+  h.sockets[0].onmessage({ data: checkpoint('abandoned') }); await settled()
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+  if (failure !== 'generation') {
+    h.clock.advance(500); await settled()
+    assert.equal(JSON.parse(h.requests.at(-1).body).resume_token, 'accepted')
+  }
+  h.manager.disconnectAll()
+})
+
+test('asynchronous batch delivery failure rejects its later checkpoint and recovers from the prior bearer', async () => {
+  let batcher
+  const h = recoveryHarness({ onFrame: (scope, workspace, raw) => batcher.queue(scope, workspace, JSON.parse(raw)),
+    onState: (scope, workspace) => batcher.clear(scope, workspace) })
+  batcher = createCanonicalFrameBatcher({ onBatch: () => { throw new Error('port failed') }, setTimer: h.clock.setTimer, clearTimer: h.clock.clearTimer })
+  h.connect(); await settled()
+  h.sockets[0].onmessage({ data: JSON.stringify({ schema_version: 1, type: 'change', event: { event_id: 'one' } }) })
+  h.clock.advance(0)
+  h.sockets[0].onmessage({ data: checkpoint('abandoned') })
+  h.clock.advance(500); await settled()
+  assert.equal(JSON.parse(h.requests.at(-1).body).resume_token, 'accepted')
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+  h.manager.disconnectAll()
+})
+
+test('snapshot callback failure leaves model checkpoint unset so same-audience retry obtains a new snapshot', async () => {
+  let delivered = 0
+  const h = recoveryHarness({ onSnapshot: () => { delivered += 1; throw new Error('snapshot rejected') }, fetchImpl: () => ({ ok: true, status: 200,
+    json: async () => ({ snapshot_profile: 'workspace_shell_v1', items: [{ schema_version: 1, kind: 'workspace', data: { id: 'a' } }], has_more: false, resume_token: 'abandoned' }) }) })
+  h.connect({ resumeToken: undefined }); await settled()
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+  h.connect({ resumeToken: undefined }); await settled()
+  assert.equal(delivered, 2)
+  assert.equal(h.sockets.length, 0)
+  h.manager.disconnectAll()
+})
+
+test('a callback that retires its generation before failing cannot poison replacement delivery', () => {
+  const delivered = [], clock = phaseClock()
+  let first = true
+  const batcher = createCanonicalFrameBatcher({ setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    onBatch: (_scope, _workspace, frames) => {
+      if (first) { first = false; batcher.clear('workspace', 'a'); throw new Error('retired callback') }
+      delivered.push(frames)
+    } })
+  assert.equal(batcher.queue('workspace', 'a', JSON.parse(checkpoint('retired'))), false)
+  assert.equal(batcher.queue('workspace', 'a', JSON.parse(checkpoint('replacement'))), true)
+  assert.deepEqual(delivered.map(frames => frames[0].resume_token), ['replacement'])
 })

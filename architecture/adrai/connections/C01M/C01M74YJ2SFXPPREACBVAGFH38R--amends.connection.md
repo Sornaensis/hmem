@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M74YJ2SFXPPREACBVAGFH38R"
+relation = "amends"
+from_record = "R01M74YJ2SF7CTHQHQH2E2HCVDQ"
+subject_adr = "A01M39RTNXZ8BWZ54DXPN50GCCM"
+to_records = ["R01M6CHCT8BVF3XGCTZB5P3TH5A"]
++++
+
+Reconcile delivered synchronization implementation and retain deferred suite-supervisor status.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjb2RleCIsImsiOiJsbG0iLCJtIjoiZ3B0LTYuMS1zb2wifSwiYiI6ImY2MDU3M2VjN2FiMzNkNmUwMDRlMGI0NDVjZGJiODZmNGQ5NjZkYzgiLCJpIjoic2hhMjU2OmZLMzY3SF9MY0xFZ0N0alpPV1NwY3B1VHJHS1lPLUVJbnFJbFp0RjBUa1UiLCJrIjoiY29ubmVjdGlvbi5hbWVuZHMiLCJvIjoiQzAxTTc0WUoyU0ZYUFBSRUFDQlZBR0ZIMzhSIiwib3AiOiJPMDFNNzRZSjJTRjdDVEhRSFFIMkUySENWRFEiLCJwIjpbIlIwMU02Q0hDVDhCVkYzWEdDVFpCNVAzVEg1QSJdLCJyIjoiY29kZXgvY2hhbmdlLXN0cmVhbS1yZWNvdmVyeSIsInMiOiJzaGEyNTY6MTJ6MGplczktdGVvZUQtTzBPWVA0VnMzbkJaQmQzVGFsZU13SmswUU9YVSIsInQiOjE3OTQzODg4NTU1OTksInYiOjEsIngiOiJhZHJhaS8xLjAuMCJ9 -->

@@ -289,11 +289,15 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
     let resumeToken = null
     const items = []
     const pageTokens = new Set()
+    const itemIdentities = new Set()
     // Pages are intentionally consumed before any socket/ticket is created.
     // Elm's ordinary REST bootstrap remains visible until its canonical
     // replacement is wired through the snapshot port, but this preserves the
     // server's atomic snapshot/replay hand-off at the transport boundary.
-    for (let attempts = 0; attempts < 256; attempts += 1) {
+    // Snapshot size is not a correctness limit. Each page has a finite request
+    // deadline/retry budget; the server's opaque capability enforces its
+    // configured expiry. Reject cycles and pages without material progress.
+    for (;;) {
       const body = pageToken ? { scope: canonicalTicketBody(entry.scope, entry.workspaceId, 'x').scope, page_token: pageToken } : { scope: canonicalTicketBody(entry.scope, entry.workspaceId, 'x').scope, snapshot_profile: entry.snapshotProfile, page_size: 100, start_idempotency_key: startKey }
       const { response, body: page } = await postResyncPage(entry, generation, body)
       if (response.status === 409) throw new Error('resync_required')
@@ -301,8 +305,15 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
       if (!response.ok) throw new Error(`resync_${response.status}`)
       if (!isCurrent(entry, generation)) throw cancelled()
       if (!page || page.snapshot_profile !== entry.snapshotProfile || !Array.isArray(page.items) || page.items.some(item => !validSnapshotItem(entry, item)) || typeof page.has_more !== 'boolean') throw new Error('invalid_snapshot')
+      for (const item of page.items) {
+        // Match Elm's separate kind dictionaries and dependency-pair identity.
+        const identity = JSON.stringify(item.kind === 'task_dependency'
+          ? [item.kind, item.data.task_id, item.data.depends_on_id] : [item.kind, item.data.id])
+        if (itemIdentities.has(identity)) throw new Error('invalid_snapshot')
+        itemIdentities.add(identity)
+      }
       if (page.has_more) {
-        if (typeof page.next_page_token !== 'string' || !page.next_page_token || pageTokens.has(page.next_page_token) || page.resume_token != null) throw new Error('invalid_snapshot')
+        if (!page.items.length || typeof page.next_page_token !== 'string' || !page.next_page_token || pageTokens.has(page.next_page_token) || page.resume_token != null) throw new Error('invalid_snapshot')
         items.push(...page.items)
         pageTokens.add(page.next_page_token)
         pageToken = page.next_page_token
@@ -313,7 +324,6 @@ export function createChangeStreamManager({ fetchImpl = fetch, WebSocketImpl = W
       resumeToken = page.resume_token
       break
     }
-    if (!resumeToken) throw new Error('resync_exhausted')
     if (!isCurrent(entry, generation)) throw cancelled()
     // The Elm port delivery is synchronous.  Emitting the fully accumulated
     // snapshot before requesting a ticket prevents replay from racing a

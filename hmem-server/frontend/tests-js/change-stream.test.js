@@ -444,6 +444,63 @@ test('mixed planning v1 and Observation v2 pages deliver complete provenance onc
   assert.equal(h.sockets.length, 1)
 })
 
+for (const global of [false, true]) test(`a ${global ? 'global' : 'full workspace'} snapshot follows over 256 advancing 100-item pages atomically`, async () => {
+  const pages = Array.from({ length: 257 }, (_, page) => snapshotPage(Array.from({ length: 100 }, (_, index) =>
+    planningSnapshot(global || (page === 0 && index === 0) ? 'workspace' : 'task', page === 0 && index === 0 ? 'a' : `item-${page}-${index}`)), `opaque-page-${page}`))
+  pages.push(snapshotPage([]))
+  const h = fullSnapshotHarness(pages)
+  h.connect(global ? { scope: 'global', workspaceId: null } : {}); await settled()
+  assert.equal(h.snapshots.length, 1)
+  assert.equal(h.snapshots[0].items.length, 25700)
+  assert.deepEqual(h.order, ['snapshot', 'ticket', 'socket'])
+  assert.equal(h.requests.length, 259)
+  assert.equal(h.requests[0].body.page_size, 100)
+  assert.deepEqual(h.requests.slice(1, -1).map(request => request.body.page_token), pages.slice(0, -1).map(page => page.next_page_token))
+  assert.deepEqual(readCheckpoint(h.storage, 'actor', global ? 'global' : 'workspace', global ? null : 'a'), { resumeToken: 'terminal-resume', eventIds: [] })
+})
+
+for (const [name, pages] of [
+  ['empty nonterminal', [snapshotPage([], 'advancing-but-empty')]],
+  ['two-token cycle', [snapshotPage([planningSnapshot('workspace', 'a')], 'first'), snapshotPage([planningSnapshot('task', 'one')], 'second'), snapshotPage([planningSnapshot('task', 'two')], 'first')]],
+  ['repeated entity with advancing tokens', [snapshotPage([planningSnapshot('workspace', 'a')], 'first'), snapshotPage([planningSnapshot('workspace', 'a')], 'second')]],
+  ['missing continuation', [{ ...snapshotPage([planningSnapshot('workspace', 'a')], 'first'), next_page_token: null }]],
+  ['numeric continuation', [{ ...snapshotPage([planningSnapshot('workspace', 'a')], 'first'), next_page_token: 123 }]],
+  ['repeated dependency pair', [snapshotPage([{ schema_version: 1, kind: 'task_dependency', data: { task_id: 'one', depends_on_id: 'two' } }], 'first'), snapshotPage([{ schema_version: 1, kind: 'task_dependency', data: { task_id: 'one', depends_on_id: 'two' } }])]]
+]) test(`${name} stops incomplete snapshot publication`, async () => {
+  const h = fullSnapshotHarness(pages)
+  h.connect(); await settled()
+  assert.deepEqual(h.snapshots, []); assert.deepEqual(h.sockets, [])
+  assert.equal(h.states.at(-1)[2], 'invalid_snapshot')
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+  assert.equal(h.requests.length, pages.length)
+})
+
+test('snapshot identity remains kind-specific and dependency pairs retain both ordered IDs', async () => {
+  const values = [planningSnapshot('workspace', 'a'), planningSnapshot('task', 'a'), planningSnapshot('project', 'a'),
+    ...['one', 'two', 'three'].map(id => planningSnapshot('task', id)),
+    ...[['one', 'two'], ['two', 'one'], ['one', 'three']].map(([task_id, depends_on_id]) => ({ schema_version: 1, kind: 'task_dependency', data: { task_id, depends_on_id } }))]
+  const h = fullSnapshotHarness([snapshotPage(values.slice(0, 4), 'continuation'), snapshotPage(values.slice(4))])
+  h.connect(); await settled()
+  assert.deepEqual(h.snapshots[0].items, values)
+  assert.deepEqual(h.order, ['snapshot', 'ticket', 'socket'])
+})
+
+test('global workspace and group dictionaries permit the same ID across kinds', async () => {
+  const values = [planningSnapshot('workspace', 'a'), planningSnapshot('workspace_group', 'a')]
+  const h = fullSnapshotHarness([snapshotPage(values.slice(0, 1), 'continuation'), snapshotPage(values.slice(1))])
+  h.connect({ scope: 'global', workspaceId: null }); await settled()
+  assert.deepEqual(h.snapshots[0].items, values)
+})
+
+test('an empty terminal global snapshot publishes once before its live ticket', async () => {
+  const h = fullSnapshotHarness([snapshotPage([])])
+  h.connect({ scope: 'global', workspaceId: null }); await settled()
+  assert.equal(h.snapshots.length, 1)
+  assert.deepEqual(h.snapshots[0].items, [])
+  assert.deepEqual(h.order, ['snapshot', 'ticket', 'socket'])
+  assert.equal(readCheckpoint(h.storage, 'actor', 'global', null).resumeToken, 'terminal-resume')
+})
+
 const malformedObservation = [
   ['retired Observation v1', value => {value.schema_version = 1}], ['future Observation version', value => {value.schema_version = 3}],
   ['missing head', value => {delete value.data.latest_sequence}], ['zero head', value => {value.data.latest_sequence = 0}],
@@ -535,6 +592,62 @@ function recoveryHarness({ fetchImpl, onFrame = () => {}, onSnapshot = () => {},
   return { manager, clock, requests, sockets, states, storage: saved, ticket,
     connect: (extra = {}) => manager.connect({ audienceId: 'actor', scope: 'workspace', workspaceId: 'a', resumeToken: 'accepted', ...extra }) }
 }
+
+for (const expires of [false, true]) test(`a snapshot past page 256 ${expires ? 'stops on server expiry' : 'retries the exact transient page before atomic publication'}`, async () => {
+  const snapshots = []
+  let page = 0, failed = false
+  const h = recoveryHarness({ onSnapshot: (...args) => snapshots.push(args), fetchImpl: (url) => {
+    if (url.endsWith('/ticket')) return h.ticket()
+    if (page === 256 && !failed) { failed = true; return { ok: false, status: expires ? 409 : 503 } }
+    const body = snapshotPage(page < 257 ? [planningSnapshot(page === 0 ? 'workspace' : 'task', page === 0 ? 'a' : `item-${page}`)] : [], page < 257 ? `opaque-${page}` : null)
+    page += 1
+    return { ok: true, status: 200, json: async () => body }
+  } })
+  h.connect({ resumeToken: undefined, snapshotProfile: 'full_v1' }); await settled()
+  assert.deepEqual(snapshots, []); assert.equal(h.sockets.length, 0)
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+  assert.equal(h.requests.length, 257)
+  if (expires) {
+    assert.equal(h.states.at(-1)[2], 'resync_required')
+    h.clock.advance(STREAM_PHASE_TIMEOUT_MS * 2); await settled()
+    assert.equal(h.requests.length, 257, 'Expiry must not retry an invalid capability')
+  } else {
+    h.clock.advance(100); await settled()
+    assert.equal(h.requests[256].body, h.requests[257].body)
+    assert.equal(snapshots.length, 1)
+    assert.equal(snapshots[0][2].items.length, 257)
+    assert.equal(h.sockets.length, 1)
+    assert.equal(JSON.parse(h.requests.at(-1).body).resume_token, 'terminal-resume')
+  }
+  h.manager.disconnectAll()
+})
+
+test('a late continuation past page 256 cannot publish after switching workspaces', async () => {
+  let page = 0, release, oldSignal
+  const snapshots = []
+  const h = recoveryHarness({ onSnapshot: (...args) => snapshots.push(args), fetchImpl: (url, options) => {
+    if (url.endsWith('/ticket')) return h.ticket()
+    const body = JSON.parse(options.body)
+    if (body.scope.workspace_id === 'b') return { ok: true, status: 200, json: async () => snapshotPage([{ schema_version: 1, kind: 'workspace', data: { id: 'b' } }]) }
+    if (page === 257) {
+      oldSignal = options.signal
+      return new Promise(resolve => { release = () => resolve({ ok: true, status: 200, json: async () => snapshotPage([]) }) })
+    }
+    const value = snapshotPage([planningSnapshot(page === 0 ? 'workspace' : 'task', page === 0 ? 'a' : `item-${page}`)], `opaque-${page++}`)
+    return { ok: true, status: 200, json: async () => value }
+  } })
+  h.connect({ resumeToken: undefined, snapshotProfile: 'full_v1' }); await settled()
+  assert.equal(typeof release, 'function'); assert.deepEqual(snapshots, [])
+  h.manager.disconnect('workspace', 'a')
+  h.connect({ workspaceId: 'b', resumeToken: undefined, snapshotProfile: 'full_v1' }); await settled()
+  release(); await settled()
+  assert.equal(oldSignal.aborted, true)
+  assert.equal(snapshots.length, 1); assert.equal(snapshots[0][1], 'b')
+  assert.equal(h.sockets.length, 1)
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'a'), null)
+  assert.equal(readCheckpoint(h.storage, 'actor', 'workspace', 'b').resumeToken, 'terminal-resume')
+  h.manager.disconnectAll()
+})
 
 for (const phase of ['headers', 'body']) test(`a stalled ticket ${phase} times out and late completion cannot create a socket`, async () => {
   let release

@@ -4,6 +4,7 @@ import Api exposing (..)
 import AppShell
 import Feature.Focus
 import Feature.TaskGraphNavigation
+import Feature.TaskGraphView
 import Feature.Search
 import Feature.AuditDiff
 import Browser
@@ -136,7 +137,7 @@ sessionWorkspace page =
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    updateCore msg model |> Feature.Focus.reconcilePreview msg |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.Documents.reconcile |> Feature.SessionActivity.reconcile model |> Feature.TimestampDisplay.reconcile |> Page.Workspace.reconcilePresentation model |> Feature.TaskGraphNavigation.reconcile model
+    updateCore msg model |> Feature.Focus.reconcilePreview msg |> Feature.Search.reconcileNavigation msg model |> Feature.AuditDiff.reconcile model |> Feature.Sessions.reconcile |> Feature.Documents.reconcile |> Feature.SessionActivity.reconcile model |> Feature.TimestampDisplay.reconcile |> Page.Workspace.reconcilePresentation model |> Feature.TaskGraphNavigation.reconcile model |> Feature.TaskGraphView.reconcile msg model
 
 
 updateCore : Msg -> Model -> ( Model, Cmd Msg )

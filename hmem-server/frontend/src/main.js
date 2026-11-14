@@ -1,6 +1,8 @@
 import archiveResourceWorkerUrl from './session-archive-worker.js?worker&url'
 import { installSearchNavigation } from './search-navigation.js'
 import { installTaskGraphNavigation } from './task-graph-navigation.js'
+import { createTaskGraphDataLoader } from './task-graph-data.js'
+import { installTaskGraphCanvas } from './task-graph-canvas.js'
 import { installSearchEditViewport } from './search-edit-viewport.js'
 import { installObservationSearch } from './observation-search.js'
 import { installHierarchyViewport } from './hierarchy-viewport.js'
@@ -789,6 +791,19 @@ const observationViewport = installObservationViewport(app)
 installObservationNavigation(app, { viewport: observationViewport })
 installSearchNavigation(app)
 installTaskGraphNavigation(app)
+installTaskGraphCanvas(app)
+let graphDataGuard = null
+let graphDataAuthority = null
+const graphData = createTaskGraphDataLoader({ apiUrl,
+  isCurrent: guard => JSON.stringify(guard) === JSON.stringify(graphDataGuard)
+    && graphDataAuthority?.generation === authTokenGeneration && graphDataAuthority?.signature === authTokenSignature(),
+  onSnapshot: (guard, items) => app.ports.taskGraphDataEvent.send({ kind: 'snapshot', guard, items }),
+  onState: (guard, kind) => { if (kind === 'failed') app.ports.taskGraphDataEvent.send({ kind, guard }) }
+})
+app.ports.taskGraphDataCommand.subscribe(command => {
+  if (command.kind === 'load') { graphDataGuard = command.guard; graphDataAuthority = { generation: authTokenGeneration, signature: authTokenSignature() }; graphData.load(command.guard, { ...authHeaderObject(), ...csrfHeaderObject() }) }
+  else { graphDataGuard = null; graphDataAuthority = null; graphData.cancel() }
+})
 installObservationSearch(app)
 installObservationPreferences(app)
 installTimestampDisplay(app)

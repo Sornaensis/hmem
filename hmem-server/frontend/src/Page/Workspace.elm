@@ -16,6 +16,7 @@ import Feature.Editing
 import Feature.Observation
 import Feature.Search
 import Feature.TaskGraphNavigation
+import Feature.TaskGraphView
 import Feature.Sessions
 import Feature.Timeline
 import Feature.WorkspaceAdmin
@@ -352,7 +353,7 @@ viewTab tab model label =
 viewTabContent : String -> Model -> Html Msg
 viewTabContent wsId model =
     if model.activeTab == ProjectsTab && Feature.TaskGraphNavigation.current model /= Nothing then
-        Feature.TaskGraphNavigation.view model
+        Feature.TaskGraphView.view model
     else
         viewOrdinaryTabContent wsId model
 

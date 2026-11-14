@@ -78,6 +78,15 @@ port clipboardResult : (Bool -> msg) -> Sub msg
 port taskGraphNavigationCommand : Encode.Value -> Cmd msg
 
 
+port taskGraphDataCommand : Encode.Value -> Cmd msg
+
+
+port taskGraphDataEvent : (Encode.Value -> msg) -> Sub msg
+
+
+port taskGraphCanvasEvent : (Encode.Value -> msg) -> Sub msg
+
+
 port taskGraphNavigationEvent : (Encode.Value -> msg) -> Sub msg
 
 

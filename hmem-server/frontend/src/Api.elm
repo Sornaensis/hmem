@@ -97,6 +97,7 @@ module Api exposing
     , SessionPrincipal
     , SessionWorkspaceContext
     , SnapshotItem
+    , snapshotItemDecoder
     , SubjectKind(..)
     , Task
     , TaskDependencyStatusChange

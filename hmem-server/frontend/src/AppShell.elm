@@ -19,6 +19,7 @@ import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
 import Feature.TaskGraphNavigation
+import Feature.TaskGraphView
 import Feature.FocusedFilters
 import Feature.Groups
 import Feature.Mutations
@@ -116,6 +117,7 @@ initModel key url page flags storedFilters legacyFrag =
             , dragDrop = Feature.DragDrop.init
             , focus = Feature.Focus.init frag.focus
             , taskGraphNavigation = Feature.TaskGraphNavigation.init
+            , taskGraph = Feature.TaskGraphView.init
             , mutations = Feature.Mutations.init
             , groups = Feature.Groups.init
             , auditLog = Feature.AuditLog.init
@@ -954,6 +956,7 @@ clearSessionScopedState model =
         , dragDrop = Feature.DragDrop.init
         , focus = Feature.Focus.init Nothing
         , taskGraphNavigation = Feature.TaskGraphNavigation.init
+        , taskGraph = Feature.TaskGraphView.init
         , groups = let empty = Feature.Groups.init in { empty | collapsedGroups = model.groups.collapsedGroups, nextDeletionToken = model.groups.nextDeletionToken, catalogueEpoch = model.groups.catalogueEpoch + 1 }
         , auditLog =
             let
@@ -1000,6 +1003,8 @@ subscriptions =
         , Ports.observationSearchRuntimeReady ObservationDiscoveryRuntimeReceived
         , Ports.searchNavigationEvent SearchNavigationEvent
         , Ports.taskGraphNavigationEvent TaskGraphNavigationEvent
+        , Ports.taskGraphDataEvent TaskGraphDataReceived
+        , Ports.taskGraphCanvasEvent TaskGraphCanvasReceived
         , Ports.onHierarchyViewport HierarchyViewportChanged
         , Ports.onObservationViewport ObservationViewportChanged
         , Ports.observationPreferencesReceived ObservationPreferencesReceived
@@ -1070,6 +1075,7 @@ viewGlobalNavigation model =
                     , if Feature.TaskGraphNavigation.current model /= Nothing then Feature.TaskGraphNavigation.breadcrumbs model
                       else if contextVisible && (model.activeTab == ProjectsTab || model.focus.breadcrumbPreview /= Nothing) then Feature.Focus.viewFocusBreadcrumbBar model else text ""
                     , Feature.Focus.viewAuditReturn model
+                    , Feature.TaskGraphView.viewReturn model
                     , Feature.Search.viewReturnButton model
                     ]
 

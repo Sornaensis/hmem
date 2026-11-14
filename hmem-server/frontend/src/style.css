@@ -5898,6 +5898,22 @@ textarea.observation-edit-content {
 .task-graph-page > .page-header { display: flex; align-items: center; justify-content: space-between; }
 .task-graph-page > .page-header h2 { margin: 0; }
 .task-graph-page #task-graph-back { display: inline-flex; align-items: center; gap: 6px; }
+.task-graph-workbench { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); }
+.task-graph-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 12px; }
+.task-graph-toolbar > div { display: flex; gap: 6px; }
+.task-graph-canvas { display: block; width: 100%; height: min(520px, 50dvh); cursor: grab; touch-action: none; overflow: hidden; background-image: radial-gradient(var(--border) .7px, transparent .7px); background-size: 20px 20px; }
+.task-graph-canvas.is-panning, .task-graph-canvas.is-panning button { cursor: grabbing; }
+.task-graph-project { fill: rgba(99,102,241,.025); stroke: #6366f1; stroke-width: 1.5px; }
+.task-graph-project.graph-external-project { stroke: #64748b; stroke-dasharray: 7 5; fill: rgba(148,163,184,.025); }
+.task-graph-project-name { text-align: center; color: var(--text); font-size: 14px; font-weight: 600; line-height: 20px; overflow-wrap: anywhere; }
+.task-graph-family { fill: var(--bg-surface); stroke: var(--border); stroke-width: 1px; }
+.task-graph-edge { fill: none; stroke: #94a3b8; stroke-width: 1.5px; stroke-linejoin: round; }
+.task-graph-node { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; box-sizing: border-box; width: 100%; min-height: 70px; padding: 12px 14px; border: 1px solid var(--card-status-border, var(--border)); border-left: 3px solid #14b8a6; border-radius: 8px; background: var(--card-status-surface, var(--bg-surface)); color: var(--text); font: inherit; font-size: 14px; line-height: 20px; text-align: left; cursor: pointer; }
+.task-graph-node.graph-subtask { border-left-color: #f97316; }
+.task-graph-node:hover { outline: 1px solid #818cf8; outline-offset: -1px; }
+.task-graph-node:focus-visible { outline: 3px solid #818cf8; outline-offset: -3px; }
+.task-graph-node-title { width: 100%; white-space: normal; overflow-wrap: anywhere; font-weight: 600; }
+.task-graph-node .task-graph-status { flex: none; max-width: 100%; white-space: normal; line-height: 18px; }
 
 .titlebar-breadcrumbs .focus-crumb { white-space: normal; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 

@@ -20,6 +20,20 @@ pane; session event details remain available in the **Sessions** tab. The title
 bar owns workspace, section and focused-entity breadcrumbs, forward focus links,
 preview context and Search, Timeline or Audit return controls.
 
+## Task graphs
+
+Hover or focus the graph icon immediately after **Move to** on a project card,
+then choose **Task Graph**. The diagram includes that project's subtree and
+directly connected tasks outside it. Each project has its own circle. Arrows
+point from prerequisite to dependent; subtasks sit inside their parent card.
+
+Drag the canvas to pan, use the wheel or pinch to zoom, or choose **Zoom in**,
+**Zoom out** and **Fit**. Task and subtask cards open the normal task details.
+After following dependencies, **Back to graph** restores the diagram viewport.
+The graph page's **Back** returns to the originating project card with its
+focused or unfocused hierarchy, search, filters and expansion preserved.
+Opening a graph directly uses an unfocused hierarchy fallback on return.
+
 ## Timeline and history
 
 Opening a focused project or task keeps your current hierarchy filters and search

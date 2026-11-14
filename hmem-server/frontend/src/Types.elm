@@ -20,6 +20,8 @@ import Set exposing (Set)
 import Time
 import TimestampDisplay
 import TaskGraphNavigation
+import TaskGraphLayout
+import Feature.TaskGraph
 import Url
 
 
@@ -78,6 +80,7 @@ type alias Model =
     , dragDrop : DragDropModel
     , focus : FocusModel
     , taskGraphNavigation : TaskGraphNavigationModel
+    , taskGraph : TaskGraphViewModel
     , mutations : MutationsModel
     , groups : GroupsModel
     , auditLog : AuditLogModel
@@ -1022,6 +1025,19 @@ type alias FocusModel =
     }
 
 
+type alias TaskGraphViewModel =
+    { data : Feature.TaskGraph.State
+    , generation : Int
+    , measurements : Dict String Float
+    , projectMeasurements : Dict String Float
+    , layout : Maybe TaskGraphLayout.Layout
+    , canvasKey : Maybe String
+    , detail : Maybe { scope : TaskGraphNavigation.Guard, graphUrl : String, projectId : String, entryId : Maybe String, entering : Bool, originTaskId : String }
+    , returnFocus : Maybe { taskId : String, token : Int }
+    , nextFocusToken : Int
+    }
+
+
 type alias TaskGraphOrigin =
     { focus : FocusModel
     , filters : HierarchyFilters
@@ -1643,6 +1659,11 @@ type Route
 
 type Msg
     = UrlRequested Browser.UrlRequest
+    | TaskGraphDataReceived Encode.Value
+    | TaskGraphCanvasReceived Encode.Value
+    | TaskGraphOpenTask String
+    | TaskGraphReturn
+    | TaskGraphRetry
     | OpenTaskGraph String
     | TaskGraphBack
     | TaskGraphNavigationEvent Encode.Value

@@ -168,6 +168,13 @@ view name =
                 , node "path" [ attribute "d" "m6 6 12 12" ] []
                 ]
 
+            "git-fork" ->
+                [ node "circle" [ attribute "cx" "12", attribute "cy" "18", attribute "r" "3" ] []
+                , node "circle" [ attribute "cx" "6", attribute "cy" "6", attribute "r" "3" ] []
+                , node "circle" [ attribute "cx" "18", attribute "cy" "6", attribute "r" "3" ] []
+                , node "path" [ attribute "d" "M6 9v1a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V9M12 12v3" ] []
+                ]
+
             _ ->
                 []
         )

@@ -18,6 +18,7 @@ import Feature.Move
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
+import Feature.TaskGraphNavigation
 import Feature.FocusedFilters
 import Feature.Groups
 import Feature.Mutations
@@ -114,6 +115,7 @@ initModel key url page flags storedFilters legacyFrag =
             , move = Feature.Move.init
             , dragDrop = Feature.DragDrop.init
             , focus = Feature.Focus.init frag.focus
+            , taskGraphNavigation = Feature.TaskGraphNavigation.init
             , mutations = Feature.Mutations.init
             , groups = Feature.Groups.init
             , auditLog = Feature.AuditLog.init
@@ -951,6 +953,7 @@ clearSessionScopedState model =
         , move = Feature.Move.retire model.move
         , dragDrop = Feature.DragDrop.init
         , focus = Feature.Focus.init Nothing
+        , taskGraphNavigation = Feature.TaskGraphNavigation.init
         , groups = let empty = Feature.Groups.init in { empty | collapsedGroups = model.groups.collapsedGroups, nextDeletionToken = model.groups.nextDeletionToken, catalogueEpoch = model.groups.catalogueEpoch + 1 }
         , auditLog =
             let
@@ -996,6 +999,7 @@ subscriptions =
         , localStorageReceived LocalStorageLoaded
         , Ports.observationSearchRuntimeReady ObservationDiscoveryRuntimeReceived
         , Ports.searchNavigationEvent SearchNavigationEvent
+        , Ports.taskGraphNavigationEvent TaskGraphNavigationEvent
         , Ports.onHierarchyViewport HierarchyViewportChanged
         , Ports.onObservationViewport ObservationViewportChanged
         , Ports.observationPreferencesReceived ObservationPreferencesReceived
@@ -1063,7 +1067,8 @@ viewGlobalNavigation model =
                       else span [ class "global-location" ] [ text "Workspace" ]
                     , span [ class "focus-crumb-sep" ] [ text "›" ]
                     , span [ class "titlebar-section" ] [ text (Page.Workspace.workspaceTabLabel model.activeTab) ]
-                    , if contextVisible && (model.activeTab == ProjectsTab || model.focus.breadcrumbPreview /= Nothing) then Feature.Focus.viewFocusBreadcrumbBar model else text ""
+                    , if Feature.TaskGraphNavigation.current model /= Nothing then Feature.TaskGraphNavigation.breadcrumbs model
+                      else if contextVisible && (model.activeTab == ProjectsTab || model.focus.breadcrumbPreview /= Nothing) then Feature.Focus.viewFocusBreadcrumbBar model else text ""
                     , Feature.Focus.viewAuditReturn model
                     , Feature.Search.viewReturnButton model
                     ]

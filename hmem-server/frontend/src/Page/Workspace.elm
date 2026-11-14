@@ -15,6 +15,7 @@ import Feature.Cards
 import Feature.Editing
 import Feature.Observation
 import Feature.Search
+import Feature.TaskGraphNavigation
 import Feature.Sessions
 import Feature.Timeline
 import Feature.WorkspaceAdmin
@@ -350,6 +351,14 @@ viewTab tab model label =
 
 viewTabContent : String -> Model -> Html Msg
 viewTabContent wsId model =
+    if model.activeTab == ProjectsTab && Feature.TaskGraphNavigation.current model /= Nothing then
+        Feature.TaskGraphNavigation.view model
+    else
+        viewOrdinaryTabContent wsId model
+
+
+viewOrdinaryTabContent : String -> Model -> Html Msg
+viewOrdinaryTabContent wsId model =
     case model.activeTab of
         ProjectsTab ->
             let
@@ -362,7 +371,7 @@ viewTabContent wsId model =
                         , Feature.Editing.viewInlineCreateInput model Nothing "project"
                         ]
             in
-            div [ class "hierarchy-content-section" ]
+            div ([ class "hierarchy-content-section" ] ++ Feature.TaskGraphNavigation.attributes model)
                 [ Feature.Search.viewWorkspaceSearchBar actions model
                 , Feature.Cards.viewProjectsTree wsId model
                 ]

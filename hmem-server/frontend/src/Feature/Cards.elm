@@ -45,11 +45,13 @@ import Feature.Move
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
+import Feature.TaskGraphNavigation
 import SessionActivityLight
 import Feature.SessionActivity
 import Feature.Sessions
 import Feature.Documents as Documents
 import Permissions
+import Icon
 import Helpers exposing (..)
 import Html exposing (..)
 import Html.Attributes exposing (..)
@@ -1794,6 +1796,13 @@ viewProjectNodeBody descendants projection model depth project hasSearch query =
             , div [ class "card-actions" ]
                 [ viewFocusAction "project" project.id
                 , Feature.Move.viewAction model "project" project.id
+                , button
+                    [ class "btn-icon card-action-control", type_ "button", id ("task-graph-open-" ++ project.id)
+                    , attribute "aria-label" "Task Graph", title "Task Graph"
+                    , stopPropagationOn "click" (Decode.succeed (OpenTaskGraph project.id, True))
+                    , stopPropagationOn "dblclick" (Decode.succeed (NoOp, True))
+                    ]
+                    [ Icon.view "git-fork", span [ class "card-action-label" ] [ text "Task Graph" ] ]
                 , Feature.Editing.viewStatusSelectWithDisabled model "project" project.id (Api.projectStatusToString project.status) Api.allProjectStatuses Api.projectStatusToString projectStatusDisabled ChangeProjectStatus
                 , Feature.Editing.viewPrioritySelect model "project" project.id project.priority ChangeProjectPriority
                 , if Permissions.canEditCurrentWorkspace model then
@@ -3400,6 +3409,7 @@ viewportPins model =
     [ model.focus.focusedEntity, editTarget model, inlineCreateTarget model, drag, Feature.AuditDiff.cardOrigin model ]
         |> List.filterMap identity |> List.map entityKey |> Set.fromList
         |> Set.union viewport.nativePins
+        |> Set.union (model.taskGraphNavigation.returning |> Maybe.map (\receipt -> Set.singleton ("project:" ++ receipt.projectId)) |> Maybe.withDefault Set.empty)
         |> Set.union (viewport.target |> Maybe.map Set.singleton |> Maybe.withDefault Set.empty)
 
 
@@ -3577,7 +3587,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( incoming, command
                 || previous.search.filterProjectStatuses /= model.search.filterProjectStatuses
                 || previous.search.filterTaskStatuses /= model.search.filterTaskStatuses
         preserveScroll =
-            sameContext && (filtersChanged || (old.preserveScroll
+            sameContext && (model.taskGraphNavigation.returning /= Nothing || filtersChanged || (old.preserveScroll
                 && (previous.dataLoading.rootNavigationRequest |> Maybe.map .generation) == (model.dataLoading.rootNavigationRequest |> Maybe.map .generation)
                 && previous.cards.collapsedNodes == model.cards.collapsedNodes
                 && previous.cards.nodesCollapsedByDefault == model.cards.nodesCollapsedByDefault
@@ -3629,7 +3639,7 @@ refreshViewportWithStatusChange taskStatusesChanged previous ( incoming, command
                     rows = if awaitingFilteredRoots then Array.toList old.index.keys |> List.filterMap (\key -> Dict.get key old.rows) else logicalRows projection model
                     keys = List.map .key rows
                     defaults = rows |> List.filter (.kind >> (\kind -> kind /= "project" && kind /= "task")) |> List.map (\row -> ( row.key, if row.kind == "drop" then 8 else 40 )) |> Dict.fromList
-                    measurements = if sameContext then Dict.union old.index.heights defaults else defaults
+                    measurements = if sameContext then Dict.union old.index.heights (Dict.union (Feature.TaskGraphNavigation.returnHeights model) defaults) else defaults
                     index = Viewport.build 160 measurements keys
                     anchorPosition = Viewport.positionAt old.top old.index
                     awaitingFirstRows =

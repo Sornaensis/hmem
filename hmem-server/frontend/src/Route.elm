@@ -9,6 +9,7 @@ import Feature.Search
 import Feature.DataLoading
 import Feature.Dependencies
 import Feature.Focus
+import Feature.TaskGraphNavigation
 import Feature.Editing
 import Feature.Observation
 import Feature.Timeline
@@ -76,6 +77,12 @@ handleUrlRequest urlRequest model =
 
 handleUrlChange : Url.Url -> Model -> ( Model, Cmd Msg )
 handleUrlChange url model =
+    Feature.TaskGraphNavigation.handleUrl url model
+        |> Maybe.withDefault (handleOrdinaryUrlChange url model)
+
+
+handleOrdinaryUrlChange : Url.Url -> Model -> ( Model, Cmd Msg )
+handleOrdinaryUrlChange url model =
     if observationContextExit url model then
         let
             ( preserved, noticeCmd ) =

@@ -19,6 +19,7 @@ import Json.Encode as Encode
 import Set exposing (Set)
 import Time
 import TimestampDisplay
+import TaskGraphNavigation
 import Url
 
 
@@ -76,6 +77,7 @@ type alias Model =
     , move : MoveModel
     , dragDrop : DragDropModel
     , focus : FocusModel
+    , taskGraphNavigation : TaskGraphNavigationModel
     , mutations : MutationsModel
     , groups : GroupsModel
     , auditLog : AuditLogModel
@@ -1020,6 +1022,34 @@ type alias FocusModel =
     }
 
 
+type alias TaskGraphOrigin =
+    { focus : FocusModel
+    , filters : HierarchyFilters
+    , focusedFilters : Maybe FocusedFilterContext
+    , collapsedNodes : Dict String Bool
+    , nodesCollapsedByDefault : Bool
+    , expandedCards : Dict String Bool
+    , viewportTop : Float
+    , viewportIndex : HierarchyViewport.Index
+    , scrollTop : Float
+    , anchorDelta : Maybe Float
+    }
+
+
+type alias TaskGraphNavigationModel =
+    { history : TaskGraphNavigation.State TaskGraphOrigin
+    , active : Maybe TaskGraphNavigation.Route
+    , pending : Maybe { id : String, entry : TaskGraphNavigation.Entry TaskGraphOrigin }
+    , returning : Maybe { id : String, token : Int, projectId : String, scrollTop : Float, anchorDelta : Maybe Float }
+    , nextReturnId : Int
+    , metadata : Dict String Api.Project
+    , metadataGeneration : Int
+    , metadataRequested : Set String
+    , metadataError : Maybe String
+    , scope : Maybe TaskGraphNavigation.Guard
+    }
+
+
 type alias FocusReturnContext =
     { source : FocusReturnSource
     , workspaceId : String
@@ -1613,6 +1643,10 @@ type Route
 
 type Msg
     = UrlRequested Browser.UrlRequest
+    | OpenTaskGraph String
+    | TaskGraphBack
+    | TaskGraphNavigationEvent Encode.Value
+    | TaskGraphProjectFetched TaskGraphNavigation.Guard Int String (Result Http.Error Api.Project)
     | TaskDocuments DocumentMsg
     | ToggleWorkspaceDetails
     | TimestampsFormatted Encode.Value

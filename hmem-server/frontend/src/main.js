@@ -1,5 +1,6 @@
 import archiveResourceWorkerUrl from './session-archive-worker.js?worker&url'
 import { installSearchNavigation } from './search-navigation.js'
+import { installTaskGraphNavigation } from './task-graph-navigation.js'
 import { installSearchEditViewport } from './search-edit-viewport.js'
 import { installObservationSearch } from './observation-search.js'
 import { installHierarchyViewport } from './hierarchy-viewport.js'
@@ -787,6 +788,7 @@ installHierarchyViewport(app)
 const observationViewport = installObservationViewport(app)
 installObservationNavigation(app, { viewport: observationViewport })
 installSearchNavigation(app)
+installTaskGraphNavigation(app)
 installObservationSearch(app)
 installObservationPreferences(app)
 installTimestampDisplay(app)

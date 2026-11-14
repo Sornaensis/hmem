@@ -5895,6 +5895,10 @@ textarea.observation-edit-content {
 
 .workspace-heading-icon { display: grid; place-items: center; flex: 0 0 31px; width: 31px; height: 31px; border-radius: 7px; background: #303352; color: #a5a3ff; }
 
+.task-graph-page > .page-header { display: flex; align-items: center; justify-content: space-between; }
+.task-graph-page > .page-header h2 { margin: 0; }
+.task-graph-page #task-graph-back { display: inline-flex; align-items: center; gap: 6px; }
+
 .titlebar-breadcrumbs .focus-crumb { white-space: normal; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 
 /* Approved workspace presentation; card bodies and transport stay independent. */

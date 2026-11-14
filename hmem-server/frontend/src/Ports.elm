@@ -75,6 +75,12 @@ port copyToClipboard : String -> Cmd msg
 port clipboardResult : (Bool -> msg) -> Sub msg
 
 
+port taskGraphNavigationCommand : Encode.Value -> Cmd msg
+
+
+port taskGraphNavigationEvent : (Encode.Value -> msg) -> Sub msg
+
+
 
 -- PORTS: Local storage
 

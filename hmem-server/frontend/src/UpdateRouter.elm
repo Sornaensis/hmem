@@ -14,6 +14,7 @@ import Feature.Move
 import Feature.DragDrop
 import Feature.Editing
 import Feature.Focus
+import Feature.TaskGraphNavigation
 import Feature.FocusedFilters as FocusedFilters
 import Feature.Groups
 import Feature.Mutations
@@ -91,6 +92,11 @@ reconcileFocusedFilters previous ( updated, command ) =
 route : Msg -> Model -> Result MainOwnedMsg ( Model, Cmd Msg )
 route msg model =
     case msg of
+        OpenTaskGraph _ -> Ok (Feature.TaskGraphNavigation.update msg model)
+        TaskGraphBack -> Ok (Feature.TaskGraphNavigation.update msg model)
+        TaskGraphNavigationEvent _ -> Ok (Feature.TaskGraphNavigation.update msg model)
+        TaskGraphProjectFetched _ _ _ _ -> Ok (Feature.TaskGraphNavigation.update msg model)
+
         TaskDocuments message ->
             let result = Feature.Documents.update message model in
             Ok (case message of

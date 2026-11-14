@@ -898,6 +898,39 @@ spec = do
       empty.items `shouldBe` []
       empty.selected `shouldBe` Nothing
 
+    it "pages Tasks-only active families across project placement without widening explicit branches" $ \env -> do
+      (workspace,row) <- fresh env
+      project <- Project.createProject env.pool (Types.CreateProject workspace Nothing "Assigned scope" Nothing Nothing Nothing)
+      other <- Project.createProject env.pool (Types.CreateProject workspace Nothing "Other scope" Nothing Nothing Nothing)
+      active <- forM [1..55 :: Int] $ \n -> do
+        task <- makeTask env workspace ("Active family " <> T.justifyRight 3 '0' (T.pack (show n)))
+        execute env ("UPDATE tasks SET project_id='"<>uuid project.id<>"' WHERE id='"<>uuid task.id<>"'")
+        associateSessionTask env.pool workspace row.id task.id
+        pure task
+      parent <- Task.createTask env.pool (Types.CreateTask workspace (Just other.id) Nothing "Retained parent" Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (Types.CreateTask workspace (Just other.id) (Just parent.id) "Active family child" Nothing Nothing Nothing)
+      execute env ("UPDATE tasks SET status='in_progress' WHERE id='"<>uuid child.id<>"'")
+      associateSessionTask env.pool workspace row.id child.id
+      orphan <- Task.createTask env.pool (Types.CreateTask workspace Nothing Nothing "Inactive orphan" Nothing Nothing Nothing)
+      let filters = Types.NavigationFilter (Just "tasks") [Types.ProjArchived] [Types.InProgress] Nothing Nothing (Just "Active family") (Just False) (Just True)
+          roots selector limit offset = Task.listFilteredTaskSummaryRows env.pool workspace Nothing Nothing selector limit offset
+          expected = map (.id) active <> [parent.id]
+      first <- roots filters 50 0
+      second <- roots filters 50 50
+      map (.id) (first <> second) `shouldBe` expected
+      length first `shouldBe` 50
+      length second `shouldBe` 6
+      ordinary <- roots (filters { Types.showOnly = Nothing }) 50 0
+      ordinary `shouldBe` []
+      assigned <- Task.listFilteredTaskSummaryRows env.pool workspace (Just project.id) Nothing filters 100 0
+      map (.id) assigned `shouldBe` map (.id) active
+      children <- Task.listFilteredTaskSummaryRows env.pool workspace (Just other.id) (Just parent.id) filters 50 0
+      map (.id) children `shouldBe` [child.id]
+      unfiltered <- roots (filters { Types.taskStatuses = [], Types.query = Nothing, Types.hasActiveSession = Just False }) 100 0
+      map (.id) unfiltered `shouldBe` expected <> [orphan.id]
+      _ <- terminateSession env.pool workspace row.id (receipt row "")
+      roots filters 50 0 `shouldReturn` []
+
     it "keeps opt-in facet scopes authoritative without status matches and options stable across heartbeat age" $ \env -> do
       (workspace,_) <- fresh env
       identifier <- UUID.nextRandom

@@ -1364,29 +1364,29 @@ listFilteredTaskChildren :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe
 listFilteredTaskChildren pool workspace maybeProject maybeParent selector lim off = do
   rows <- runSession pool $ Session.statement
     ( workspace, maybeProject, maybeParent, map taskStatusToText selector.taskStatuses, selector.priorityMode, selector.priorityValue, selector.query
-    , fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe False selector.hasActiveSession ) filteredTaskChildrenStatement
+    , fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe False selector.hasActiveSession, selector.showOnly == Just "tasks" && maybeProject == Nothing && maybeParent == Nothing ) filteredTaskChildrenStatement
   enrichTaskCounts pool rows
 
 listFilteredTaskSummaryRows :: Pool Hasql.Connection -> UUID -> Maybe UUID -> Maybe UUID -> NavigationFilter -> Int -> Int -> IO [TaskSummaryRow]
 listFilteredTaskSummaryRows pool workspace maybeProject maybeParent selector lim off = do
   rows <- runSession pool $ Session.statement
     ( workspace, maybeProject, maybeParent, map taskStatusToText selector.taskStatuses, selector.priorityMode, selector.priorityValue, selector.query
-    , fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe False selector.hasActiveSession ) filteredTaskSummaryRowsStatement
+    , fromIntegral lim :: Int32, fromIntegral off :: Int32, fromMaybe False selector.hasActiveSession, selector.showOnly == Just "tasks" && maybeProject == Nothing && maybeParent == Nothing ) filteredTaskSummaryRowsStatement
   enrichTaskSummaryCounts pool rows
 
-filteredTaskChildrenStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32, Bool) [Task]
+filteredTaskChildrenStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32, Bool, Bool) [Task]
 filteredTaskChildrenStatement = filteredTaskChildrenStatementWith
   "t.id,t.workspace_id,t.project_id,t.parent_id,t.title,t.description,t.status::text,t.priority,t.metadata,t.completed_at,t.created_at,t.updated_at" rawTaskRowDecoder
 
-filteredTaskSummaryRowsStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32, Bool) [TaskSummaryRow]
+filteredTaskSummaryRowsStatement :: Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32, Bool, Bool) [TaskSummaryRow]
 filteredTaskSummaryRowsStatement = filteredTaskChildrenStatementWith taskSummaryColumns taskSummaryRowDecoder
 
-filteredTaskChildrenStatementWith :: String -> Dec.Row a -> Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32, Bool) [a]
+filteredTaskChildrenStatementWith :: String -> Dec.Row a -> Statement.Statement (UUID, Maybe UUID, Maybe UUID, [Text], Maybe Text, Maybe Int, Maybe Text, Int32, Int32, Bool, Bool) [a]
 filteredTaskChildrenStatementWith projection decoder = Statement.Statement sql encoder (Dec.rowList decoder) True
   where
     sql = BS8.pack $ unlines
       [ "WITH RECURSIVE task_tree(root_id,id) AS ("
-      , " SELECT t.id,t.id FROM tasks t WHERE t.workspace_id=$1 AND t.project_id IS NOT DISTINCT FROM $2 AND t.parent_id IS NOT DISTINCT FROM $3 AND t.deleted_at IS NULL"
+      , " SELECT t.id,t.id FROM tasks t WHERE t.workspace_id=$1 AND ($11 OR t.project_id IS NOT DISTINCT FROM $2) AND t.parent_id IS NOT DISTINCT FROM $3 AND t.deleted_at IS NULL"
       , " UNION SELECT tree.root_id,child.id FROM tasks child JOIN task_tree tree ON child.parent_id=tree.id WHERE child.deleted_at IS NULL AND child.workspace_id=$1"
       , ") SELECT " <> projection
       , " FROM tasks t WHERE t.id IN (SELECT DISTINCT root_id FROM task_tree) AND ("
@@ -1395,16 +1395,17 @@ filteredTaskChildrenStatementWith projection decoder = Statement.Statement sql e
       , " ORDER BY CASE WHEN t.status='in_progress'::task_status_enum OR (t.status='blocked'::task_status_enum AND EXISTS (SELECT 1 FROM tasks child WHERE child.parent_id=t.id AND child.deleted_at IS NULL AND child.status='in_progress'::task_status_enum)) THEN 0 WHEN t.status='todo'::task_status_enum THEN 1 WHEN t.status='blocked'::task_status_enum THEN 2 WHEN t.status='done'::task_status_enum THEN 3 ELSE 4 END, t.priority DESC, lower(t.title),t.id LIMIT $8 OFFSET $9"
       ]
     encoder =
-      contramap (\(a,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
-      contramap (\(_,b,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.uuid)) <>
-      contramap (\(_,_,c,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.uuid)) <>
-      contramap (\(_,_,_,d,_,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
-      contramap (\(_,_,_,_,e,_,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,_,_,_,f,_,_,_,_) -> fmap fromIntegral f) (Enc.param (Enc.nullable Enc.int2)) <>
-      contramap (\(_,_,_,_,_,_,g,_,_,_) -> g) (Enc.param (Enc.nullable Enc.text)) <>
-      contramap (\(_,_,_,_,_,_,_,h,_,_) -> h) (Enc.param (Enc.nonNullable Enc.int4)) <>
-      contramap (\(_,_,_,_,_,_,_,_,i,_) -> i) (Enc.param (Enc.nonNullable Enc.int4)) <>
-      contramap (\(_,_,_,_,_,_,_,_,_,j) -> j) (Enc.param (Enc.nonNullable Enc.bool))
+      contramap (\(a,_,_,_,_,_,_,_,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_,_,_,_,_,_,_,_,_) -> b) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,_,c,_,_,_,_,_,_,_,_) -> c) (Enc.param (Enc.nullable Enc.uuid)) <>
+      contramap (\(_,_,_,d,_,_,_,_,_,_,_) -> d) (Enc.param (Enc.nonNullable (Enc.foldableArray (Enc.nonNullable Enc.text)))) <>
+      contramap (\(_,_,_,_,e,_,_,_,_,_,_) -> e) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,f,_,_,_,_,_) -> fmap fromIntegral f) (Enc.param (Enc.nullable Enc.int2)) <>
+      contramap (\(_,_,_,_,_,_,g,_,_,_,_) -> g) (Enc.param (Enc.nullable Enc.text)) <>
+      contramap (\(_,_,_,_,_,_,_,h,_,_,_) -> h) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,_,i,_,_) -> i) (Enc.param (Enc.nonNullable Enc.int4)) <>
+      contramap (\(_,_,_,_,_,_,_,_,_,j,_) -> j) (Enc.param (Enc.nonNullable Enc.bool)) <>
+      contramap (\(_,_,_,_,_,_,_,_,_,_,k) -> k) (Enc.param (Enc.nonNullable Enc.bool))
 
 -- | Return the next actionable tasks for a project subtree.
 --

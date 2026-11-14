@@ -921,7 +921,7 @@ export function navigationBranchResponse(fixture, options = {}) {
     ? fixture.tasks.filter(task => task.project_id === parentId && task.parent_id == null)
     : parentKind === 'task'
       ? fixture.tasks.filter(task => task.parent_id === parentId)
-      : fixture.tasks.filter(task => task.project_id == null && task.parent_id == null)
+      : fixture.tasks.filter(task => (filters.showOnly === 'tasks' || task.project_id == null) && task.parent_id == null)
   const filteredTaskChildren = taskChildren.filter(task => taskBranchMatches(fixture, task, filters))
   const projectOrder = [...projectChildren].sort((a, b) => projectStatusRank(a.status) - projectStatusRank(b.status) || (b.priority - a.priority) || compareText(a.name.toLowerCase(), b.name.toLowerCase()) || compareText(a.id, b.id))
   const taskOrder = [...filteredTaskChildren].sort((a, b) => taskStatusRank(a.status) - taskStatusRank(b.status) || (b.priority - a.priority) || compareText(a.title.toLowerCase(), b.title.toLowerCase()) || compareText(a.id, b.id))

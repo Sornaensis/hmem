@@ -51,7 +51,8 @@ function navigationBranches(fixture) {
 
 // The immutable producer predates the required direct-dependency DTO field.
 // Add precisely that current field in its wire position; all other bytes remain
-// compared against the unchanged historical producer for every page/filter.
+// compared against the unchanged historical producer for unchanged scopes.
+// Tasks-only workspace roots intentionally include project-assigned families.
 function currentReadinessDto(value,fixture) {
   const tasks=new Map(fixture.tasks.map(task=>[task.id,task]))
   return {...value,tasks:{...value.tasks,items:value.tasks.items.map(row=>({...row,readiness_rollup:Object.fromEntries(Object.entries(row.readiness_rollup).flatMap(([key,value])=>key==='open_dependency_count'
@@ -63,7 +64,18 @@ for (const size of ['small', 'large']) {
   test(`${size} navigation repair preserves route/page/filter bytes with the required current readiness field`, async () => {
     const { before } = await navigationImplementations()
     const fixture = generateFixture(size)
-    const assertParity = options => assert.equal(JSON.stringify(navigationBranchResponse(fixture, options)), JSON.stringify(currentReadinessDto(before.navigationBranchResponse(fixture, options),fixture)), JSON.stringify(options))
+    const assertParity = options => {
+      const actual = navigationBranchResponse(fixture, options)
+      if (options.parentKind === 'workspace_root' && options.showOnly === 'tasks') {
+        const ordered = fixture.tasks.filter(task => task.parent_id == null)
+          .sort((a, b) => ['todo', 'in_progress', 'blocked', 'done', 'cancelled'].indexOf(a.status) - ['todo', 'in_progress', 'blocked', 'done', 'cancelled'].indexOf(b.status)
+            || b.priority - a.priority || a.title.toLowerCase().localeCompare(b.title.toLowerCase()) || a.id.localeCompare(b.id))
+        const offset = Number(options.taskOffset) || 0, limit = Number(options.taskLimit) || 50
+        assert.deepEqual(actual.projects, { items: [], has_more: false })
+        assert.deepEqual(actual.tasks.items.map(task => task.id), ordered.slice(offset, offset + limit).map(task => task.id))
+        assert.equal(actual.tasks.has_more, ordered.length > offset + limit)
+      } else assert.equal(JSON.stringify(actual), JSON.stringify(currentReadinessDto(before.navigationBranchResponse(fixture, options),fixture)), JSON.stringify(options))
+    }
     const boundaries = [[undefined, undefined], [-20, -10], [0, 0], [1, 1], [2, 3], [99, 100], [101, 999], [100000, 1], [100001, Infinity], ['invalid', 'invalid'], [1.5, 2.5], ['2', '3']]
     const filters = [{}, { showOnly: 'projects' }, { showOnly: 'tasks' }, { showEmptyProjects: false },
       { projectStatuses: ['active', 'paused'], taskStatuses: ['todo', 'in_progress'] },

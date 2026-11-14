@@ -882,6 +882,30 @@ spec = around (\example -> withLocalSandboxAppEnv (\env app -> example (env, app
       requested `shouldBe` NavigationPage ["1", "2"] True
       readIORef phases `shouldReturn` ["select", "decorate"]
 
+    it "flattens Tasks-only workspace roots without changing All or explicit branch placement" $ \(env, app) -> do
+      workspace <- createTestWorkspace env "tasks-only-placement"
+      project <- Project.createProject env.pool (CreateProject workspace.id Nothing "Assigned" Nothing Nothing Nothing)
+      assigned <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) Nothing "Assigned task" Nothing Nothing Nothing)
+      orphan <- Task.createTask env.pool (CreateTask workspace.id Nothing Nothing "Orphan task" Nothing Nothing Nothing)
+      child <- Task.createTask env.pool (CreateTask workspace.id (Just project.id) (Just assigned.id) "Child task" Nothing Nothing Nothing)
+      let path suffix = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "/navigation?" <> suffix
+          load suffix = do
+            response <- request app methodGet (path suffix) ""
+            responseStatus response `shouldBe` status200
+            maybe (fail "expected navigation page") pure (decode (responseBody response) :: Maybe NavigationBranchResponse)
+      flat <- load "parent_kind=workspace_root&show_only=tasks&project_status=archived"
+      sort (map (.id) flat.tasks.items) `shouldBe` sort [assigned.id,orphan.id]
+      flat.projects.items `shouldBe` []
+      ordinary <- load "parent_kind=workspace_root"
+      map (.id) ordinary.tasks.items `shouldBe` [orphan.id]
+      projects <- load "parent_kind=workspace_root&show_only=projects"
+      projects.tasks.items `shouldBe` []
+      map (.id) projects.projects.items `shouldBe` [project.id]
+      scoped <- load ("parent_kind=project&show_only=tasks&parent_id=" <> Text.encodeUtf8 (T.pack (show project.id)))
+      map (.id) scoped.tasks.items `shouldBe` [assigned.id]
+      children <- load ("parent_kind=task&show_only=tasks&parent_id=" <> Text.encodeUtf8 (T.pack (show assigned.id)))
+      map (.id) children.tasks.items `shouldBe` [child.id]
+
     it "puts active blocked parents on the first page before more than fifty higher-priority todos" $ \(env, app) -> do
       workspace <- createTestWorkspace env "navigation-running-parent-page"
       let navigationPath suffix = "/api/v1/workspaces/" <> Text.encodeUtf8 (T.pack (show workspace.id)) <> "/navigation?parent_kind=workspace_root&task_limit=50" <> suffix

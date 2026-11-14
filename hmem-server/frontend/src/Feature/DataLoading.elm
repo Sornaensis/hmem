@@ -930,7 +930,7 @@ localPresentationPinnedIds maybeParent entityKind model =
                                             task.parentId == Just parentId
 
                                         _ ->
-                                            task.projectId == Nothing && task.parentId == Nothing
+                                            (tasksOnlyWorkspaceRoots model || task.projectId == Nothing) && task.parentId == Nothing
                                    )
                         )
                     |> Maybe.withDefault False
@@ -1540,7 +1540,7 @@ revalidateNavigationForChangedSummaries before summaries model =
         filtered = before.search.filterHasActiveSession || not before.search.filterShowEmptyProjects || before.search.filterShowOnly /= ShowAll || before.search.filterProjectStatuses /= [] || before.search.filterTaskStatuses /= [] || before.search.filterPriority /= AnyPriority || String.trim before.search.query /= ""
         queried = String.trim before.search.query /= ""
         projectOwner summary = summary.parentId |> Maybe.map (\id -> ( "project", id )) |> Maybe.withDefault ( "workspace_root", "root" )
-        taskOwner = taskNavigationOwner
+        taskOwner = taskNavigationOwner model
         ownerPath source visited owner =
             if Set.member owner visited then []
             else
@@ -1582,11 +1582,18 @@ revalidateNavigationForChangedSummaries before summaries model =
     revalidateNavigationOwners owners model
 
 
-taskNavigationOwner : { a | parentId : Maybe String, projectId : Maybe String } -> ( String, String )
-taskNavigationOwner task =
+tasksOnlyWorkspaceRoots : Model -> Bool
+tasksOnlyWorkspaceRoots model =
+    model.focus.focusedEntity == Nothing && model.search.filterShowOnly == ShowTasksOnly
+
+
+taskNavigationOwner : Model -> { a | parentId : Maybe String, projectId : Maybe String } -> ( String, String )
+taskNavigationOwner model task =
     case task.parentId of
         Just id -> ( "task", id )
-        Nothing -> task.projectId |> Maybe.map (\id -> ( "project", id )) |> Maybe.withDefault ( "workspace_root", "root" )
+        Nothing ->
+            if tasksOnlyWorkspaceRoots model then ( "workspace_root", "root" )
+            else task.projectId |> Maybe.map (\id -> ( "project", id )) |> Maybe.withDefault ( "workspace_root", "root" )
 
 
 {-| Readiness responses carry placement even for a parent outside the cached page.
@@ -1602,7 +1609,7 @@ revalidateNavigationForTasksReadiness before tasks model =
     let
         owners = tasks
             |> List.filter (\task -> taskPresentationOrder before task /= taskPresentationOrder model task)
-            |> List.map taskNavigationOwner
+            |> List.map (taskNavigationOwner model)
             |> Set.fromList |> Set.toList
     in
     if List.isEmpty owners then ( model, Cmd.none )
@@ -2246,7 +2253,7 @@ replaceNavigationBranchMembership parentKind maybeParentId navigation model =
         taskInScope summary =
             case ( parentKind, maybeParentId ) of
                 ( "workspace_root", Nothing ) ->
-                    summary.projectId == Nothing && summary.parentId == Nothing
+                    (tasksOnlyWorkspaceRoots model || summary.projectId == Nothing) && summary.parentId == Nothing
 
                 ( "project", Just parentId ) ->
                     summary.projectId == Just parentId && summary.parentId == Nothing
@@ -2431,11 +2438,11 @@ projectSummaryBelongsTo parentKind maybeParentId summary =
             False
 
 
-taskSummaryBelongsTo : String -> Maybe String -> Api.TaskCardSummary -> Bool
-taskSummaryBelongsTo parentKind maybeParentId summary =
+taskSummaryBelongsTo : Model -> String -> Maybe String -> Api.TaskCardSummary -> Bool
+taskSummaryBelongsTo model parentKind maybeParentId summary =
     case ( parentKind, maybeParentId ) of
         ( "workspace_root", Nothing ) ->
-            summary.projectId == Nothing && summary.parentId == Nothing
+            (tasksOnlyWorkspaceRoots model || summary.projectId == Nothing) && summary.parentId == Nothing
 
         ( "project", Just parentId ) ->
             summary.projectId == Just parentId && summary.parentId == Nothing
@@ -2487,7 +2494,9 @@ navigationSummaryProjectionFor includes model =
         taskParent summary =
             case summary.parentId of
                 Just parent -> navigationBranchKey "task" (Just parent)
-                Nothing -> navigationBranchKey (if summary.projectId == Nothing then "workspace_root" else "project") summary.projectId
+                Nothing ->
+                    if tasksOnlyWorkspaceRoots model then navigationBranchKey "workspace_root" Nothing
+                    else navigationBranchKey (if summary.projectId == Nothing then "workspace_root" else "project") summary.projectId
     in
     { projects =
         Dict.foldl (\_ summary -> insert (projectParent summary) summary) Dict.empty model.dataLoading.projectCardSummaries
@@ -2621,7 +2630,7 @@ ensureExpandedProjectBranch summary ( model, commands ) =
                 |> Maybe.map (\request -> not request.inFlight && (request.projectRequestPending || request.taskRequestPending))
                 |> Maybe.withDefault True
     in
-    if summary.hasChildren && expanded && needsRequest then
+    if summary.hasChildren && expanded && needsRequest && not (tasksOnlyWorkspaceRoots model) then
         case model.selectedWorkspaceId of
             Just workspaceId ->
                 let
@@ -3046,7 +3055,7 @@ acceptNavigationPage key navigation model =
                 commitTasks source =
                     let
                         sourceLoading = source.dataLoading
-                        keep summary = not (taskSummaryBelongsTo kind (Just id) summary)
+                        keep summary = not (taskSummaryBelongsTo source kind (Just id) summary)
                         retained = Dict.filter (\_ summary -> keep summary) sourceLoading.taskCardSummaries
                     in
                     mergeNavigationSummariesAt 0 [] (Dict.values tasks) { source | dataLoading = { sourceLoading | taskCardSummaries = retained, navigationVisibleTaskIds = Set.filter (\taskId -> Dict.member taskId retained) sourceLoading.navigationVisibleTaskIds } }
@@ -3123,7 +3132,7 @@ acceptRootRefresh maybeToken navigation model =
                 commitTasks source =
                     let
                         current = source.dataLoading
-                        retained = Dict.filter (\_ summary -> not (taskSummaryBelongsTo "workspace_root" Nothing summary)) current.taskCardSummaries
+                        retained = Dict.filter (\_ summary -> not (taskSummaryBelongsTo source "workspace_root" Nothing summary)) current.taskCardSummaries
                     in
                     mergeNavigationSummariesAt 0 [] (Dict.values tasks) { source | dataLoading = { current | taskCardSummaries = retained, navigationVisibleTaskIds = Set.filter (\id -> Dict.member id retained) current.navigationVisibleTaskIds } }
                 committed = authoritative |> (if projectComplete then commitProjects else identity) |> (if taskComplete then commitTasks else identity)

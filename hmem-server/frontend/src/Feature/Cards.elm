@@ -3164,6 +3164,7 @@ viewProjectsWithZones model renderProject parentId projects =
 treeCriteriaActive : String -> Model -> Bool
 treeCriteriaActive query model =
     not (String.isEmpty query)
+        || model.search.filterHasActiveSession
         || not model.search.filterShowEmptyProjects
         || model.search.filterShowOnly /= ShowAll
         || model.search.filterPriority /= AnyPriority
@@ -3360,13 +3361,30 @@ logicalRows projection model =
         rootTasks = projection.tasks |> List.filter (\t -> t.parentId == Nothing && taskVisible t && (model.search.filterShowOnly == ShowTasksOnly || t.projectId == Nothing))
         rootStatus kind tail =
             if rootStatusVisible model kind then row "root-status" kind 0 "workspace_root" Nothing :: tail else tail
+        flatTasks values tail =
+            if model.dragDrop.dragging == Nothing then List.foldr (task 0 Set.empty) tail values
+            else
+                let
+                    projectKey value = Maybe.withDefault "" value.projectId
+                    zone placement above below =
+                        { parentType = if placement == Nothing then "orphan" else "project-tasks", parentId = Nothing, projectId = placement, abovePriority = above, belowPriority = below }
+                    collect value ( priorPriorities, priorPositions ) =
+                        ( Dict.insert (projectKey value) value.priority priorPriorities, ( value, Dict.get (projectKey value) priorPriorities ) :: priorPositions )
+                    ( priorities, positions ) = List.foldl collect ( Dict.empty, [] ) values
+                    ending = Dict.toList priorities |> List.foldr (\( placement, priority ) rest ->
+                        boundary ("flat-task-end:" ++ placement) 0 (zone (if placement == "" then Nothing else Just placement) (Just priority) Nothing) :: rest) tail
+                in
+                List.foldl (\( value, above ) rest -> boundary ("flat-task:" ++ value.id) 0 (zone value.projectId above (Just value.priority)) :: task 0 Set.empty value rest) ending positions
     in
     case model.focus.focusedEntity of
         Just ( "project", id ) -> Dict.get id model.projects |> Maybe.map (\value -> project 0 Set.empty value []) |> Maybe.withDefault []
         Just ( "task", id ) -> Dict.get id model.tasks |> Maybe.map (\value -> task 0 Set.empty value []) |> Maybe.withDefault []
         _ ->
             let
-                taskRoots = if model.search.filterShowOnly == ShowProjectsOnly then [] else tasks 0 Nothing Nothing Set.empty rootTasks (rootStatus "task" [])
+                taskRoots =
+                    if model.search.filterShowOnly == ShowProjectsOnly then []
+                    else if model.search.filterShowOnly == ShowTasksOnly then flatTasks rootTasks (rootStatus "task" [])
+                    else tasks 0 Nothing Nothing Set.empty rootTasks (rootStatus "task" [])
             in
             if model.search.filterShowOnly == ShowTasksOnly then taskRoots else projects 0 Nothing Set.empty roots (rootStatus "project" taskRoots)
 
@@ -3876,7 +3894,12 @@ viewHierarchyViewport ws incoming =
         , Keyed.node "div" [ class "hierarchy-viewport", id "hierarchy-viewport", tabindex -1, attribute "role" "region", attribute "aria-label" "Planning hierarchy", attribute "data-hierarchy-context" config
             , style "min-height" (String.fromFloat (if pendingFilterMembership then viewport.filterExtent else 0) ++ "px")
             ]
-            [ segment "before" segments.before, segment "editor" segments.pivot, segment "after" segments.after ]
+            (if Array.isEmpty viewport.index.keys && not (activeNavigationTransport model)
+                && (model.dataLoading.rootNavigationRequest |> Maybe.map .succeeded |> Maybe.withDefault True)
+                && not (model.dataLoading.activeNavigationFocus |> Maybe.map .inFlight |> Maybe.withDefault False) then
+                [ ( "empty-state", div [ class "empty-state" ]
+                    [ text (if treeCriteriaActive (String.trim model.search.query) model then "No projects or tasks match the current filters." else "No projects or tasks yet.") ] ) ]
+             else [ segment "before" segments.before, segment "editor" segments.pivot, segment "after" segments.after ])
         ]
 
 

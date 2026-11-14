@@ -444,6 +444,14 @@ offset, errors and `has_more`. Parent/workspace authorization and parameter
 validation apply even when both kinds are skipped. Requested pages retain their
 existing limits, ordering and filters.
 
+For `parent_kind=workspace_root&show_only=tasks`, the task stream contains
+top-level task families across the workspace, including project-assigned tasks;
+the project stream is empty. Task status, priority, query and active-session
+filters apply before pagination, retaining ancestors of matching subtasks.
+Project-status filters do not restrict this flat task list. Other root modes
+still return unassigned root tasks, and explicit project/task branches retain
+their placement scope.
+
 `POST /api/v1/workspaces/:workspaceId/navigation/batch` shares one transport for
 1–4 distinct nonroot owners. Its body is `{"filters":{...},"requests":[...]}`;
 each request has a unique nonblank `request_id` (at most 256 characters), a

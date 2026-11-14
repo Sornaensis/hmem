@@ -1051,7 +1051,7 @@ workspaces readers prefixes pool = listH :<|> createH :<|> getH :<|> updateH :<|
       NavigationTaskBranch taskId -> do
         task <- navigationTaskInWorkspace workspaceId taskId
         pure (Nothing, task.projectId, Just task.id)
-    projectPage <- navigationPageWhenRequested (fromMaybe True includeProjects && taskParent == Nothing) projectTake
+    projectPage <- navigationPageWhenRequested (fromMaybe True includeProjects && taskParent == Nothing && not (parent == NavigationWorkspaceRoot && filters.showOnly == Just "tasks")) projectTake
       (handleDBErrors $ Project.listFilteredProjectSummaryRows pool workspaceId projectParent filters (projectTake + 1) projectSkip)
       (handleDBErrors . Overview.projectCardSummariesFromRows pool)
     taskPage <- navigationPageWhenRequested (fromMaybe True includeTasks && filters.showOnly /= Just "projects") taskTake

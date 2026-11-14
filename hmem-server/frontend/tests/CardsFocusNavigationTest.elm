@@ -29,7 +29,25 @@ import Url
 suite : Test
 suite =
     describe "bounded Cards and Focus loading"
-        [ test "cached raw targets and incomplete, cyclic or foreign ancestry request bounded focus summaries" <| \_ ->
+        [ test "settled empty Tasks-only viewport explains filters while pending and failed roots retain feedback" <| \_ ->
+            let
+                search = model.search
+                base = { model | search = { search | filterShowOnly = Types.ShowTasksOnly, filterHasActiveSession = True } }
+                pending = DataLoading.prepareRootNavigationRequest (Just workspaceId) base |> viewportReady
+                reply result = case pending.dataLoading.rootNavigationRequest of
+                    Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch pending.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint 0 0 result) pending |> Cards.refreshViewport pending |> Tuple.first
+                    Nothing -> pending
+                settled = reply (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [], hasMore = False } })
+                failed = reply (Err Http.Timeout)
+                tree source = Cards.viewProjectsTree workspaceId source |> Query.fromHtml
+            in
+            Expect.all
+                [ \_ -> tree settled |> Query.has [ Selector.class "empty-state", Selector.text "No projects or tasks match the current filters." ]
+                , \_ -> tree pending |> Query.findAll [ Selector.class "empty-state" ] |> Query.count (Expect.equal 0)
+                , \_ -> tree failed |> Query.has [ Selector.text "Retry loading tasks" ]
+                , \_ -> tree failed |> Query.findAll [ Selector.class "empty-state" ] |> Query.count (Expect.equal 0)
+                ] ()
+        , test "cached raw targets and incomplete, cyclic or foreign ancestry request bounded focus summaries" <| \_ ->
             let
                 root = project "root"
                 child = let base = project "child" in { base | parentId = Just root.id }
@@ -730,6 +748,17 @@ suite =
             in
             Expect.equal { focused = [ "a" ], cleared = [ "a", "b" ], revisions = [ seeded.cards.viewport.revision + 1, seeded.cards.viewport.revision + 2 ] }
                 { focused = ids focused, cleared = ids cleared, revisions = [ focused.cards.viewport.revision, cleared.cards.viewport.revision ] }
+        , test "Tasks-only root drop boundaries preserve each task's actual project placement" <| \_ ->
+            let
+                taskA = let base = task "a" Nothing in { base | projectId = Just "project-a", priority = 8 }
+                taskB = let base = task "b" Nothing in { base | projectId = Just "project-b", priority = 3 }
+                search = model.search
+                source = { model | search = { search | filterShowOnly = Types.ShowTasksOnly }, dragDrop = { dragging = Just { entityType = "task", entityId = "a" }, dragOver = Nothing, dropActionModal = Nothing } }
+                seeded = DataLoading.mergeNavigationSummaries [] [ taskA, taskB ] source
+                rows = Cards.logicalRows (Cards.cardTreeProjection workspaceId seeded) seeded
+                before = rows |> List.filterMap (\row -> row.zone |> Maybe.andThen (\zone -> if zone.belowPriority /= Nothing then Just ( zone.projectId, zone.parentId, zone.parentType ) else Nothing))
+            in
+            Expect.equal [ ( Just "project-a", Nothing, "project-tasks" ), ( Just "project-b", Nothing, "project-tasks" ) ] before
         , test "each project owns a distinct terminal task drop boundary even for empty task lists" <| \_ ->
             let
                 check populated =

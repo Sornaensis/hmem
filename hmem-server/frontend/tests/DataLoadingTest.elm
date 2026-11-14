@@ -37,6 +37,33 @@ suite : Test
 suite =
     describe "bounded navigation response guards"
         [ signedOriginTest
+        , test "Tasks-only staged root refresh removes assigned roots and stale session-filter replies cannot restore them" <| \_ ->
+            let
+                search = model.search
+                fresh = { model | search = { search | filterShowOnly = Types.ShowTasksOnly, filterHasActiveSession = True, filterProjectStatuses = [ "archived" ] } }
+                assigned = task "assigned-active" Nothing
+                removed = task "removed-active" Nothing
+                seeded = loadRoot workspaceId [] [ assigned, removed ] fresh
+                refreshing = DataLoading.revalidateNavigationForFilters seeded |> Tuple.first
+                reply values source =
+                    case source.dataLoading.rootNavigationRequest of
+                        Just request ->
+                            DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch source.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint 0 0
+                                (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = values, hasMore = False } })) source |> Tuple.first
+                        Nothing -> source
+                refreshed = reply [ assigned ] refreshing
+                off = Main.update (SetFilterHasActiveSession False) refreshed |> Tuple.first
+                on = Main.update (SetFilterHasActiveSession True) off |> Tuple.first
+                late = case off.dataLoading.rootNavigationRequest of
+                    Just request -> DataLoading.update (GotRootNavigation workspaceId request.sessionEpoch off.dataLoading.activeWorkspaceLoadToken request.generation request.filterFingerprint 0 0
+                        (Ok { workspaceId = workspaceId, projects = { items = [], hasMore = False }, tasks = { items = [ removed ], hasMore = False } })) on |> Tuple.first
+                    Nothing -> on
+                complete = reply [ assigned ] late
+            in
+            Expect.equal { refreshed = [ assigned.id ], final = [ assigned.id ], project = Just "parent" }
+                { refreshed = Set.toList refreshed.dataLoading.navigationVisibleTaskIds
+                , final = Set.toList complete.dataLoading.navigationVisibleTaskIds
+                , project = Dict.get assigned.id complete.tasks |> Maybe.andThen .projectId }
         , test "Tasks-only visible roots continue child pages without expanding their hidden project" <| \_ ->
             let
                 search = model.search

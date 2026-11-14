@@ -164,6 +164,95 @@ function graphEvent(f, id, type, target, action = 'updated') {
     entity: { type, id: target, action }, invalidations: [{ kind: 'entity', target: type + ':' + target }] } }
 }
 
+for (const focused of [false, true]) test(`deleted original project is not revived by graph Back (focused=${focused})`, { timeout: 20000 }, async () => {
+  const f = fixture(), h = await openGraph(f)
+  try {
+    await h.start('tab=projects' + (focused ? '&focus=project%3Aroot-project' : '')); await h.idle()
+    await h.page.locator('#task-graph-open-root-project').click()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.page.route(/\/api\/v1\/projects\/root-project(?:\/(?:overview|next-tasks|next-task-page))?(?:\?|$)/, route =>
+      f.projects.some(row => row.id === 'root-project') ? route.fallback() : route.fulfill({ status: 404, json: { error: 'Project not found' } }))
+    f.projects = f.projects.filter(row => row.id !== 'root-project')
+    const remaining = new Set(f.tasks.filter(row => row.project_id !== 'root-project').map(row => row.id))
+    f.tasks = f.tasks.filter(row => remaining.has(row.id)); f.dependencies = f.dependencies.filter(edge => remaining.has(edge.task_id) && remaining.has(edge.depends_on_id))
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f, 'original-project-deleted', 'project', 'root-project', 'deleted'))
+    await h.page.locator('[data-graph-task="parent"]').waitFor({ state: 'detached' })
+    await h.page.getByRole('button', { name: 'Back', exact: true }).click()
+    await h.page.locator('#hierarchy-viewport').waitFor(); await h.idle()
+    await h.page.waitForFunction(() => {
+      const node = document.querySelector('[data-task-graph-navigation]')
+      return node && JSON.parse(node.dataset.taskGraphNavigation).return === null
+    }, null, { timeout: 6500 })
+    assert.equal(await h.page.locator('#entity-root-project').count(), 0, 'deleted original card must not return from a cached focus/origin')
+    const rendered = await h.page.locator('.hierarchy-content-section').innerText()
+    assert.match(rendered, /original project.*(?:unavailable|no longer|cannot|could not)|(?:unavailable|no longer|cannot|could not).*original project/i, rendered.slice(0, 700))
+  } finally { await h.close() }
+})
+
+for (const change of ['rename', 'status', 'reparent']) for (const focused of [false, true]) test(`graph Back uses current ${change} membership (focused=${focused})`, { timeout: 20000 }, async () => {
+  const f = fixture(), h = await openGraph(f)
+  try {
+    await h.start('tab=projects' + (focused ? '&focus=project%3Aroot-project' : '')); await h.idle()
+    await h.page.getByRole('button', { name: 'Collapse All', exact: true }).click()
+    await h.page.locator('.hierarchy-search-input').fill('Graph'); await h.idle()
+    await h.page.locator('#task-graph-open-root-project').click()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    const refreshed = h.page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/change-stream/resync' && response.request().postDataJSON().snapshot_profile === 'full_v1', { timeout: 5000 })
+    if (change === 'rename') f.projects[0].name = 'Renamed current project'
+    if (change === 'status') { f.projects[0].status = 'completed'; for (const task of f.tasks) if (task.project_id === 'root-project') task.status = 'done' }
+    if (change === 'reparent') f.projects[0].parent_id = 'external'
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f, 'original-' + change, 'project', 'root-project'))
+    await (await refreshed).finished(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.page.getByRole('button', { name: 'Back', exact: true }).click()
+    await h.page.locator('#hierarchy-viewport').waitFor(); await h.idle()
+    await h.page.waitForFunction(() => JSON.parse(document.querySelector('[data-task-graph-navigation]').dataset.taskGraphNavigation).return === null, null, { timeout: 6500 })
+    assert.equal(await h.page.locator('.hierarchy-search-input').inputValue(), 'Graph')
+    assert.equal(h.page.url().includes('focus='), focused)
+    const card = h.page.locator('#entity-root-project')
+    if (focused) {
+      assert.equal(await card.count(), 1)
+      if (change === 'rename') assert.match(await card.innerText(), /Renamed current project/)
+      if (change === 'status') assert.equal(await card.locator('select').first().inputValue(), 'completed')
+      if (change === 'reparent') await h.page.locator('.titlebar-breadcrumbs').filter({ hasText: 'External project' }).waitFor()
+      assert.equal(await h.page.locator('[data-task-graph-return-notice]').count(), 0)
+    } else {
+      assert.equal(await card.count(), 0, 'current filtered/collapsed membership must exclude the old original row')
+      await h.page.getByRole('status').filter({ hasText: 'The original project could not be restored in this view' }).waitFor()
+      await h.page.getByRole('button', { name: 'Dismiss', exact: true }).click()
+      await h.page.locator('[data-task-graph-return-notice]').waitFor({ state: 'detached' })
+      assert.equal(await h.page.locator('[data-task-graph-return-notice]').count(), 0)
+    }
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
+test('tab-away cancels an old return before reentry beyond its deadline', { timeout: 20000 }, async () => {
+  const f = fixture(), h = await openGraph(f)
+  try {
+    await h.start(); await h.page.locator('.hierarchy-search-input').fill('Graph'); await h.idle()
+    await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    f.projects[0].name = 'Renamed outside saved search'
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f,'tab-return-rename','project','root-project'))
+    await h.page.locator('[data-graph-project-label="root-project"]').filter({hasText:'Renamed outside saved search'}).waitFor()
+    await h.page.getByRole('button',{name:'Back',exact:true}).click()
+    await h.page.locator('#hierarchy-viewport').waitFor()
+    await h.page.waitForFunction(() => JSON.parse(document.querySelector('[data-task-graph-navigation]').dataset.taskGraphNavigation).return !== null)
+    await h.page.getByRole('button',{name:'Search',exact:true}).click()
+    await h.page.locator('[data-task-graph-navigation]').waitFor({state:'detached'})
+    await h.page.waitForTimeout(5100)
+    await h.page.locator('.tab[aria-label="Projects"]').click()
+    await h.page.locator('#hierarchy-viewport').waitFor(); await h.idle()
+    const before = await h.page.locator('#main-content-scroll').evaluate(n => n.scrollTop)
+    assert.equal(await h.page.locator('[data-task-graph-navigation]').evaluate(n => JSON.parse(n.dataset.taskGraphNavigation).return), null)
+    assert.equal(await h.page.locator('[data-task-graph-return-notice]').count(), 0)
+    await h.page.waitForTimeout(250)
+    assert.equal(await h.page.locator('#main-content-scroll').evaluate(n => n.scrollTop), before)
+    assert.equal(await h.page.evaluate(() => document.activeElement?.id === 'task-graph-open-root-project'), false)
+    assert.equal(await h.page.locator('#entity-root-project').count(), 0)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
 test('live snapshots update cards, ownership and incident edges without replacing native focus or camera', { timeout: 45000 }, async () => {
   const f = fixture()
   f.tasks.push({ ...f.tasks[3], id: 'remote', title: 'Not directly connected' })

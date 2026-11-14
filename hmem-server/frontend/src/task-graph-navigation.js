@@ -11,21 +11,26 @@ export function installTaskGraphNavigation(app, { document: doc = document, wind
     try { return node ? { node, text: node.dataset.taskGraphNavigation, value: JSON.parse(node.dataset.taskGraphNavigation) } : null } catch { return null }
   }
   const send = value => app.ports.taskGraphNavigationEvent.send(value)
-  const finish = (state, receipt) => send({ kind: 'restored', id: receipt.id, token: receipt.token, scope: state.value.scope })
+  const finish = (state, receipt, outcome = 'settled') => send({ kind: 'restored', id: receipt.id, token: receipt.token, scope: state.value.scope, outcome })
   function flush() {
     queued = false
     if (disposed) return
     const state = current(), receipt = state?.value.return
-    if (!state || !receipt || !state.value.scope) { clearPending(); applied = null; return }
+    if (!state || !receipt || !state.value.scope) {
+      const abandoned = pending
+      clearPending(); applied = null
+      if (abandoned) send({ kind: 'restored', id: abandoned.receipt.id, token: abandoned.receipt.token, scope: abandoned.scope, outcome: 'cancelled' })
+      return
+    }
     const key = JSON.stringify([state.value.scope, receipt.id, receipt.token])
     if (key === applied) return
     if (!pending || pending.key !== key) {
       clearPending()
-      pending = { key, intent, expires: now() + 5000 }
+      pending = { key, intent, expires: now() + 5000, scope: state.value.scope, receipt }
       // A failed load or missing target may never mutate the DOM again.
       deadline = setTimer(() => { deadline = null; queue() }, 5000)
     }
-    if (intent !== pending.intent || now() >= pending.expires) { applied = key; clearPending(); finish(state, receipt); return }
+    if (intent !== pending.intent || now() >= pending.expires) { const outcome = intent !== pending.intent ? 'cancelled' : 'unrestored'; applied = key; clearPending(); finish(state, receipt, outcome); return }
     if (!state.value.ready) return
     const scroll = doc.getElementById('main-content-scroll'), card = doc.getElementById('entity-' + receipt.project)
     const control = doc.getElementById('task-graph-open-' + receipt.project)

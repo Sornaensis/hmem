@@ -8,6 +8,7 @@ import Feature.FocusedFilters as Filters
 import Feature.DataLoading as Loading
 import Feature.TaskGraphNavigation as Navigation
 import Json.Encode as Encode
+import Set
 import TaskGraphNavigation as History
 import Test exposing (Test, describe, test)
 import Types exposing (..)
@@ -72,6 +73,34 @@ suite =
                 first = Navigation.update (OpenTaskGraph "p") base |> Tuple.first
                 second = Navigation.update (OpenTaskGraph "p") first |> Tuple.first
             in Expect.notEqual (first.taskGraphNavigation.pending |> Maybe.map .id) (second.taskGraphNavigation.pending |> Maybe.map .id)
+        , test "real tab navigation retires return ownership before bridge admission" <| \_ ->
+            let
+                (graph,id)=enter base
+                returned=source id graph
+                cards=returned.cards
+                viewport=cards.viewport
+                pinned={returned|cards={cards|viewport={viewport|nativePins=Set.fromList ["project:p","task:user-focus"]}}}
+                away=AppShell.prepareOwned (AppShell.SwitchTabMsg SearchTab) pinned |> Navigation.reconcile pinned |> Tuple.first
+                reentered=AppShell.prepareOwned (AppShell.SwitchTabMsg ProjectsTab) away |> Navigation.reconcile away |> Tuple.first
+            in Expect.equal (Nothing,Nothing,Set.singleton "task:user-focus") (reentered.taskGraphNavigation.returning,reentered.taskGraphNavigation.returnNotice,reentered.cards.viewport.nativePins)
+        , test "unrestored return is truthful, cancellation silent and scope retirement clears notice" <| \_ ->
+            let
+                (graph,id)=enter (configure (Just ("project","p")) "query" 180 base)
+                returned=source id graph
+                cards=returned.cards
+                viewport=cards.viewport
+                pinned={returned|cards={cards|viewport={viewport|nativePins=Set.fromList ["project:p","task:user-focus"]}}}
+                outcome name target = Navigation.update (TaskGraphNavigationEvent (Encode.object [("kind",Encode.string "restored"),("id",Encode.string id),("token",Encode.int (target.taskGraphNavigation.returning |> Maybe.map .token |> Maybe.withDefault -1)),("outcome",Encode.string name)
+                    ,("scope",Encode.object [("workspace",Encode.string "w"),("epoch",Encode.int 1),("audience",Encode.string "reader")])])) target |> Tuple.first
+                unavailable=outcome "unrestored" pinned
+                malformed=Navigation.update (TaskGraphNavigationEvent (Encode.object [("kind",Encode.string "restored"),("scope",Encode.object [("workspace",Encode.string "w"),("epoch",Encode.int 1),("audience",Encode.string "reader")])])) unavailable |> Tuple.first
+                again=Dict.get id graph.taskGraphNavigation.history.entries |> Maybe.map (\entry -> Navigation.restore id entry unavailable |> Tuple.first) |> Maybe.withDefault unavailable
+                cancelled=outcome "cancelled" again
+                retired=Navigation.reconcile unavailable ({unavailable|sessionRequestEpoch=2},Cmd.none) |> Tuple.first
+            in Expect.all [\_ -> Expect.notEqual Nothing unavailable.taskGraphNavigation.returnNotice,\_ -> Expect.equal (Set.singleton "task:user-focus") unavailable.cards.viewport.nativePins
+                ,\_ -> Expect.equal returned.focus unavailable.focus,\_ -> Expect.equal returned.search.query unavailable.search.query
+                ,\_ -> Expect.equal unavailable.taskGraphNavigation.returnNotice malformed.taskGraphNavigation.returnNotice
+                ,\_ -> Expect.equal Nothing again.taskGraphNavigation.returnNotice,\_ -> Expect.equal Nothing cancelled.taskGraphNavigation.returnNotice,\_ -> Expect.equal Nothing retired.taskGraphNavigation.returnNotice] ()
         , test "a readable current focused target is ready despite a failed unrelated root request" <| \_ ->
             let
                 ( graph, id ) = enter (configure (Just ("project","p")) "" 180 base)

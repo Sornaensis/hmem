@@ -373,7 +373,8 @@ viewOrdinaryTabContent wsId model =
                         ]
             in
             div ([ class "hierarchy-content-section" ] ++ Feature.TaskGraphNavigation.attributes model)
-                [ Feature.Search.viewWorkspaceSearchBar actions model
+                [ Feature.TaskGraphNavigation.viewReturnNotice model
+                , Feature.Search.viewWorkspaceSearchBar actions model
                 , Feature.Cards.viewProjectsTree wsId model
                 ]
 

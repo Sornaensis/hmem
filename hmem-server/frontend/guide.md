@@ -26,6 +26,9 @@ Hover or focus the graph icon immediately after **Move to** on a project card,
 then choose **Task Graph**. The diagram includes that project's subtree and
 directly connected tasks outside it. Each project has its own circle. Arrows
 point from prerequisite to dependent; subtasks sit inside their parent card.
+The graph refreshes as readable tasks, projects and dependencies change. If an
+update fails, the previous diagram stays visible with a stale notice; choose
+**Retry** to reconnect and refresh it.
 
 Drag the canvas to pan, use the wheel or pinch to zoom, or choose **Zoom in**,
 **Zoom out** and **Fit**. Task and subtask cards open the normal task details.
@@ -33,6 +36,8 @@ After following dependencies, **Back to graph** restores the diagram viewport.
 The graph page's **Back** returns to the originating project card with its
 focused or unfocused hierarchy, search, filters and expansion preserved.
 Opening a graph directly uses an unfocused hierarchy fallback on return.
+If the original card cannot be restored in the current view, a notice explains
+the return outcome while keeping your current hierarchy filters.
 
 ## Timeline and history
 

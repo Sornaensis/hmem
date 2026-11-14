@@ -1058,6 +1058,7 @@ type alias TaskGraphNavigationModel =
     , pending : Maybe { id : String, entry : TaskGraphNavigation.Entry TaskGraphOrigin }
     , returning : Maybe { id : String, token : Int, projectId : String, scrollTop : Float, anchorDelta : Maybe Float }
     , nextReturnId : Int
+    , returnNotice : Maybe String
     , metadata : Dict String Api.Project
     , metadataGeneration : Int
     , metadataRequested : Set String
@@ -1666,6 +1667,7 @@ type Msg
     | TaskGraphRetry
     | OpenTaskGraph String
     | TaskGraphBack
+    | TaskGraphDismissReturnNotice
     | TaskGraphNavigationEvent Encode.Value
     | TaskGraphProjectFetched TaskGraphNavigation.Guard Int String (Result Http.Error Api.Project)
     | TaskDocuments DocumentMsg

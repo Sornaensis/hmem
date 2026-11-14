@@ -1,4 +1,4 @@
-module Feature.TaskGraphNavigation exposing (attributes, breadcrumbs, current, guard, handleUrl, init, reconcile, restore, returnHeights, returnReady, update, view)
+module Feature.TaskGraphNavigation exposing (attributes, breadcrumbs, current, guard, handleUrl, init, reconcile, restore, returnHeights, returnReady, update, view, viewReturnNotice)
 
 {-| Graph URLs carry a graph-entry identity; their preceding hierarchy entry
 carries graph-origin. The bounded registry owns presentation context per entry,
@@ -34,7 +34,7 @@ import Url
 
 init : TaskGraphNavigationModel
 init =
-    { history = History.init, active = Nothing, pending = Nothing, returning = Nothing, nextReturnId = 1
+    { history = History.init, active = Nothing, pending = Nothing, returning = Nothing, nextReturnId = 1, returnNotice = Nothing
     , metadata = Dict.empty, metadataGeneration = 0, metadataRequested = Set.empty, metadataError = Nothing, scope = Nothing }
 
 
@@ -69,7 +69,7 @@ restore id entry model =
             , cards = { cards | collapsedNodes = origin.collapsedNodes, nodesCollapsedByDefault = origin.nodesCollapsedByDefault, expandedCards = origin.expandedCards
                 , viewport = { viewport | top = origin.viewportTop, index = origin.viewportIndex, projection = Nothing, nativePins = Set.singleton ("project:" ++ entry.projectId), preserveScroll = True } }
             , mainContentScrollY = origin.scrollTop
-            , taskGraphNavigation = { state | active = Nothing, pending = Nothing, nextReturnId = state.nextReturnId + 1, returning = Just { id = id, token = state.nextReturnId, projectId = entry.projectId, scrollTop = origin.scrollTop, anchorDelta = origin.anchorDelta } } }
+            , taskGraphNavigation = { state | active = Nothing, pending = Nothing, returnNotice = Nothing, nextReturnId = state.nextReturnId + 1, returning = Just { id = id, token = state.nextReturnId, projectId = entry.projectId, scrollTop = origin.scrollTop, anchorDelta = origin.anchorDelta } } }
     in
     if Filters.capture model.search /= origin.filters then Loading.revalidateNavigationForFilters restored
     else ( restored, Cmd.none )
@@ -140,7 +140,15 @@ update msg model =
                                 ( { model | taskGraphNavigation = next }, model.key |> Maybe.map (\key -> Nav.replaceUrl key completed.sourceUrl) |> Maybe.withDefault Cmd.none )
                         Nothing -> ( model, Cmd.none )
                 Just "restored" ->
-                    if Maybe.map .id state.returning == eventId && Maybe.map .token state.returning == field "token" Decode.int then ( { model | taskGraphNavigation = { state | returning = Nothing } }, Cmd.none ) else ( model, Cmd.none )
+                    if state.returning /= Nothing && Maybe.map .id state.returning == eventId && Maybe.map .token state.returning == field "token" Decode.int then
+                        let
+                            outcome = field "outcome" Decode.string |> Maybe.withDefault "settled"
+                            cards = model.cards
+                            viewport = cards.viewport
+                            pins = if outcome == "settled" then viewport.nativePins else state.returning |> Maybe.map (\receipt -> Set.remove ("project:" ++ receipt.projectId) viewport.nativePins) |> Maybe.withDefault viewport.nativePins
+                            notice = if outcome == "unrestored" then Just "The original project could not be restored in this view. Your hierarchy filters are unchanged." else Nothing
+                        in ( { model | cards = { cards | viewport = { viewport | nativePins = pins } }, taskGraphNavigation = { state | returning = Nothing, returnNotice = notice } }, Cmd.none )
+                    else ( model, Cmd.none )
                 _ -> ( model, Cmd.none )
 
         TaskGraphBack ->
@@ -150,6 +158,8 @@ update msg model =
                         Just _ -> ( model, model.key |> Maybe.map (\key -> Nav.back key 1) |> Maybe.withDefault Cmd.none )
                         Nothing -> fallback scope route model
                 _ -> ( model, Cmd.none )
+
+        TaskGraphDismissReturnNotice -> ( { model | taskGraphNavigation = { state | returnNotice = Nothing } }, Cmd.none )
 
         TaskGraphProjectFetched scope generation projectId result ->
             if guard model /= Just scope || generation /= state.metadataGeneration || not (Set.member projectId state.metadataRequested) then ( model, Cmd.none )
@@ -186,11 +196,19 @@ reconcile previous ( incoming, command ) =
     let
         state = incoming.taskGraphNavigation
         scope = guard incoming
-        retired = if state.scope /= scope then { state | history = History.retire state.history, pending = Nothing, returning = Nothing, metadata = Dict.empty, metadataRequested = Set.empty, metadataError = Nothing, scope = scope } else state
+        hierarchyVisible = incoming.activeTab == ProjectsTab && (case incoming.page of
+            WorkspacePage workspace -> Just workspace == incoming.selectedWorkspaceId
+            _ -> False)
+        interrupted = state.scope == scope && state.returning /= Nothing && not hierarchyVisible
+        retired = if state.scope /= scope then { state | history = History.retire state.history, pending = Nothing, returning = Nothing, returnNotice = Nothing, metadata = Dict.empty, metadataRequested = Set.empty, metadataError = Nothing, scope = scope }
+            else if interrupted then {state|returning=Nothing,returnNotice=Nothing} else state
         active = History.parse incoming.url |> Maybe.andThen (\route -> if Just route.workspaceId == incoming.selectedWorkspaceId && scope /= Nothing then Just route else Nothing)
         changed = active /= previous.taskGraphNavigation.active
         next = if changed then { retired | active = active, metadata = Dict.empty, metadataGeneration = retired.metadataGeneration + 1, metadataRequested = Set.empty, metadataError = Nothing } else { retired | active = active }
-        model = { incoming | taskGraphNavigation = next }
+        cards = incoming.cards
+        viewport = cards.viewport
+        pins = if interrupted then state.returning |> Maybe.map (\receipt -> Set.remove ("project:"++receipt.projectId) viewport.nativePins) |> Maybe.withDefault viewport.nativePins else viewport.nativePins
+        model = { incoming | taskGraphNavigation = next, cards = {cards|viewport={viewport|nativePins=pins}} }
         missing id visited =
             if Set.member id visited || Set.size visited >= 32 then Nothing
             else case Dict.get id (Dict.union model.projects next.metadata) of
@@ -237,6 +255,14 @@ attributes model =
         , ( "return", model.taskGraphNavigation.returning |> Maybe.map (\value -> Encode.object
             [ ( "id", Encode.string value.id ), ( "token", Encode.int value.token ), ( "project", Encode.string value.projectId ), ( "top", Encode.float value.scrollTop ), ( "anchor", value.anchorDelta |> Maybe.map Encode.float |> Maybe.withDefault Encode.null ) ]) |> Maybe.withDefault Encode.null )
         ])) ]
+
+
+viewReturnNotice : Model -> Html Msg
+viewReturnNotice model =
+    case model.taskGraphNavigation.returnNotice of
+        Nothing -> text ""
+        Just message -> div [class "empty-state", attribute "role" "status", attribute "data-task-graph-return-notice" ""]
+            [text message,button [class "btn-small btn-ghost",type_ "button",onClick TaskGraphDismissReturnNotice] [text "Dismiss"]]
 
 
 breadcrumbs : Model -> Html Msg

@@ -100,6 +100,7 @@ route msg model =
         TaskGraphRetry -> Ok (Feature.TaskGraphView.update msg model)
         OpenTaskGraph _ -> Ok (Feature.TaskGraphNavigation.update msg model)
         TaskGraphBack -> Ok (Feature.TaskGraphNavigation.update msg model)
+        TaskGraphDismissReturnNotice -> Ok (Feature.TaskGraphNavigation.update msg model)
         TaskGraphNavigationEvent _ -> Ok (Feature.TaskGraphNavigation.update msg model)
         TaskGraphProjectFetched _ _ _ _ -> Ok (Feature.TaskGraphNavigation.update msg model)
 

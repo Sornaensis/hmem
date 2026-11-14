@@ -26,8 +26,8 @@ async function openGraph(f = fixture(), options = {}) {
   await h.page.route('**/api/v1/change-stream/resync', async route => {
     if (route.request().postDataJSON().snapshot_profile !== 'full_v1') return route.fallback()
     count++
-    if (options.wait && (!options.waitFirstOnly || count === 1)) await options.wait
-    if (options.failure) return route.fulfill({ status: 500, json: { error: 'controlled' } })
+    if (options.wait && (!options.waitFirstOnly || count === 1)) await (typeof options.wait === 'function' ? options.wait(count) : options.wait)
+    if (typeof options.failure === 'function' ? options.failure(count) : options.failure) return route.fulfill({ status: 500, json: { error: 'controlled' } })
     const item = (kind, data) => ({ schema_version: 1, kind, data })
     return route.fulfill({ json: { snapshot_profile: 'full_v1', items: [item('workspace', f.workspace), ...f.projects.map(v => item('project', v)), ...f.tasks.map(v => item('task', v)), ...f.dependencies.map(v => item('task_dependency', v))], has_more: false, resume_token: 'graph-snapshot' } })
   })
@@ -143,9 +143,11 @@ test('loading, empty, failed and unavailable project states remain explicit', { 
     await failure.start(); await failure.page.locator('#task-graph-open-root-project').click()
     await failure.page.getByRole('alert').filter({ hasText: 'Task graph could not load' }).waitFor()
     assert.equal(await failure.page.locator('[data-graph-task]').count(), 0)
+    const retryFinished = failure.page.waitForResponse(response => response.url().endsWith('/api/v1/change-stream/resync') && failure.snapshots() === 12)
     await failure.page.getByRole('button', { name: 'Retry', exact: true }).click()
+    await retryFinished
     await failure.page.getByRole('alert').filter({ hasText: 'Task graph could not load' }).waitFor()
-    assert.equal(failure.snapshots(), 2)
+    assert.equal(failure.snapshots(), 12, 'each explicit attempt retains the canonical manager’s six-request retry budget')
   } finally { await failure.close() }
   const missing = await openGraph()
   try {
@@ -153,6 +155,180 @@ test('loading, empty, failed and unavailable project states remain explicit', { 
     await missing.page.getByRole('alert').filter({ hasText: 'selected graph project is unavailable' }).waitFor()
     assert.equal(await missing.page.locator('[data-graph-task]').count(), 0)
   } finally { await missing.close() }
+})
+
+function graphEvent(f, id, type, target, action = 'updated') {
+  return { schema_version: 1, type: 'change', event: { schema_version: 1, event_id: id,
+    scope: 'workspace', workspace_id: f.workspace.id, occurred_at: '2026-11-14T20:00:00Z',
+    actor: { type: 'system', id: null }, transaction: { id: 'tx-' + id, cause: 'core', request_id: null },
+    entity: { type, id: target, action }, invalidations: [{ kind: 'entity', target: type + ':' + target }] } }
+}
+
+test('live snapshots update cards, ownership and incident edges without replacing native focus or camera', { timeout: 45000 }, async () => {
+  const f = fixture()
+  f.tasks.push({ ...f.tasks[3], id: 'remote', title: 'Not directly connected' })
+  const h = await openGraph(f)
+  const push = frame => h.page.evaluate(value => window.pushHierarchyFrames([value]), frame)
+  try {
+    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    assert.equal(await h.page.locator('[data-graph-task="remote"]').count(), 0)
+    await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click()
+    const viewport = await transform(h)
+    const card = h.page.locator('[data-graph-task="child-b"]')
+    await card.focus()
+    await card.evaluate(node => { window.liveTaskButton = node; window.liveGraphCanvas = document.getElementById('task-graph-canvas') })
+    f.tasks.find(row => row.id === 'child-b').title = 'Live subtask title'
+    f.tasks.find(row => row.id === 'child-b').status = 'in_progress'
+    await push(graphEvent(f, 'title-status', 'task', 'child-b'))
+    await h.page.waitForFunction(() => document.querySelector('[data-graph-task="child-b"]')?.textContent.includes('Live subtask title') && document.querySelector('[data-graph-task="child-b"]')?.textContent.includes('in progress'))
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    assert.equal(await h.page.evaluate(() => document.activeElement === window.liveTaskButton && document.getElementById('task-graph-canvas') === window.liveGraphCanvas), true)
+    assert.deepEqual(await transform(h), viewport)
+    f.dependencies = f.dependencies.filter(row => !(row.task_id === 'parent' && row.depends_on_id === 'external-task'))
+    await push(graphEvent(f, 'remove-incident', 'task_dependency', 'parent:external-task', 'deleted'))
+    await h.page.locator('[data-graph-task="external-task"]').waitFor({ state: 'detached' })
+    assert.equal(await h.page.locator('[data-prerequisite="external-task"]').count(), 0)
+    f.projects.find(row => row.id === 'external').parent_id = 'root-project'
+    f.projects.find(row => row.id === 'external').name = 'Reparented child project'
+    await push(graphEvent(f, 'project-reparent', 'project', 'external'))
+    await h.page.locator('[data-graph-task="remote"]').waitFor()
+    await h.page.locator('[data-graph-project-label="external"]').filter({ hasText: 'Reparented child project' }).waitFor()
+    assert.equal(await h.page.locator('.graph-external-project').count(), 0)
+    f.projects.find(row => row.id === 'external').parent_id = null
+    await push(graphEvent(f, 'project-detach', 'project', 'external'))
+    await h.page.locator('[data-graph-task="remote"]').waitFor({ state: 'detached' })
+    const moved = f.tasks.find(row => row.id === 'child-b'); moved.parent_id = null; moved.project_id = 'external'
+    f.dependencies = f.dependencies.filter(row => row.task_id !== 'child-b')
+    f.dependencies.push({ task_id: 'child-b', depends_on_id: 'parent' })
+    await push(graphEvent(f, 'task-reparent', 'task', 'child-b'))
+    await h.page.locator('[data-prerequisite="parent"][data-dependent="child-b"]').waitFor()
+    assert.equal(await card.evaluate(node => node.classList.contains('graph-subtask')), false)
+    assert.equal(await h.page.evaluate(() => document.activeElement === window.liveTaskButton && document.querySelector('[data-graph-task="child-b"]') === window.liveTaskButton), true)
+    assert.deepEqual(await transform(h), viewport)
+    await card.focus(); await h.page.keyboard.press('Enter')
+    await h.page.waitForURL(/focus=task%3Achild-b/)
+    await h.page.locator('#entity-child-b').waitFor()
+    // A deleted detail endpoint returns 404 while the canonical invalidation
+    // and complete graph refresh race the ordinary focused-task reader.
+    await h.page.route(/\/api\/v1\/tasks\/child-b(?:\/(?:overview|dependencies))?(?:\?|$)/, route =>
+      f.tasks.some(row => row.id === 'child-b') ? route.fallback() : route.fulfill({ status: 404, json: { error: 'Task not found' } }))
+    f.tasks = f.tasks.filter(row => row.id !== 'child-b'); f.dependencies = f.dependencies.filter(row => row.task_id !== 'child-b' && row.depends_on_id !== 'child-b')
+    await push(graphEvent(f, 'task-delete', 'task', 'child-b', 'deleted'))
+    await h.page.waitForURL(/task-graph=root-project/)
+    await h.page.locator('#task-graph-canvas').waitFor()
+    assert.equal(await h.page.locator('[data-graph-task="child-b"]').count(), 0)
+    assert.deepEqual(await transform(h), viewport)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
+test('semantic snapshot rejection stays stale through a checkpoint until valid retry acceptance', { timeout: 30000 }, async () => {
+  const f = fixture(), h = await openGraph(f)
+  try {
+    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    f.dependencies.push({ task_id: 'parent', depends_on_id: 'missing-task' })
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f, 'bad-reference', 'task_dependency', 'missing-link'))
+    const retry = h.page.getByRole('button', { name: 'Retry', exact: true })
+    await retry.waitFor()
+    assert.equal(await h.page.locator('[data-graph-live="true"]').count(), 0)
+    await h.page.evaluate(() => window.pushHierarchyFrames([]))
+    await retry.waitFor()
+    assert.equal(await h.page.locator('[data-graph-live="true"]').count(), 0)
+    assert.equal(await h.page.locator('[data-graph-task="parent"]').count(), 1)
+    f.dependencies.pop(); f.tasks[0].title = 'Accepted after semantic rejection'
+    await retry.click()
+    await h.page.locator('[data-graph-task="parent"]').filter({ hasText: 'Accepted after semantic rejection' }).waitFor()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
+test('Retry during reseed wait publishes one manager-owned seed through real Elm acceptance', { timeout: 30000 }, async () => {
+  const f = fixture(); let release, arrived
+  const held = new Promise(resolve => { release = resolve }), seedStarted = new Promise(resolve => { arrived = resolve })
+  const h = await openGraph(f, { wait: count => { if (count === 2) { arrived(); return held } } })
+  try {
+    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.page.evaluate(() => window.pushHierarchyRawFrames([{ schema_version: 1, type: 'resync_required' }]))
+    await h.page.getByRole('button', { name: 'Retry', exact: true }).click()
+    await seedStarted
+    f.tasks[0].title = 'Authoritative replacement seed'
+    release()
+    await h.page.locator('[data-graph-task="parent"]').filter({ hasText: 'Authoritative replacement seed' }).waitFor()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.page.waitForTimeout(750)
+    assert.equal(h.snapshots(), 2, 'no competing finite read or delayed second manager seed')
+    f.tasks[0].title = 'Change after authoritative replacement'
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f, 'after-reseed-retry', 'task', 'parent'))
+    await h.page.locator('[data-graph-task="parent"]').filter({ hasText: 'Change after authoritative replacement' }).waitFor()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { release(); await h.close() }
+})
+
+test('queued Retry retires an in-flight manager seed before real Elm accepts its replacement', { timeout: 30000 }, async () => {
+  const f = fixture(); let releaseOld, releaseNew, oldStarted, newStarted
+  const oldGate = new Promise(resolve => { releaseOld = resolve }), newGate = new Promise(resolve => { releaseNew = resolve })
+  const oldArrived = new Promise(resolve => { oldStarted = resolve }), newArrived = new Promise(resolve => { newStarted = resolve })
+  const h = await openGraph(f, { wait: count => {
+    if (count === 2) { oldStarted(); return oldGate }
+    if (count === 3) { newStarted(); return newGate }
+  } })
+  try {
+    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.page.evaluate(() => window.pushHierarchyRawFrames([{ schema_version: 1, type: 'resync_required' }]))
+    await h.page.getByRole('button', { name: 'Retry', exact: true }).evaluate(button => { window.queuedGraphRetry = button })
+    await oldArrived
+    // Exercise a user activation queued from the recovery control while its
+    // original seed is already in flight; the real Elm handler remains bound.
+    await h.page.evaluate(() => window.queuedGraphRetry.click())
+    await newArrived
+    f.tasks[0].title = 'Replacement owns the accepted boundary'
+    releaseNew()
+    await h.page.locator('[data-graph-task="parent"]').filter({ hasText: 'Replacement owns the accepted boundary' }).waitFor()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    f.tasks[0].title = 'Abandoned seed must not publish'
+    releaseOld()
+    await h.page.waitForTimeout(750)
+    assert.equal(h.snapshots(), 3, 'initial seed, abandoned seed and sole replacement seed')
+    assert.equal(await h.page.locator('[data-graph-task="parent"]').textContent().then(text => text.includes('Replacement owns the accepted boundary')), true)
+    f.tasks[0].title = 'Subsequent canonical event remains visible'
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f, 'after-inflight-retry', 'task', 'parent'))
+    await h.page.locator('[data-graph-task="parent"]').filter({ hasText: 'Subsequent canonical event remains visible' }).waitFor()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { releaseOld(); releaseNew(); await h.close() }
+})
+
+test('live refresh failure keeps stale cards and viewport until explicit Retry', { timeout: 30000 }, async () => {
+  const f = fixture(); let failing = false
+  const h = await openGraph(f, { failure: () => failing })
+  try {
+    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click()
+    const viewport = await transform(h)
+    await h.page.locator('[data-graph-task="parent"]').evaluate(node => { window.staleGraphCard = node })
+    failing = true
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f, 'failed-refresh', 'task', 'parent'))
+    await h.page.locator('[data-graph-live="false"]').filter({ hasText: 'Task graph could not load' }).waitFor()
+    assert.equal(await h.page.evaluate(() => document.querySelector('[data-graph-task="parent"]') === window.staleGraphCard), true)
+    assert.deepEqual(await transform(h), viewport)
+    const reads = h.snapshots()
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f, 'while-failed', 'task', 'parent'))
+    await h.page.waitForTimeout(750)
+    assert.equal(h.snapshots(), reads)
+    failing = false
+    await h.page.getByRole('button', { name: 'Retry', exact: true }).click()
+    await h.page.locator('[data-graph-live="true"]').waitFor()
+    assert.equal(h.snapshots(), reads + 1)
+    assert.deepEqual(await transform(h), viewport)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
 })
 
 test('direct nested-project entry uses readable ancestor breadcrumbs without hierarchy cache authority', { timeout: 30000 }, async () => {

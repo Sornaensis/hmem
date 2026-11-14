@@ -115,6 +115,51 @@ suite =
             \_ ->
                 Expect.equal ( TaskGraph.Failed "invalid graph request", Nothing )
                     ( (TaskGraph.begin { guard | audienceId = "" }).status, (TaskGraph.begin { guard | sessionEpoch = -1 }).guard )
+        , test "ordinary refresh keeps the previous graph until a complete replacement and increments only snapshot revision" <|
+            \_ ->
+                let
+                    ready = TaskGraph.acceptSnapshot guard fixture (TaskGraph.begin guard) |> TaskGraph.markLive guard
+                    refreshing = TaskGraph.refresh guard ready
+                    next = TaskGraph.acceptSnapshot guard [ workspaceItem, projectItem "p" Nothing, taskItem "new" (Just "p") Nothing "done" ] refreshing
+                in
+                Expect.equal
+                    { retained = ready.graph, status = TaskGraph.Refreshing, live = False, tasks = Just [ "new" ], revision = ready.revision + 1 }
+                    { retained = refreshing.graph, status = refreshing.status, live = refreshing.live, tasks = next.graph |> Maybe.map (.tasks >> Dict.keys), revision = next.revision }
+        , test "refresh failure retains stale graph and cannot become live while a read is pending" <|
+            \_ ->
+                let
+                    ready = TaskGraph.acceptSnapshot guard fixture (TaskGraph.begin guard) |> TaskGraph.markLive guard
+                    pending = TaskGraph.refresh guard ready |> TaskGraph.markLive guard
+                    failed = TaskGraph.fail guard "read failed" pending
+                in
+                Expect.equal ( ( ready.graph, False, TaskGraph.Refreshing ), ( ready.graph, False, TaskGraph.Stale "read failed" ) )
+                    ( ( pending.graph, pending.live, pending.status ), ( failed.graph, failed.live, failed.status ) )
+        , test "authoritative project deletion and permission retirement clear stale sensitive data" <|
+            \_ ->
+                let
+                    ready = TaskGraph.acceptSnapshot guard fixture (TaskGraph.begin guard)
+                    deleted = TaskGraph.acceptSnapshot guard [ workspaceItem ] (TaskGraph.refresh guard ready)
+                    revoked = TaskGraph.invalidate guard "revoked" ready
+                in
+                Expect.equal ( ( Nothing, TaskGraph.Failed "selected graph project is unavailable" ), ( Nothing, False ) )
+                    ( ( deleted.graph, deleted.status ), ( revoked.graph, revoked.live ) )
+        , test "semantic snapshot rejection survives checkpoints and reconnect until a valid snapshot is accepted" <|
+            \_ ->
+                let
+                    ready = TaskGraph.acceptSnapshot guard fixture (TaskGraph.begin guard) |> TaskGraph.markLive guard
+                    invalid = [ workspaceItem, projectItem "p" Nothing, taskItem "a" (Just "p") Nothing "todo", dependency "a" "missing" ]
+                    rejected = TaskGraph.acceptSnapshot guard invalid (TaskGraph.refresh guard ready)
+                    checkpoint = TaskGraph.markLive guard rejected
+                    reconnect = checkpoint |> TaskGraph.recover guard |> TaskGraph.markLive guard
+                    accepted = reconnect |> TaskGraph.refresh guard |> TaskGraph.acceptSnapshot guard fixture |> TaskGraph.markLive guard
+                    ordinaryReconnect = ready |> TaskGraph.recover guard |> TaskGraph.markLive guard
+                in
+                Expect.all
+                    [ \_ -> Expect.equal ( rejected.graph, rejected.status, False ) ( reconnect.graph, reconnect.status, reconnect.live )
+                    , \_ -> Expect.equal rejected checkpoint
+                    , \_ -> Expect.equal ( TaskGraph.Ready, True, ready.graph ) ( accepted.status, accepted.live, accepted.graph )
+                    , \_ -> Expect.equal ( TaskGraph.Ready, True ) ( ordinaryReconnect.status, ordinaryReconnect.live )
+                    ] ()
         ]
 
 

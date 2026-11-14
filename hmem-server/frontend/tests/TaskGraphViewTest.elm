@@ -10,6 +10,7 @@ import Feature.TaskGraphNavigation as Navigation
 import Feature.TaskGraphView as View
 import Json.Encode as Encode
 import Set
+import TaskGraphLayout as Layout
 import Test exposing (describe,test)
 import Types exposing (..)
 import Url
@@ -36,7 +37,38 @@ suite = describe "graph detail and snapshot authority"
             oldGuard=base.taskGraph.data.guard
             reopened=Navigation.reconcile reset ({reset|auth=base.auth,sessionContext=base.sessionContext},Cmd.none) |> View.reconcile NoOp reset |> Tuple.first
         in Expect.all [\_ -> Expect.equal Nothing reset.taskGraph.canvasKey,\_ -> Expect.equal base.taskGraph.generation reset.taskGraph.generation,\_ -> Expect.notEqual oldGuard reopened.taskGraph.data.guard] ()
+    , test "live refresh and failed read retain scene key, layout and active detail receipt" <| \_ ->
+        let
+            detail=View.update (TaskGraphOpenTask "task") base |> Tuple.first |> taskUrl "task"
+            updating=receive "refreshing" detail
+            failed=receive "failed" updating
+        in Expect.all
+            [\_ -> Expect.equal base.taskGraph.canvasKey failed.taskGraph.canvasKey
+            ,\_ -> Expect.equal base.taskGraph.layout failed.taskGraph.layout
+            ,\_ -> Expect.equal detail.taskGraph.detail failed.taskGraph.detail
+            ,\_ -> Expect.equal detail.taskGraph.data.graph failed.taskGraph.data.graph
+            ,\_ -> Expect.equal False failed.taskGraph.data.live
+            ,\_ -> case failed.taskGraph.data.status of
+                Graph.Stale _ -> Expect.pass
+                _ -> Expect.fail "failed live refresh must be stale and retryable"
+            ] ()
+    , test "permission retirement clears graph, layout and task-detail receipt immediately" <| \_ ->
+        let
+            detail=View.update (TaskGraphOpenTask "task") base |> Tuple.first |> taskUrl "task"
+            retired=receive "retired" detail
+        in Expect.equal (Nothing,Nothing,Nothing) (retired.taskGraph.data.graph,retired.taskGraph.layout,retired.taskGraph.detail)
+    , test "retry keeps the existing scene identity and old graph while requesting a fresh read" <| \_ ->
+        let
+            failed=receive "failed" base
+            retry=View.update TaskGraphRetry failed |> Tuple.first
+        in Expect.equal (base.taskGraph.canvasKey,base.taskGraph.data.graph,Graph.Refreshing)
+            (retry.taskGraph.canvasKey,retry.taskGraph.data.graph,retry.taskGraph.data.status)
     ]
+
+
+receive kind model =
+    let owner=model.taskGraph.data.guard |> Maybe.withDefault {workspaceId="w",projectId="p",audienceId="reader",sessionEpoch=1,targetGeneration=1} in
+    View.update (TaskGraphDataReceived (Encode.object [("kind",Encode.string kind),("guard",Encode.object [("workspaceId",Encode.string owner.workspaceId),("projectId",Encode.string owner.projectId),("audienceId",Encode.string owner.audienceId),("sessionEpoch",Encode.int owner.sessionEpoch),("targetGeneration",Encode.int owner.targetGeneration)])])) model |> Tuple.first
 
 
 taskUrl id model =
@@ -59,6 +91,6 @@ base=
         routed=Navigation.reconcile ready (ready,Cmd.none) |> View.reconcile NoOp ready |> Tuple.first
         state=routed.taskGraph
         task={id="task",title="Task",status=Api.Todo,projectId=Just "p",parentId=Nothing,external=False}
-        graph={selectedProjectId="p",projects=Dict.empty,tasks=Dict.singleton "task" task,edges=[],inScopeTaskIds=Set.singleton "task",externalTaskIds=Set.empty}
+        graph={selectedProjectId="p",projects=Dict.singleton "p" {id="p",name="Project",parentId=Nothing,external=False},tasks=Dict.singleton "task" task,edges=[],inScopeTaskIds=Set.singleton "task",externalTaskIds=Set.empty}
         data=state.data
-    in {routed|taskGraph={state|data={data|status=Graph.Ready,graph=Just graph}}}
+    in {routed|taskGraph={state|data={data|status=Graph.Ready,graph=Just graph,pending=False,live=True,revision=1},layout=Just (Layout.build Dict.empty graph)}}

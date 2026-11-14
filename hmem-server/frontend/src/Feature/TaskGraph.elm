@@ -1,4 +1,4 @@
-module Feature.TaskGraph exposing (Edge, Graph, GraphProject, GraphTask, Guard, State, Status(..), acceptSnapshot, begin, fail, init, project, retire)
+module Feature.TaskGraph exposing (Edge, Graph, GraphProject, GraphTask, Guard, State, Status(..), acceptSnapshot, begin, fail, init, invalidate, markLive, project, recover, refresh, retire)
 
 {-| The graph owns a complete snapshot-derived read model, separate from the
 ordinary hierarchy's sparse demand caches. Opaque transport bearers stay in JS.
@@ -23,6 +23,9 @@ type Status
     = Idle
     | Loading
     | Ready
+    | Refreshing
+    | Recovering
+    | Stale String
     | Failed String
 
 
@@ -30,6 +33,9 @@ type alias State =
     { guard : Maybe Guard
     , status : Status
     , graph : Maybe Graph
+    , pending : Bool
+    , live : Bool
+    , revision : Int
     }
 
 
@@ -57,7 +63,7 @@ type alias Graph =
 
 init : State
 init =
-    { guard = Nothing, status = Idle, graph = Nothing }
+    { guard = Nothing, status = Idle, graph = Nothing, pending = False, live = False, revision = 0 }
 
 
 begin : Guard -> State
@@ -66,7 +72,40 @@ begin guard =
         { init | status = Failed "invalid graph request" }
 
     else
-        { guard = Just guard, status = Loading, graph = Nothing }
+        { init | guard = Just guard, status = Loading, pending = True }
+
+
+refresh : Guard -> State -> State
+refresh guard state =
+    if state.guard == Just guard then
+        { state | status = if state.graph == Nothing then Loading else Refreshing, pending = True, live = False }
+    else state
+
+
+recover : Guard -> State -> State
+recover guard state =
+    if state.guard == Just guard then
+        { state | live = False, status =
+            case state.status of
+                Stale _ -> state.status
+                Failed _ -> state.status
+                _ -> if state.pending || state.graph == Nothing then state.status else Recovering
+        }
+    else state
+
+
+markLive : Guard -> State -> State
+markLive guard state =
+    if state.guard == Just guard && not state.pending && state.graph /= Nothing && (state.status == Ready || state.status == Recovering) then
+        { state | live = True, status = Ready }
+    else state
+
+
+invalidate : Guard -> String -> State -> State
+invalidate guard message state =
+    if state.guard == Just guard then
+        { state | status = Failed message, pending = False, graph = Nothing, live = False }
+    else state
 
 
 retire : State -> State
@@ -76,8 +115,8 @@ retire _ =
 
 fail : Guard -> String -> State -> State
 fail guard message state =
-    if state.guard == Just guard && state.status == Loading then
-        { state | status = Failed message, graph = Nothing }
+    if state.guard == Just guard then
+        { state | status = if state.graph == Nothing then Failed message else Stale message, pending = False, live = False }
 
     else
         state
@@ -85,16 +124,17 @@ fail guard message state =
 
 acceptSnapshot : Guard -> List Api.SnapshotItem -> State -> State
 acceptSnapshot guard items state =
-    if state.guard /= Just guard || state.status /= Loading then
+    if state.guard /= Just guard || not state.pending then
         state
 
     else
-        case ChangeStream.applySnapshotProfile (ChangeStream.Workspace guard.workspaceId) "full_v1" items |> Result.andThen (project guard.projectId) of
-            Ok graph ->
-                { state | status = Ready, graph = Just graph }
-
-            Err message ->
-                fail guard message state
+        case ChangeStream.applySnapshotProfile (ChangeStream.Workspace guard.workspaceId) "full_v1" items of
+            Err message -> fail guard message state
+            Ok snapshot ->
+                if not (Dict.member guard.projectId snapshot.projects) then invalidate guard "selected graph project is unavailable" state
+                else case project guard.projectId snapshot of
+                    Ok graph -> { state | status = Ready, graph = Just graph, pending = False, live = False, revision = state.revision + 1 }
+                    Err message -> fail guard message state
 
 
 project : String -> ChangeStream.Snapshot -> Result String Graph

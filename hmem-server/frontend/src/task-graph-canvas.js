@@ -92,6 +92,7 @@ export function createTaskGraphCanvas(canvas, initial, { saved, save = () => {},
   return {
     update(next) {
       const changed = JSON.stringify([metadata.selected, metadata.bounds]) !== JSON.stringify([next.selected, next.bounds])
+      if (next.revision !== metadata.revision) settling = false
       metadata = next; measurements()
       if (settling) {
         if (now() > settleUntil || refinements >= 8) settling = false
@@ -123,7 +124,7 @@ export function installTaskGraphCanvas(app, { document: doc = document, window: 
     if (metadata.focus) {
       const identity = JSON.stringify([metadata.key, metadata.focus.token])
       if (identity !== focusedReceipt) {
-        const button = [...canvas.querySelectorAll('[data-graph-task]')].find(element => element.dataset.graphTask === metadata.focus.taskId)
+        const button = [...canvas.querySelectorAll('[data-graph-task]')].find(element => element.dataset.graphTask === metadata.focus.taskId) || doc.getElementById('task-graph-back')
         if (button) { button.focus({ preventScroll: true }); focusedReceipt = identity; app.ports.taskGraphCanvasEvent.send({ kind: 'focused', key: metadata.key, token: metadata.focus.token }) }
       }
     }

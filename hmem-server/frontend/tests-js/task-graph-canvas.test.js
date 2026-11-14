@@ -92,3 +92,11 @@ test('saved, user-panned and expired initial cameras never refit on measurement 
     assert.deepEqual(h.view(), before, kind); h.controller.dispose()
   }
 })
+
+test('a new canonical snapshot preserves even an untouched provisional camera', () => {
+  const h = harness(undefined, { saved: null })
+  const before = h.view()
+  h.controller.update({ ...h.metadata, revision: 2, selected: { x: 10000, y: 20000 }, bounds: { x: -300, y: -800, width: 30000, height: 40000 }, measured: true })
+  assert.deepEqual(h.view(), before)
+  h.controller.dispose()
+})

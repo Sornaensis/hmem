@@ -24,8 +24,12 @@ preview context and Search, Timeline or Audit return controls.
 
 Hover or focus the graph icon immediately after **Move to** on a project card,
 then choose **Task Graph**. The diagram recursively includes the selected project
-and its subprojects. Each owning project has a separate circle; subproject circles
-are not nested. Dependencies can cross circles. Breadcrumbs show project ancestry.
+and its subprojects. Subproject circles sit inside their parent circles, with each
+project's own cards separate from its children. Dependencies can cross circles.
+Breadcrumbs show project ancestry. Already visible external projects also follow
+their direct parent links: the selected project may sit inside an external
+ancestor without adding that ancestor's other tasks to the selected scope.
+Missing ancestors end the displayed branch; the graph does not fetch them.
 Outside tasks appear only when directly connected to a visible task anywhere in
 the selected subtree. Arrows point from prerequisite to dependent; subtasks sit
 inside their parent card.

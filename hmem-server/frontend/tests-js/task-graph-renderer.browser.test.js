@@ -40,6 +40,124 @@ const transform = async h => {
 }
 const world = h => h.page.locator('[data-graph-world]').evaluate(n => [...n.querySelectorAll('foreignObject')].map(v => [v.getAttribute('x'), v.getAttribute('y'), v.getAttribute('width'), v.getAttribute('height')]))
 
+const diagramGeometry = h => h.page.locator('#task-graph-canvas').evaluate(canvas => {
+  const box = n => ({ x: +n.getAttribute('x'), y: +n.getAttribute('y'), width: +n.getAttribute('width'), height: +n.getAttribute('height') })
+  return { circles: [...canvas.querySelectorAll('[data-graph-project]')].map(n => ({ id: n.dataset.graphProject, x: +n.getAttribute('cx'), y: +n.getAttribute('cy'), radius: +n.getAttribute('r') })),
+    labels: [...canvas.querySelectorAll('[data-graph-project-label]')].map(n => box(n.parentNode)),
+    nodes: [...canvas.querySelectorAll('[data-graph-task]')].map(n => ({ id: n.dataset.graphTask, ...box(n.parentNode) })),
+    edges: [...canvas.querySelectorAll('[data-prerequisite]')].map(n => ({ source: n.dataset.prerequisite, target: n.dataset.dependent, points: n.getAttribute('points').split(' ').map(pair => pair.split(',').map(Number)) })),
+    bounds: JSON.parse(canvas.dataset.taskGraphCanvas).bounds }
+})
+
+function assertSafeSegments(geometry) {
+  const intersects = (b, a, z) => a[0] === z[0]
+    ? a[0] > b.x + 1e-6 && a[0] < b.x + b.width - 1e-6 && Math.max(Math.min(a[1], z[1]), b.y) < Math.min(Math.max(a[1], z[1]), b.y + b.height) - 1e-6
+    : a[1] === z[1] ? a[1] > b.y + 1e-6 && a[1] < b.y + b.height - 1e-6 && Math.max(Math.min(a[0], z[0]), b.x) < Math.min(Math.max(a[0], z[0]), b.x + b.width) - 1e-6 : true
+  for (const edge of geometry.edges) {
+    const obstacles = [...geometry.labels, ...geometry.nodes.filter(n => n.id !== edge.source && n.id !== edge.target)]
+    for (let i = 1; i < edge.points.length; i++) for (const obstacle of obstacles) assert.equal(intersects(obstacle, edge.points[i - 1], edge.points[i]), false, `edge ${edge.source}→${edge.target} crosses unrelated content`)
+    for (const [x, y] of edge.points) assert.ok(x > geometry.bounds.x && y > geometry.bounds.y && x < geometry.bounds.x + geometry.bounds.width && y < geometry.bounds.y + geometry.bounds.height)
+  }
+}
+
+test('nested project forest follows retained external ancestry and filters/live reparenting preserve scope and camera', { timeout: 35000 }, async () => {
+  const f = fixture(), p = f.projects[0], t = f.tasks[0]
+  p.parent_id = 'ancestor'
+  f.projects.push(...[
+    ['ancestor', 'outer'], ['outer', null], ['nested-a', 'root-project'], ['nested-b', 'root-project'], ['grandchild', 'nested-a'], ['empty', 'nested-b'], ['cut-intermediate', 'outer']
+  ].map(([id, parent_id]) => ({ ...p, id, name: id, parent_id })))
+  f.projects.find(v => v.id === 'external').parent_id = 'cut-intermediate'
+  f.tasks.push(...[['ancestor-task', 'ancestor'], ['outer-task', 'outer'], ['a-task', 'nested-a'], ['b-task', 'nested-b'], ['grand-task', 'grandchild'], ['unassigned', null]].map(([id, project_id]) => ({ ...t, id, title: id, project_id, parent_id: null, status: 'todo' })))
+  f.dependencies.push(...[
+    ['parent', 'ancestor-task'], ['parent', 'outer-task'], ['parent', 'unassigned'], ['grand-task', 'parent'], ['b-task', 'grand-task'], ['grand-task', 'external-task']
+  ].map(([task_id, depends_on_id]) => ({ task_id, depends_on_id })))
+  const h = await openGraph(f)
+  const nesting = geometry => {
+    const circles = new Map(geometry.circles.map(c => [c.id, c]))
+    for (const project of f.projects) if (circles.has(project.id) && circles.has(project.parent_id)) {
+      const c = circles.get(project.id), parent = circles.get(project.parent_id)
+      assert.ok(Math.hypot(c.x - parent.x, c.y - parent.y) + c.radius <= parent.radius + 1e-6, `${c.id} fits ${parent.id}`)
+      assert.ok(geometry.circles.indexOf(parent) < geometry.circles.indexOf(c), 'ancestor is painted first')
+    }
+    assert.equal(circles.has('cut-intermediate'), false, 'missing retained intermediate remains a cut')
+    assert.equal(circles.has(''), false, 'unassigned task has no invented project')
+    const external = circles.get('external'), outer = circles.get('outer')
+    assert.ok(Math.hypot(external.x - outer.x, external.y - outer.y) > external.radius + outer.radius, 'missing intermediate is never skipped')
+    assertSafeSegments(geometry)
+  }
+  try {
+    await h.start('tab=projects&focus=project%3Aroot-project'); await h.page.locator('#task-graph-open-root-project').click()
+    await h.page.locator('[data-graph-live="true"]').waitFor(); await h.idle()
+    const initial = await diagramGeometry(h)
+    nesting(initial)
+    const originalIds = initial.nodes.map(n => n.id).sort()
+    assert.equal(originalIds.includes('cut-intermediate'), false)
+    assert.equal(initial.circles.length, 8)
+    const canvas = await h.page.locator('#task-graph-canvas').boundingBox()
+    const inScope = ['parent', 'child-a', 'child-b', 'a-task', 'b-task', 'grand-task']
+    const readable = await h.page.locator('[data-graph-task]').evaluateAll((nodes, ids) => nodes.filter(n => ids.includes(n.dataset.graphTask)).map(n => ({ box: n.getBoundingClientRect().toJSON(), font: parseFloat(getComputedStyle(n).fontSize) })), inScope)
+    assert.ok(readable.some(({ box, font }) => font >= 14 && box.left >= canvas.x && box.right <= canvas.x + canvas.width && box.top >= canvas.y && box.bottom <= canvas.y + canvas.height), 'initial unsaved view shows a readable in-scope card')
+    await h.page.getByRole('checkbox', { name: 'Show Done', exact: true }).uncheck()
+    await h.page.locator('[data-graph-task="child-a"]').waitFor({ state: 'detached' }); await h.idle()
+    nesting(await diagramGeometry(h))
+    await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click()
+    const camera = await transform(h), before = await diagramGeometry(h)
+    await h.page.locator('[data-graph-task="grand-task"]').evaluate(n => { window.nestedSurvivor = n; n.focus() })
+    f.projects.find(v => v.id === 'grandchild').parent_id = 'root-project'
+    await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f, 'nested-reparent', 'project', 'grandchild'))
+    await h.page.waitForFunction(y => +document.querySelector('[data-graph-project="grandchild"]').getAttribute('cy') !== y, before.circles.find(c => c.id === 'grandchild').y)
+    const after = await diagramGeometry(h); nesting(after)
+    assert.deepEqual(after.nodes.map(n => n.id).sort(), before.nodes.map(n => n.id).sort())
+    assert.deepEqual(await transform(h), camera)
+    assert.equal(await h.page.evaluate(() => document.activeElement === window.nestedSurvivor), true)
+    await h.page.getByRole('button', { name: 'Fit', exact: true }).click(); await h.idle()
+    if (process.env.HMEM_TASK_GRAPH_NESTING_SCREENSHOT === '1') {
+      await h.page.setViewportSize({ width: 1600, height: 1600 }); await h.page.getByRole('button', { name: 'Fit', exact: true }).click(); await h.idle()
+      await mkdir('../../output/playwright/task-graph-nesting', { recursive: true })
+      await h.page.screenshot({ path: '../../output/playwright/task-graph-nesting/nested-projects.png' })
+    }
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
+test('three-level project nesting shows own cards and cross-circle arrows in the current app style', { timeout: 30000 }, async () => {
+  const f = fixture(), p = f.projects[0], t = f.tasks[0]
+  f.projects = [{ ...p, name: 'Application' }, { ...p, id: 'frontend', name: 'Frontend', parent_id: p.id }, { ...p, id: 'graph', name: 'Task Graph', parent_id: 'frontend' }]
+  f.tasks = [['application-task', p.id, 'Plan application'], ['frontend-task', 'frontend', 'Build interface'], ['graph-task', 'graph', 'Draw task graph']].map(([id, project_id, title]) => ({ ...t, id, project_id, title, status: 'todo', parent_id: null }))
+  f.dependencies = [{ task_id: 'frontend-task', depends_on_id: 'application-task' }, { task_id: 'graph-task', depends_on_id: 'frontend-task' }]
+  const h = await openGraph(f)
+  try {
+    await h.start(); await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor(); await h.idle()
+    const geometry = await diagramGeometry(h)
+    assert.equal(geometry.circles.length, 3); assert.equal(geometry.nodes.length, 3); assert.equal(geometry.edges.length, 2)
+    assertSafeSegments(geometry)
+    for (let i = 1; i < 3; i++) assert.ok(Math.hypot(geometry.circles[i].x - geometry.circles[i - 1].x, geometry.circles[i].y - geometry.circles[i - 1].y) + geometry.circles[i].radius < geometry.circles[i - 1].radius)
+    if (process.env.HMEM_TASK_GRAPH_NESTING_SCREENSHOT === '1') {
+      await h.page.setViewportSize({ width: 1600, height: 1600 }); await h.page.getByRole('button', { name: 'Fit', exact: true }).click(); await h.idle()
+      await mkdir('../../output/playwright/task-graph-nesting', { recursive: true })
+      await h.page.screenshot({ path: '../../output/playwright/task-graph-nesting/nested-three-levels.png' })
+    }
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
+for (const depth of [8, 32]) test(`deep nested chain opens on readable in-scope content before complete Fit (depth=${depth})`, { timeout: 30000 }, async () => {
+  const f = fixture(), p = f.projects[0], t = f.tasks[0]
+  f.projects = [p, ...Array.from({ length: depth - 1 }, (_, i) => ({ ...p, id: `level-${i + 1}`, name: `Level ${i + 1}`, parent_id: i === 0 ? p.id : `level-${i}` }))]
+  f.tasks = [{ ...t, id: 'leaf', project_id: `level-${depth - 1}`, title: 'Readable nested leaf', parent_id: null, status: 'todo' }]; f.dependencies = []
+  const h = await openGraph(f)
+  try {
+    await h.start(); await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor(); await h.idle()
+    const canvas = await h.page.locator('#task-graph-canvas').boundingBox(), card = await h.page.locator('[data-graph-task="leaf"]').boundingBox()
+    assert.equal((await transform(h)).scale, 1)
+    assert.ok(card.x >= canvas.x && card.x + card.width <= canvas.x + canvas.width && card.y >= canvas.y && card.y + card.height <= canvas.y + canvas.height)
+    const geometry = await diagramGeometry(h); assert.equal(geometry.circles.length, depth)
+    await h.page.getByRole('button', { name: 'Fit', exact: true }).click(); const fitted = await transform(h)
+    for (const c of geometry.circles) for (const [x, y] of [[c.x - c.radius, c.y - c.radius], [c.x + c.radius, c.y + c.radius]]) assert.ok(x * fitted.scale + fitted.x >= 0 && x * fitted.scale + fitted.x <= canvas.width && y * fitted.scale + fitted.y >= 0 && y * fitted.scale + fitted.y <= canvas.height)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
 test('status filters are independent local presentation, prune external orphans and retain stable native nodes', { timeout: 30000 }, async () => {
   const f = fixture(), t = f.tasks[0]
   f.tasks.push({ ...t, id: 'cancelled-parent', title: 'Cancelled parent', status: 'cancelled' },
@@ -659,8 +777,8 @@ test('a1024-byte project name is measured, enclosed and included in world bounds
     await h.page.locator('[data-graph-project-label="root-project"]').waitFor()
     await h.page.waitForFunction(() => JSON.parse(document.getElementById('task-graph-canvas').dataset.taskGraphCanvas).measured)
     await h.page.waitForFunction(() => {
-      const canvas = document.getElementById('task-graph-canvas'), metadata = JSON.parse(canvas.dataset.taskGraphCanvas), view = JSON.parse(canvas.dataset.graphTransform)
-      return Math.abs(metadata.selected.x * view.scale + view.x - canvas.clientWidth / 2) < 1 && Math.abs(metadata.selected.y * view.scale + view.y - canvas.clientHeight / 2) < 1
+      const canvas = document.getElementById('task-graph-canvas'), metadata = JSON.parse(canvas.dataset.taskGraphCanvas), view = JSON.parse(canvas.dataset.graphTransform), anchor = metadata.initialAnchor || metadata.selected
+      return Math.abs(anchor.x * view.scale + view.x - canvas.clientWidth / 2) < 1 && Math.abs(anchor.y * view.scale + view.y - canvas.clientHeight / 2) < 1
     })
     const label = await h.page.locator('[data-graph-project-label="root-project"]').evaluate(n => {
       const box = n.parentNode, group = box.parentNode, circle = group.querySelector('circle')

@@ -22,7 +22,8 @@ export function createTaskGraphCanvas(canvas, initial, { saved, refit = false, s
   function fit(initialFit = false) {
     const box = metadata.bounds, width = canvas.clientWidth, height = canvas.clientHeight
     const scale = Math.max(Number.MIN_VALUE, Math.min(1, (width - 48) / box.width, (height - 48) / box.height))
-    if (initialFit && (width < 650 || scale < 0.75)) apply({ scale: 1, x: width / 2 - metadata.selected.x, y: height / 2 - metadata.selected.y })
+    const anchor = metadata.initialAnchor || metadata.selected
+    if (initialFit && (width < 650 || scale < 0.75)) apply({ scale: 1, x: width / 2 - anchor.x, y: height / 2 - anchor.y })
     else apply({ scale, x: (width - box.width * scale) / 2 - box.x * scale, y: (height - box.height * scale) / 2 - box.y * scale })
   }
   function start() {
@@ -97,7 +98,7 @@ export function createTaskGraphCanvas(canvas, initial, { saved, refit = false, s
   if (refit) requestFit()
   return {
     update(next) {
-      const changed = JSON.stringify([metadata.selected, metadata.bounds]) !== JSON.stringify([next.selected, next.bounds])
+      const changed = JSON.stringify([metadata.selected, metadata.bounds, metadata.initialAnchor]) !== JSON.stringify([next.selected, next.bounds, next.initialAnchor])
       const requested = (next.fitRevision || 0) !== (metadata.fitRevision || 0)
       if (next.revision !== metadata.revision) settling = false
       metadata = next

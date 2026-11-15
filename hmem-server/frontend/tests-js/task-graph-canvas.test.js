@@ -9,7 +9,7 @@ function harness(bounds = { x: -100, y: -50, width: 1000, height: 600 }, options
     getBoundingClientRect: () => ({ left: 0, top: 0 }), querySelector: () => ({ setAttribute: (key, value) => attrs.set(key, value) }), querySelectorAll: () => [],
     addEventListener: (kind, value) => handlers.set(kind, value), removeEventListener: kind => handlers.delete(kind),
     setPointerCapture: id => captures.add(id), hasPointerCapture: id => captures.has(id), releasePointerCapture: id => captures.delete(id) }
-  const metadata = { key: 'scoped-entry', bounds, selected: options.selected || { x: 0, y: 0 }, measured: false }
+  const metadata = { key: 'scoped-entry', bounds, selected: options.selected || { x: 0, y: 0 }, initialAnchor: options.initialAnchor, measured: false }
   const controller = createTaskGraphCanvas(canvas, metadata, {
     saved: Object.hasOwn(options, 'saved') ? options.saved : { x: 0, y: 0, scale: 1 }, now: options.now,
     save: value => views.push(value), measure: value => measures.push(value),
@@ -23,6 +23,19 @@ function harness(bounds = { x: -100, y: -50, width: 1000, height: 600 }, options
 test('cursor zoom keeps both world coordinates fixed', () => {
   const old = { x: -40, y: 20, scale: .8 }, point = { x: 450, y: 120 }, next = zoomAt(old, 1.7, point)
   for (const axis of ['x', 'y']) assert.ok(Math.abs((point[axis] - old[axis]) / old.scale - (point[axis] - next[axis]) / next.scale) < 1e-9)
+})
+
+test('only the initial unsaved readability fallback centers an in-scope card instead of an empty project center', () => {
+  const anchor = { x: 1000, y: 1800 }, h = harness({ x: 0, y: 0, width: 8000, height: 8000 }, { saved: null, selected: { x: 4000, y: 4000 }, initialAnchor: anchor })
+  assert.equal(h.view().scale, 1)
+  assert.equal(anchor.x + h.view().x, 400); assert.equal(anchor.y + h.view().y, 300)
+  h.controller.control('fit'); const complete = h.view()
+  assert.ok(complete.scale < 1)
+  h.controller.update({ ...h.metadata, measured: true, revision: 2, initialAnchor: { x: 50, y: 70 } })
+  assert.deepEqual(h.view(), complete)
+  h.controller.dispose()
+  const saved = { x: -27, y: 19, scale: .8 }, restored = harness(undefined, { saved, initialAnchor: anchor })
+  assert.deepEqual(restored.view(), saved); restored.controller.dispose()
 })
 
 test('Fit contains huge world corners and zoom-out remains available below .05', () => {

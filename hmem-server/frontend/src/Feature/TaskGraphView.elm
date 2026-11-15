@@ -184,7 +184,7 @@ view model =
         , state.focusNotice |> Maybe.map (\message -> div [H.class "task-status-text",H.attribute "role" "status"] [text message]) |> Maybe.withDefault (text "")
         , case state.layout of
             Just layout ->
-                div [] [liveStatus model,if Dict.isEmpty layout.nodes then div [H.class "empty-state",H.attribute "role" "status"] [text (if state.data.graph |> Maybe.map (.tasks >> Dict.isEmpty) |> Maybe.withDefault True then "This project has no tasks." else "No tasks match filters.")] else canvas model layout]
+                div [] [liveStatus model,layout.problem |> Maybe.map (\message -> div [H.attribute "role" "alert"] [text message]) |> Maybe.withDefault (text ""),if Dict.isEmpty layout.nodes then div [H.class "empty-state",H.attribute "role" "status"] [text (if state.data.graph |> Maybe.map (.tasks >> Dict.isEmpty) |> Maybe.withDefault True then "This project has no tasks." else "No tasks match filters.")] else canvas model layout]
             Nothing -> case state.data.status of
                 Graph.Failed message -> div [H.class "empty-state",H.attribute "role" "alert"] [text message,button [H.class "btn-small",H.type_ "button",onClick TaskGraphRetry] [text "Retry"]]
                 _ -> div [H.class "empty-state",H.attribute "role" "status"] [text "Loading a complete task graph…"]
@@ -218,13 +218,14 @@ canvas model layout =
                     ,onClick (TaskGraphOpenTask node.task.id)]
                     [span [H.class "task-graph-node-title"] [text node.task.title],span [H.class ("task-graph-status " ++ Helpers.taskStatusBadgeClass node.task.status)] [text (Helpers.taskStatusDisplayText node.task.status)]]]
         circleView circle = Svg.g []
-            [Svg.circle [S.cx (number circle.x),S.cy (number circle.y),S.r (number circle.radius),S.class (if circle.project.external then "task-graph-project graph-external-project" else "task-graph-project")] []
+            [Svg.circle [S.cx (number circle.x),S.cy (number circle.y),S.r (number circle.radius),H.attribute "data-graph-project" circle.project.id,S.class (if circle.project.external then "task-graph-project graph-external-project" else "task-graph-project")] []
             ,Svg.foreignObject (boxAttributes circle.label) [div [H.class "task-graph-project-name",H.attribute "data-graph-project-label" circle.project.id] [text circle.project.name]]]
         edgeView routed = Svg.polyline [S.points (routed.points |> List.map (\point -> number point.x ++ "," ++ number point.y) |> String.join " "),S.class "task-graph-edge",S.markerEnd "url(#task-graph-arrow)",H.attribute "data-prerequisite" routed.edge.prerequisiteId,H.attribute "data-dependent" routed.edge.dependentId] []
         measured = Dict.keys layout.nodes |> List.all (\id -> Dict.member id model.taskGraph.measurements)
         labelsMeasured = List.all (\circle -> Dict.member circle.project.id model.taskGraph.projectMeasurements) layout.circles
         metadata=Encode.object [("key",Encode.string (Maybe.withDefault "" model.taskGraph.canvasKey)),("measured",Encode.bool (measured && labelsMeasured)),("revision",Encode.int model.taskGraph.data.revision)
             ,("fitRevision",Encode.int model.taskGraph.fitRevision)
+            ,("initialAnchor",layout.initialAnchor |> Maybe.map (\box -> Encode.object [("x",Encode.float (box.x+box.width/2)),("y",Encode.float (box.y+box.height/2))]) |> Maybe.withDefault Encode.null)
             ,("focus",focusMetadata model.taskGraph)
             ,("bounds",Encode.object [("x",Encode.float layout.bounds.x),("y",Encode.float layout.bounds.y),("width",Encode.float layout.bounds.width),("height",Encode.float layout.bounds.height)])
             ,("selected",Encode.object (layout.circles |> List.filter (\circle -> circle.project.id == (Navigation.current model |> Maybe.map .projectId |> Maybe.withDefault "")) |> List.head |> Maybe.map (\circle -> [("x",Encode.float circle.x),("y",Encode.float circle.y)]) |> Maybe.withDefault [("x",Encode.float 0),("y",Encode.float 0)]))]

@@ -123,19 +123,41 @@ test('nested project forest follows retained external ancestry and filters/live 
 test('three-level project nesting shows own cards and cross-circle arrows in the current app style', { timeout: 30000 }, async () => {
   const f = fixture(), p = f.projects[0], t = f.tasks[0]
   f.projects = [{ ...p, name: 'Application' }, { ...p, id: 'frontend', name: 'Frontend', parent_id: p.id }, { ...p, id: 'graph', name: 'Task Graph', parent_id: 'frontend' }]
-  f.tasks = [['application-task', p.id, 'Plan application'], ['frontend-task', 'frontend', 'Build interface'], ['graph-task', 'graph', 'Draw task graph']].map(([id, project_id, title]) => ({ ...t, id, project_id, title, status: 'todo', parent_id: null }))
+  f.tasks = [['application-task', p.id, 'Plan application', 'todo', false], ['frontend-task', 'frontend', 'Build interface', 'blocked', true], ['graph-task', 'graph', 'Draw task graph', 'blocked', true]].map(([id, project_id, title, status, auto_blocked]) => ({ ...t, id, project_id, title, status, auto_blocked, parent_id: null }))
   f.dependencies = [{ task_id: 'frontend-task', depends_on_id: 'application-task' }, { task_id: 'graph-task', depends_on_id: 'frontend-task' }]
   const h = await openGraph(f)
   try {
     await h.start(); await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor(); await h.idle()
     const geometry = await diagramGeometry(h)
     assert.equal(geometry.circles.length, 3); assert.equal(geometry.nodes.length, 3); assert.equal(geometry.edges.length, 2)
+    assert.deepEqual(geometry.edges.map(edge => [edge.source, edge.target]).sort(), [['application-task', 'frontend-task'], ['frontend-task', 'graph-task']])
+    for (const [id, badge] of [['application-task', 'TODO'], ['frontend-task', 'blocked'], ['graph-task', 'blocked']]) assert.equal(await h.page.locator(`[data-graph-task="${id}"] .task-graph-status`).innerText(), badge)
     assertSafeSegments(geometry)
     for (let i = 1; i < 3; i++) assert.ok(Math.hypot(geometry.circles[i].x - geometry.circles[i - 1].x, geometry.circles[i].y - geometry.circles[i - 1].y) + geometry.circles[i].radius < geometry.circles[i - 1].radius)
+    const canvas = h.page.locator('#task-graph-canvas'), box = await canvas.boundingBox(), initial = await transform(h), graphUrl = h.page.url()
+    // Start on bare SVG, away from every card, so native card clicks remain
+    // independently exercised after the pan and wheel gestures.
+    await h.page.mouse.move(box.x + 24, box.y + 24); await h.page.mouse.down()
+    await h.page.mouse.move(box.x + 94, box.y + 64, { steps: 4 }); await h.page.mouse.up()
+    const panned = await transform(h)
+    assert.ok(Math.abs(panned.x - initial.x - 70) < 1 && Math.abs(panned.y - initial.y - 40) < 1)
+    assert.equal(h.page.url(), graphUrl)
+    await canvas.evaluate(n => n.addEventListener('wheel', event => { n.dataset.readinessWheelPoint = JSON.stringify({ x: event.clientX - n.getBoundingClientRect().left, y: event.clientY - n.getBoundingClientRect().top }) }, { once: true }))
+    await h.page.mouse.move(box.x + box.width * .6, box.y + box.height * .4); await h.page.mouse.wheel(0, -120)
+    const zoomed = await transform(h), point = await canvas.evaluate(n => JSON.parse(n.dataset.readinessWheelPoint))
+    assert.ok(zoomed.scale > panned.scale)
+    for (const axis of ['x', 'y']) assert.ok(Math.abs((point[axis] - panned[axis]) / panned.scale - (point[axis] - zoomed[axis]) / zoomed.scale) < .01)
+    assert.equal(h.page.url(), graphUrl)
+    await h.page.locator('[data-graph-task="application-task"]').click()
+    await h.page.waitForURL(/focus=task%3Aapplication-task/)
+    await h.page.locator('#entity-application-task').waitFor()
+    await h.page.getByRole('button', { name: 'Back to graph', exact: true }).click(); await h.page.waitForURL(graphUrl)
+    await h.page.waitForFunction(() => document.activeElement?.dataset.graphTask === 'application-task')
+    assert.deepEqual(await transform(h), zoomed)
     if (process.env.HMEM_TASK_GRAPH_NESTING_SCREENSHOT === '1') {
       await h.page.setViewportSize({ width: 1600, height: 1600 }); await h.page.getByRole('button', { name: 'Fit', exact: true }).click(); await h.idle()
-      await mkdir('../../output/playwright/task-graph-nesting', { recursive: true })
-      await h.page.screenshot({ path: '../../output/playwright/task-graph-nesting/nested-three-levels.png' })
+      await mkdir('../../output/playwright/task-graph-readiness', { recursive: true })
+      await h.page.screenshot({ path: '../../output/playwright/task-graph-readiness/nested-three-levels-readiness.png' })
     }
     assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
   } finally { await h.close() }

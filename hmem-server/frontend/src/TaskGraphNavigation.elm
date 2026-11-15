@@ -1,10 +1,11 @@
-module TaskGraphNavigation exposing (Entry, Guard, Route, State, graphUrl, init, lookup, originKey, parse, remember, retire, stampOrigin)
+module TaskGraphNavigation exposing (Entry, Guard, Route, State, filters, graphUrl, init, lookup, originKey, parse, remember, retire, stampOrigin, withFilters)
 
 {-| History entries own their origin independently. This registry contains
 presentation receipts, never canonical entity data or transport admissions.
 -}
 
 import Dict exposing (Dict)
+import Feature.TaskGraph as Graph
 import Url
 
 
@@ -73,6 +74,20 @@ parse url =
 originKey : Url.Url -> Maybe String
 originKey =
     one "graph-origin"
+
+
+filters : Url.Url -> Graph.Filters
+filters url =
+    { showDone = one "graph-done" url /= Just "0", showCancelled = one "graph-cancelled" url /= Just "0" }
+
+
+withFilters : Graph.Filters -> Url.Url -> String
+withFilters value url =
+    let
+        retained = pairs url |> List.filter (\(key,_) -> not (List.member key ["graph-done","graph-cancelled"]))
+        flags = (if value.showDone then [] else [("graph-done","0")]) ++ (if value.showCancelled then [] else [("graph-cancelled","0")])
+        fragment = retained ++ flags |> List.map (\(key,content) -> Url.percentEncode key ++ "=" ++ Url.percentEncode content) |> String.join "&"
+    in Url.toString {url|fragment=Just fragment}
 
 
 stampOrigin : String -> Url.Url -> String

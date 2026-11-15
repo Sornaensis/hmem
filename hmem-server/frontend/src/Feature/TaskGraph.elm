@@ -1,4 +1,4 @@
-module Feature.TaskGraph exposing (Edge, Graph, GraphProject, GraphTask, Guard, State, Status(..), acceptSnapshot, begin, fail, init, invalidate, markLive, project, recover, refresh, retire)
+module Feature.TaskGraph exposing (Edge, Filters, Graph, GraphProject, GraphTask, Guard, State, Status(..), acceptSnapshot, begin, defaultFilters, fail, init, invalidate, markLive, project, recover, refresh, retire, visibleGraph)
 
 {-| The graph owns a complete snapshot-derived read model, separate from the
 ordinary hierarchy's sparse demand caches. Opaque transport bearers stay in JS.
@@ -59,6 +59,33 @@ type alias Graph =
     , inScopeTaskIds : Set String
     , externalTaskIds : Set String
     }
+
+
+type alias Filters =
+    { showDone : Bool, showCancelled : Bool }
+
+
+defaultFilters : Filters
+defaultFilters =
+    { showDone = True, showCancelled = True }
+
+
+{-| Presentation only: the canonical graph stays complete. External membership
+is recomputed from edges incident to admitted in-scope anchors, never expanded.
+-}
+visibleGraph : Filters -> Graph -> Graph
+visibleGraph filters raw =
+    let
+        admitted = Dict.filter (\_ task -> (filters.showDone || task.status /= Api.Done) && (filters.showCancelled || task.status /= Api.Cancelled)) raw.tasks
+        anchors = Set.intersect raw.inScopeTaskIds (Dict.keys admitted |> Set.fromList)
+        edges = List.filter (\edge -> Dict.member edge.prerequisiteId admitted && Dict.member edge.dependentId admitted && (Set.member edge.prerequisiteId anchors || Set.member edge.dependentId anchors)) raw.edges
+        included = List.foldl (\edge ids -> ids |> Set.insert edge.prerequisiteId |> Set.insert edge.dependentId) anchors edges
+        external = Set.diff included anchors
+        tasks = Dict.filter (\id _ -> Set.member id included) admitted
+        owning = Dict.values tasks |> List.filterMap .projectId |> Set.fromList
+    in
+    { raw | tasks = tasks, edges = edges, inScopeTaskIds = anchors, externalTaskIds = external
+        , projects = Dict.filter (\id project_ -> not project_.external || Set.member id owning) raw.projects }
 
 
 init : State

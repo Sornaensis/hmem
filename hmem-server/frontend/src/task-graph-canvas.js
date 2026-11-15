@@ -5,10 +5,14 @@ export function zoomAt(view, scale, point) {
 
 // Pointer state and world transforms stay outside layout geometry. Buttons keep
 // native click/keyboard behavior; only a real pan/pinch suppresses pointer click.
-export function createTaskGraphCanvas(canvas, initial, { saved, save = () => {}, measure = () => {}, ResizeObserverImpl = globalThis.ResizeObserver, now = () => performance.now() } = {}) {
+export function createTaskGraphCanvas(canvas, initial, { saved, refit = false, save = () => {}, measure = () => {}, ResizeObserverImpl = globalThis.ResizeObserver, now = () => performance.now() } = {}) {
   let metadata = initial, view, gesture = null, suppressUntil = 0, disposed = false
   let settling = !saved && !initial.measured, refinements = 0
   const settleUntil = now() + 1500
+  let fitTimer = null, pendingFit = false
+  const cancelFit = () => { if (fitTimer !== null) clearTimeout(fitTimer); fitTimer = null; pendingFit = false }
+  const finishFit = () => { if (!disposed && pendingFit) { cancelFit(); fit() } }
+  const requestFit = () => { cancelFit(); settling = false; pendingFit = true; fitTimer = setTimeout(finishFit, 1500); if (metadata.measured) finishFit() }
   const pointers = new Map(), owners = new Map(), sizes = new Map(), labelSizes = new Map(), observed = new Set()
   const world = () => canvas.querySelector('[data-graph-world]')
   const local = event => { const box = canvas.getBoundingClientRect(); return { x: event.clientX - box.left, y: event.clientY - box.top } }
@@ -29,6 +33,7 @@ export function createTaskGraphCanvas(canvas, initial, { saved, save = () => {},
   const down = event => {
     if (event.button !== 0 && event.pointerType !== 'touch') return
     suppressUntil = 0
+    cancelFit()
     settling = false
     pointers.set(event.pointerId, local(event))
     const owner = event.target.closest?.('[data-graph-task]') || canvas
@@ -59,8 +64,8 @@ export function createTaskGraphCanvas(canvas, initial, { saved, save = () => {},
   const cancel = () => { if (gesture?.dragged) suppressUntil = performance.now() + 500; for (const id of [...owners.keys()]) release(id); gesture = null; canvas.classList.remove('is-panning') }
   const lost = event => { if (owners.has(event.pointerId)) cancel() }
   const click = event => { if (event.detail !== 0 && performance.now() < suppressUntil) { event.preventDefault(); event.stopImmediatePropagation() } }
-  const wheel = event => { settling = false; event.preventDefault(); apply(zoomAt(view, view.scale * Math.exp(-Math.max(-300, Math.min(300, event.deltaY)) * 0.002), local(event))) }
-  const handlers = { pointerdown: down, pointermove: move, pointerup: up, pointercancel: cancel, lostpointercapture: lost, click, wheel, keydown: () => { settling = false } }
+  const wheel = event => { cancelFit(); settling = false; event.preventDefault(); apply(zoomAt(view, view.scale * Math.exp(-Math.max(-300, Math.min(300, event.deltaY)) * 0.002), local(event))) }
+  const handlers = { pointerdown: down, pointermove: move, pointerup: up, pointercancel: cancel, lostpointercapture: lost, click, wheel, keydown: () => { cancelFit(); settling = false } }
   for (const [kind, handler] of Object.entries(handlers)) canvas.addEventListener(kind, handler, kind === 'click' ? true : kind === 'wheel' ? { passive: false } : false)
   function measurements() {
     if (disposed) return
@@ -89,51 +94,71 @@ export function createTaskGraphCanvas(canvas, initial, { saved, save = () => {},
   for (const target of [doc?.getElementById('main-content-scroll'), doc?.querySelector('.workspace-context-persistent'), canvas.parentElement?.querySelector('.task-graph-toolbar')]) if (target) observer?.observe(target)
   measurements()
   if (saved) apply(saved); else fit(true)
+  if (refit) requestFit()
   return {
     update(next) {
       const changed = JSON.stringify([metadata.selected, metadata.bounds]) !== JSON.stringify([next.selected, next.bounds])
+      const requested = (next.fitRevision || 0) !== (metadata.fitRevision || 0)
       if (next.revision !== metadata.revision) settling = false
-      metadata = next; measurements()
+      metadata = next
+      if (requested) { sizes.clear(); labelSizes.clear() }
+      measurements()
+      if (requested) requestFit()
+      else if (pendingFit && metadata.measured) finishFit()
       if (settling) {
         if (now() > settleUntil || refinements >= 8) settling = false
         else { if (changed) { fit(true); refinements++ } if (next.measured) settling = false }
       }
     },
-    control(action) { settling = false; if (action === 'fit') fit(); else apply(zoomAt(view, view.scale * (action === 'in' ? 1.2 : 1 / 1.2), { x: canvas.clientWidth / 2, y: canvas.clientHeight / 2 })) },
-    dispose() { disposed = true; cancel(); observer?.disconnect(); for (const [kind, handler] of Object.entries(handlers)) canvas.removeEventListener(kind, handler, kind === 'click') }
+    control(action) { cancelFit(); settling = false; if (action === 'fit') fit(); else apply(zoomAt(view, view.scale * (action === 'in' ? 1.2 : 1 / 1.2), { x: canvas.clientWidth / 2, y: canvas.clientHeight / 2 })) },
+    dispose() { disposed = true; cancelFit(); cancel(); observer?.disconnect(); for (const [kind, handler] of Object.entries(handlers)) canvas.removeEventListener(kind, handler, kind === 'click') }
   }
 }
 
 export function installTaskGraphCanvas(app, { document: doc = document, window: win = window } = {}) {
-  let active = null, queued = false, disposed = false, focusedReceipt = null
+  let active = null, queued = false, disposed = false, focusedReceipt = null, lastScene = null
   const views = new Map()
+  const fitRevisions = new Map()
   function refresh() {
     queued = false
     if (disposed) return
     const canvas = doc.querySelector('[data-task-graph-canvas]')
     let metadata
     try { metadata = canvas && JSON.parse(canvas.dataset.taskGraphCanvas) } catch { metadata = null }
-    if (!canvas || !metadata) { active?.controller.dispose(); active = null; return }
-    if (active?.canvas !== canvas || active.key !== metadata.key) {
+    let scene
+    try { scene = JSON.parse(doc.querySelector('[data-task-graph-scene]')?.dataset.taskGraphScene || 'null') } catch { scene = null }
+    if (!canvas || !metadata) {
+      active?.controller.dispose(); active = null
+      // An empty scene consumes its explicit fit: later live repopulation must
+      // restore the saved camera. Receipts share camera eviction; empty-only
+      // visits retain just the single current-scene receipt below.
+      if (scene?.ready && views.has(scene.key)) fitRevisions.set(scene.key, scene.fitRevision)
+    }
+    else if (active?.canvas !== canvas || active.key !== metadata.key) {
       active?.controller.dispose()
-      const controller = createTaskGraphCanvas(canvas, metadata, { saved: views.get(metadata.key),
-        save(value) { views.delete(metadata.key); views.set(metadata.key, value); if (views.size > 64) views.delete(views.keys().next().value) },
+      const previousFit = fitRevisions.get(metadata.key) ?? (lastScene?.key === metadata.key ? lastScene.fitRevision : metadata.fitRevision)
+      const controller = createTaskGraphCanvas(canvas, metadata, { saved: views.get(metadata.key), refit: metadata.fitRevision > previousFit,
+        save(value) { views.delete(metadata.key); views.set(metadata.key, value); if (views.size > 64) { const key = views.keys().next().value; views.delete(key); fitRevisions.delete(key) } },
         measure: value => app.ports.taskGraphCanvasEvent.send(value), ResizeObserverImpl: win.ResizeObserver })
       active = { canvas, key: metadata.key, controller }
     } else active.controller.update(metadata)
-    if (metadata.focus) {
-      const identity = JSON.stringify([metadata.key, metadata.focus.token])
+    if (metadata) fitRevisions.set(metadata.key, metadata.fitRevision)
+    lastScene = scene ? { key: scene.key, fitRevision: scene.fitRevision } : null
+    const focusOwner = scene?.ready ? scene : metadata
+    if (focusOwner?.focus) {
+      const identity = JSON.stringify([focusOwner.key, focusOwner.focus.token])
       if (identity !== focusedReceipt) {
-        const button = [...canvas.querySelectorAll('[data-graph-task]')].find(element => element.dataset.graphTask === metadata.focus.taskId) || doc.getElementById('task-graph-back')
-        if (button) { button.focus({ preventScroll: true }); focusedReceipt = identity; app.ports.taskGraphCanvasEvent.send({ kind: 'focused', key: metadata.key, token: metadata.focus.token }) }
+        const task = canvas && [...canvas.querySelectorAll('[data-graph-task]')].find(element => element.dataset.graphTask === focusOwner.focus.taskId)
+        const button = task || doc.getElementById('task-graph-show-done') || doc.getElementById('task-graph-back')
+        if (button) { button.focus({ preventScroll: true }); focusedReceipt = identity; app.ports.taskGraphCanvasEvent.send({ kind: 'focused', key: focusOwner.key, token: focusOwner.focus.token, fallback: !task }) }
       }
     }
   }
   const queue = () => { if (!disposed && !queued) { queued = true; win.requestAnimationFrame(refresh) } }
   const observer = new win.MutationObserver(queue)
   // Deliberately exclude transform/style attributes written by the canvas.
-  observer.observe(doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-task-graph-canvas'] })
+  observer.observe(doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-task-graph-canvas', 'data-task-graph-scene'] })
   const control = event => { const button = event.target.closest?.('[data-graph-control]'); if (button) active?.controller.control(button.dataset.graphControl) }
   doc.addEventListener('click', control); queue()
-  return () => { disposed = true; observer.disconnect(); active?.controller.dispose(); doc.removeEventListener('click', control); views.clear() }
+  return () => { disposed = true; observer.disconnect(); active?.controller.dispose(); doc.removeEventListener('click', control); views.clear(); fitRevisions.clear() }
 }

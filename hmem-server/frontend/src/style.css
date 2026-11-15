@@ -5897,6 +5897,9 @@ textarea.observation-edit-content {
 
 .task-graph-page > .page-header { display: flex; align-items: center; justify-content: space-between; }
 .task-graph-page > .page-header h2 { margin: 0; }
+.task-graph-filters { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; color: var(--text-muted); font-size: 13px; }
+.task-graph-filters label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.task-graph-filters input { accent-color: var(--accent); }
 .task-graph-page #task-graph-back { display: inline-flex; align-items: center; gap: 6px; }
 .task-graph-workbench { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg); }
 .task-graph-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 12px; }

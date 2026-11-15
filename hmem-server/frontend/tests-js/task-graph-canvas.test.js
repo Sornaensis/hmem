@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createTaskGraphCanvas, zoomAt } from '../src/task-graph-canvas.js'
+import { createTaskGraphCanvas, installTaskGraphCanvas, zoomAt } from '../src/task-graph-canvas.js'
 
 function harness(bounds = { x: -100, y: -50, width: 1000, height: 600 }, options = {}) {
   const handlers = new Map(), captures = new Set(), views = [], measures = [], attrs = new Map()
@@ -99,4 +99,79 @@ test('a new canonical snapshot preserves even an untouched provisional camera', 
   h.controller.update({ ...h.metadata, revision: 2, selected: { x: 10000, y: 20000 }, bounds: { x: -300, y: -800, width: 30000, height: 40000 }, measured: true })
   assert.deepEqual(h.view(), before)
   h.controller.dispose()
+})
+
+test('one explicit filter refit waits for measurements; ordinary revisions preserve the resulting camera', () => {
+  const h = harness(), before = h.view(), count = h.views.length
+  const requested = { ...h.metadata, fitRevision: 1, measured: false, bounds: { x: 0, y: 0, width: 400, height: 400 } }
+  h.controller.update(requested)
+  assert.deepEqual(h.view(), before)
+  h.controller.update({ ...requested, measured: true })
+  assert.equal(h.views.length, count + 1)
+  const fitted = h.view()
+  h.controller.update({ ...requested, measured: true, revision: 10, bounds: { x: 0, y: 0, width: 4000, height: 4000 } })
+  h.controller.update({ ...requested, measured: true })
+  assert.deepEqual(h.view(), fitted)
+  assert.equal(h.views.length, count + 1)
+  h.controller.dispose()
+})
+
+test('explicit filter revision remeasures surviving intrinsic content before its fit', () => {
+  const h = harness(), button = { dataset: { graphTask: 'survivor' }, offsetHeight: 92, clientHeight: 90, scrollHeight: 90 }
+  h.canvas.querySelectorAll = selector => selector === '[data-graph-task]' ? [button] : []
+  h.measure(); h.measure(); assert.equal(h.measures.length, 1)
+  h.controller.update({ ...h.metadata, fitRevision: 1, measured: false })
+  assert.equal(h.measures.length, 2, 'fresh receipt is needed even when the DOM height stayed equal')
+  h.controller.update({ ...h.metadata, fitRevision: 1, measured: true })
+  h.controller.dispose()
+})
+
+test('a quiet unmeasured explicit refit has a finite deadline and disposal cancels it', async () => {
+  const h = harness(), before = h.views.length
+  h.controller.update({ ...h.metadata, fitRevision: 1, measured: false })
+  await new Promise(resolve => setTimeout(resolve, 1550))
+  assert.equal(h.views.length, before + 1)
+  h.controller.update({ ...h.metadata, fitRevision: 2, measured: false })
+  h.controller.dispose()
+  const final = h.views.length
+  await new Promise(resolve => setTimeout(resolve, 1550))
+  assert.equal(h.views.length, final)
+})
+
+test('a hidden return target acknowledges focus on a native filter even with no SVG', () => {
+  let paint, changed, focusCalls = 0
+  const receipts = [], scene = { dataset: { taskGraphScene: JSON.stringify({ key: 'entry', ready: true, focus: { taskId: 'hidden', token: 3 } }) } }
+  const control = { focus(options) { assert.deepEqual(options, { preventScroll: true }); focusCalls++ } }
+  const doc = { body: {}, querySelector: selector => selector === '[data-task-graph-scene]' ? scene : null,
+    getElementById: id => id === 'task-graph-show-done' ? control : null, addEventListener() {}, removeEventListener() {} }
+  const win = { requestAnimationFrame(callback) { paint = callback }, MutationObserver: class { constructor(callback) { changed = callback } observe() {} disconnect() {} } }
+  const dispose = installTaskGraphCanvas({ ports: { taskGraphCanvasEvent: { send: receipt => receipts.push(receipt) } } }, { document: doc, window: win })
+  paint(); changed(); paint()
+  assert.equal(focusCalls, 1)
+  assert.deepEqual(receipts, [{ kind: 'focused', key: 'entry', token: 3, fallback: true }])
+  dispose()
+})
+
+test('empty-scene fits are retired before live repopulation, while a new explicit toggle still fits', () => {
+  const h = harness(); h.controller.dispose()
+  let paint, changed, click, visible = true
+  let metadata = { ...h.metadata, measured: true, fitRevision: 0 }
+  const scene = { dataset: {} }
+  const doc = { body: {}, querySelector: selector => selector === '[data-task-graph-scene]' ? scene : visible ? h.canvas : null,
+    getElementById: () => null, addEventListener(kind, handler) { if (kind === 'click') click = handler }, removeEventListener() {} }
+  const win = { requestAnimationFrame(callback) { paint = callback }, MutationObserver: class { constructor(callback) { changed = callback } observe() {} disconnect() {} } }
+  const render = () => { scene.dataset.taskGraphScene = JSON.stringify({ key: metadata.key, fitRevision: metadata.fitRevision, ready: true }); h.canvas.dataset.taskGraphCanvas = JSON.stringify(metadata) }
+  render()
+  const dispose = installTaskGraphCanvas({ ports: { taskGraphCanvasEvent: { send() {} } } }, { document: doc, window: win })
+  paint(); click({ target: { closest: () => ({ dataset: { graphControl: 'in' } }) } })
+  const saved = h.view()
+  visible = false; metadata = { ...metadata, fitRevision: 1 }; render(); changed(); paint()
+  visible = true; metadata = { ...metadata, revision: 2, bounds: { x: 0, y: 0, width: 3000, height: 3000 } }; render(); changed(); paint()
+  assert.deepEqual(h.view(), saved, 'live repopulation cannot apply an old empty-scene fit')
+  // Detail/history unmount and restoration keep the consumed receipt/camera.
+  visible = false; scene.dataset.taskGraphScene = 'null'; changed(); paint()
+  visible = true; render(); changed(); paint(); assert.deepEqual(h.view(), saved)
+  metadata = { ...metadata, fitRevision: 2 }; render(); changed(); paint()
+  assert.ok(h.view().scale < saved.scale, 'a genuinely new explicit request still fits')
+  dispose()
 })

@@ -7,9 +7,9 @@ import Feature.Focus as Focus
 import Feature.TaskGraph as Graph
 import Feature.TaskGraphNavigation as Navigation
 import Helpers
-import Html exposing (Html, button, div, span, text)
+import Html exposing (Html, button, div, input, label, span, text)
 import Html.Attributes as H
-import Html.Events exposing (onClick)
+import Html.Events exposing (onCheck, onClick)
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Ports
@@ -23,7 +23,15 @@ import Url
 
 
 init : TaskGraphViewModel
-init = {data=Graph.init,generation=0,measurements=Dict.empty,projectMeasurements=Dict.empty,layout=Nothing,canvasKey=Nothing,detail=Nothing,returnFocus=Nothing,nextFocusToken=1}
+init = {data=Graph.init,generation=0,measurements=Dict.empty,projectMeasurements=Dict.empty,layout=Nothing,canvasKey=Nothing,detail=Nothing,returnFocus=Nothing,nextFocusToken=1,filters=Graph.defaultFilters,fitRevision=0,focusNotice=Nothing}
+
+
+visible : TaskGraphViewModel -> Maybe Graph.Graph
+visible state = state.data.graph |> Maybe.map (Graph.visibleGraph state.filters)
+
+
+relayout : TaskGraphViewModel -> TaskGraphViewModel
+relayout state = {state|layout=visible state |> Maybe.map (Layout.buildWithLabels state.measurements state.projectMeasurements)}
 
 
 encodeGuard : Graph.Guard -> Encode.Value
@@ -35,7 +43,7 @@ guardDecoder = Decode.map5 Graph.Guard (Decode.field "workspaceId" Decode.string
 
 
 reconcile : Msg -> Model -> (Model,Cmd Msg) -> (Model,Cmd Msg)
-reconcile _ previous (model,command) =
+reconcile msg previous (model,command) =
     let
         state = model.taskGraph
         scope = Navigation.guard model
@@ -52,12 +60,17 @@ reconcile _ previous (model,command) =
                 key = Encode.encode 0 (Encode.list Encode.string [owner.workspaceId,owner.audienceId,String.fromInt owner.sessionEpoch,target.projectId,Maybe.withDefault "direct" target.entryId])
             in
             if state.canvasKey == Just key then
-                ( {model|taskGraph={state|detail=state.detail |> Maybe.andThen (\receipt -> if receipt.entering then Just receipt else Nothing)}}, command )
+                let
+                    filters = case msg of
+                        TaskGraphSetFilter _ _ -> state.filters
+                        _ -> History.filters model.url
+                    next = {state|filters=filters,detail=state.detail |> Maybe.andThen (\receipt -> if receipt.entering then Just receipt else Nothing)}
+                in ( {model|taskGraph=if filters == state.filters then next else relayout next}, command )
             else
                 let
                     generation = max state.generation previous.taskGraph.generation+1
                     requested = {workspaceId=owner.workspaceId,projectId=target.projectId,audienceId=owner.audienceId,sessionEpoch=owner.sessionEpoch,targetGeneration=generation}
-                    next = {state|data=Graph.begin requested,generation=generation,measurements=Dict.empty,projectMeasurements=Dict.empty,layout=Nothing,canvasKey=Just key,detail=Nothing,returnFocus=Nothing}
+                    next = {state|data=Graph.begin requested,generation=generation,measurements=Dict.empty,projectMeasurements=Dict.empty,layout=Nothing,canvasKey=Just key,detail=Nothing,returnFocus=Nothing,filters=History.filters model.url,fitRevision=0,focusNotice=Nothing}
                 in ({model|taskGraph=next},Cmd.batch [command,Ports.taskGraphDataCommand (Encode.object [("kind",Encode.string "load"),("guard",encodeGuard requested)])])
         _ ->
             if detail /= Nothing then ({model|taskGraph={state|detail=detail}},command)
@@ -90,7 +103,7 @@ update msg model =
                                 _ -> state.data
                             measurements = state.measurements |> Dict.filter (\id _ -> next.graph |> Maybe.map (.tasks >> Dict.member id) |> Maybe.withDefault False)
                             projectMeasurements = state.projectMeasurements |> Dict.filter (\id _ -> next.graph |> Maybe.map (.projects >> Dict.member id) |> Maybe.withDefault False)
-                            layout=if next.graph == state.data.graph then state.layout else next.graph |> Maybe.map (Layout.buildWithLabels measurements projectMeasurements)
+                            layout=if next.graph == state.data.graph then state.layout else next.graph |> Maybe.map (Graph.visibleGraph state.filters >> Layout.buildWithLabels measurements projectMeasurements)
                             authoritative = next.revision /= state.data.revision
                             unavailable = kind == "snapshot" && next.graph == Nothing && not next.pending
                             taskPresent id = items |> Result.map (List.any (\item -> item.kind == "task" && Decode.decodeValue (Decode.field "id" Decode.string) item.data == Ok id)) |> Result.withDefault False
@@ -102,7 +115,7 @@ update msg model =
         TaskGraphCanvasReceived raw ->
             if (Decode.decodeValue (Decode.field "key" Decode.string) raw |> Result.toMaybe) /= state.canvasKey || state.canvasKey == Nothing then (model,Cmd.none)
             else if Decode.decodeValue (Decode.field "kind" Decode.string) raw == Ok "focused" then
-                if (state.returnFocus |> Maybe.map .token) == (Decode.decodeValue (Decode.field "token" Decode.int) raw |> Result.toMaybe) then ({model|taskGraph={state|returnFocus=Nothing}},Cmd.none) else (model,Cmd.none)
+                if (state.returnFocus |> Maybe.map .token) == (Decode.decodeValue (Decode.field "token" Decode.int) raw |> Result.toMaybe) then ({model|taskGraph={state|returnFocus=Nothing,focusNotice=if Decode.decodeValue (Decode.field "fallback" Decode.bool) raw == Ok True then Just "The task is not visible in this graph. Adjust the filters or go Back." else Nothing}},Cmd.none) else (model,Cmd.none)
             else
                 let
                     incoming=Decode.decodeValue (Decode.field "measurements" (Decode.list (Decode.map2 Tuple.pair (Decode.field "id" Decode.string) (Decode.field "height" Decode.float)))) raw |> Result.withDefault []
@@ -110,16 +123,31 @@ update msg model =
                     labels=Decode.decodeValue (Decode.field "labels" (Decode.list (Decode.map2 Tuple.pair (Decode.field "id" Decode.string) (Decode.field "height" Decode.float)))) raw |> Result.withDefault []
                     projectMeasurements=List.foldl (\(id,height) values -> if height > 0 && height < 100000 && (state.data.graph |> Maybe.map (.projects >> Dict.member id) |> Maybe.withDefault False) then Dict.insert id height values else values) state.projectMeasurements labels
                 in if measured==state.measurements && projectMeasurements==state.projectMeasurements then (model,Cmd.none)
-                   else ({model|taskGraph={state|measurements=measured,projectMeasurements=projectMeasurements,layout=state.data.graph |> Maybe.map (Layout.buildWithLabels measured projectMeasurements)}},Cmd.none)
+                   else ({model|taskGraph=relayout {state|measurements=measured,projectMeasurements=projectMeasurements}},Cmd.none)
+        TaskGraphSetFilter name enabled ->
+            case Navigation.current model of
+                Nothing -> (model,Cmd.none)
+                Just _ ->
+                    let
+                        filters = if name == "done" then {showDone=enabled,showCancelled=state.filters.showCancelled} else if name == "cancelled" then {showDone=state.filters.showDone,showCancelled=enabled} else state.filters
+                    in if filters == state.filters then (model,Cmd.none)
+                       else ({model|taskGraph=relayout {state|filters=filters,fitRevision=state.fitRevision+1,measurements=Dict.empty,projectMeasurements=Dict.empty,focusNotice=Nothing}},model.key |> Maybe.map (\key -> Nav.replaceUrl key (History.withFilters filters model.url)) |> Maybe.withDefault Cmd.none)
         TaskGraphOpenTask id ->
-            case (Navigation.guard model,Navigation.current model,state.data.graph) of
+            case (Navigation.guard model,Navigation.current model,visible state) of
                 (Just owner,Just route,Just graph) ->
                     if not (Dict.member id graph.tasks) then (model,Cmd.none)
                     else
                         let
-                            graphUrl=route.entryId |> Maybe.andThen (\entryId -> History.lookup owner entryId model.taskGraphNavigation.history) |> Maybe.map .graphUrl |> Maybe.withDefault (Url.toString model.url)
-                            receipt={scope=owner,graphUrl=graphUrl,projectId=route.projectId,entryId=route.entryId,entering=True,originTaskId=id}
-                        in Focus.update (FocusEntity "task" id) {model|taskGraph={state|detail=Just receipt}}
+                            currentUrl=if History.parse model.url == Just route then Just (Url.toString model.url) else Nothing
+                            remembered=route.entryId |> Maybe.andThen (\entryId -> History.lookup owner entryId model.taskGraphNavigation.history) |> Maybe.andThen (\entry -> if entry.projectId == route.projectId then Just entry.graphUrl else Nothing)
+                            graphUrl=case currentUrl of
+                                Just current -> Just current
+                                Nothing -> remembered
+                        in case graphUrl of
+                            Nothing -> (model,Cmd.none)
+                            Just destination ->
+                                let receipt={scope=owner,graphUrl=destination,projectId=route.projectId,entryId=route.entryId,entering=True,originTaskId=id}
+                                in Focus.update (FocusEntity "task" id) {model|taskGraph={state|detail=Just receipt,focusNotice=Nothing}}
                 _ -> (model,Cmd.none)
         TaskGraphReturn ->
             case state.detail of
@@ -148,15 +176,23 @@ statusClass status = case status of
 view : Model -> Html Msg
 view model =
     let state=model.taskGraph in
-    div [H.class "task-graph-page",H.id "task-graph-page"]
+    div [H.class "task-graph-page",H.id "task-graph-page",H.attribute "data-task-graph-scene" (Encode.encode 0 (Encode.object [("key",Encode.string (Maybe.withDefault "" state.canvasKey)),("ready",Encode.bool (state.layout /= Nothing)),("fitRevision",Encode.int state.fitRevision),("focus",focusMetadata state)]))]
         [ div [H.class "page-header"] [Html.h2 [] [text "Task Graph"],button [H.class "btn-small btn-ghost",H.type_ "button",H.id "task-graph-back",onClick TaskGraphBack] [text "Back"]]
+        , div [H.class "task-graph-filters"]
+            [ label [] [input [H.type_ "checkbox",H.id "task-graph-show-done",H.checked state.filters.showDone,onCheck (TaskGraphSetFilter "done")] [],text " Show Done"]
+            , label [] [input [H.type_ "checkbox",H.id "task-graph-show-cancelled",H.checked state.filters.showCancelled,onCheck (TaskGraphSetFilter "cancelled")] [],text " Show Cancelled"] ]
+        , state.focusNotice |> Maybe.map (\message -> div [H.class "task-status-text",H.attribute "role" "status"] [text message]) |> Maybe.withDefault (text "")
         , case state.layout of
             Just layout ->
-                div [] [liveStatus model,if Dict.isEmpty layout.nodes then div [H.class "empty-state",H.attribute "role" "status"] [text "This project has no tasks."] else canvas model layout]
+                div [] [liveStatus model,if Dict.isEmpty layout.nodes then div [H.class "empty-state",H.attribute "role" "status"] [text (if state.data.graph |> Maybe.map (.tasks >> Dict.isEmpty) |> Maybe.withDefault True then "This project has no tasks." else "No tasks match filters.")] else canvas model layout]
             Nothing -> case state.data.status of
                 Graph.Failed message -> div [H.class "empty-state",H.attribute "role" "alert"] [text message,button [H.class "btn-small",H.type_ "button",onClick TaskGraphRetry] [text "Retry"]]
                 _ -> div [H.class "empty-state",H.attribute "role" "status"] [text "Loading a complete task graph…"]
         ]
+
+
+focusMetadata : TaskGraphViewModel -> Encode.Value
+focusMetadata state = state.returnFocus |> Maybe.map (\receipt -> Encode.object [("taskId",Encode.string receipt.taskId),("token",Encode.int receipt.token)]) |> Maybe.withDefault Encode.null
 
 
 liveStatus : Model -> Html Msg
@@ -188,7 +224,8 @@ canvas model layout =
         measured = Dict.keys layout.nodes |> List.all (\id -> Dict.member id model.taskGraph.measurements)
         labelsMeasured = List.all (\circle -> Dict.member circle.project.id model.taskGraph.projectMeasurements) layout.circles
         metadata=Encode.object [("key",Encode.string (Maybe.withDefault "" model.taskGraph.canvasKey)),("measured",Encode.bool (measured && labelsMeasured)),("revision",Encode.int model.taskGraph.data.revision)
-            ,("focus",model.taskGraph.returnFocus |> Maybe.map (\receipt -> Encode.object [("taskId",Encode.string receipt.taskId),("token",Encode.int receipt.token)]) |> Maybe.withDefault Encode.null)
+            ,("fitRevision",Encode.int model.taskGraph.fitRevision)
+            ,("focus",focusMetadata model.taskGraph)
             ,("bounds",Encode.object [("x",Encode.float layout.bounds.x),("y",Encode.float layout.bounds.y),("width",Encode.float layout.bounds.width),("height",Encode.float layout.bounds.height)])
             ,("selected",Encode.object (layout.circles |> List.filter (\circle -> circle.project.id == (Navigation.current model |> Maybe.map .projectId |> Maybe.withDefault "")) |> List.head |> Maybe.map (\circle -> [("x",Encode.float circle.x),("y",Encode.float circle.y)]) |> Maybe.withDefault [("x",Encode.float 0),("y",Encode.float 0)]))]
     in div [H.class "task-graph-workbench"]

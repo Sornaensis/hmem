@@ -1035,6 +1035,9 @@ type alias TaskGraphViewModel =
     , detail : Maybe { scope : TaskGraphNavigation.Guard, graphUrl : String, projectId : String, entryId : Maybe String, entering : Bool, originTaskId : String }
     , returnFocus : Maybe { taskId : String, token : Int }
     , nextFocusToken : Int
+    , filters : Feature.TaskGraph.Filters
+    , fitRevision : Int
+    , focusNotice : Maybe String
     }
 
 
@@ -1665,6 +1668,7 @@ type Msg
     | TaskGraphOpenTask String
     | TaskGraphReturn
     | TaskGraphRetry
+    | TaskGraphSetFilter String Bool
     | OpenTaskGraph String
     | TaskGraphBack
     | TaskGraphDismissReturnNotice

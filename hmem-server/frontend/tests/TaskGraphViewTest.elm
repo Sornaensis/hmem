@@ -10,6 +10,7 @@ import Feature.TaskGraphNavigation as Navigation
 import Feature.TaskGraphView as View
 import Json.Encode as Encode
 import Set
+import TaskGraphNavigation as History
 import TaskGraphLayout as Layout
 import Test exposing (describe,test)
 import Types exposing (..)
@@ -63,6 +64,34 @@ suite = describe "graph detail and snapshot authority"
             retry=View.update TaskGraphRetry failed |> Tuple.first
         in Expect.equal (base.taskGraph.canvasKey,base.taskGraph.data.graph,Graph.Refreshing)
             (retry.taskGraph.canvasKey,retry.taskGraph.data.graph,retry.taskGraph.data.status)
+    , test "filter URL reconciliation keeps transport identity, canonical data and fit revision" <| \_ ->
+        let
+            nextUrl=History.withFilters {showDone=False,showCancelled=False} base.url |> Url.fromString |> Maybe.withDefault base.url
+            next=Navigation.reconcile base ({base|url=nextUrl},Cmd.none) |> View.reconcile (UrlChanged nextUrl) base |> Tuple.first
+            toggled=View.update (TaskGraphSetFilter "done" False) base |> Tuple.first
+        in Expect.all [\_ -> Expect.equal base.taskGraph.data next.taskGraph.data,\_ -> Expect.equal base.taskGraph.canvasKey next.taskGraph.canvasKey
+            ,\_ -> Expect.equal base.taskGraphNavigation.metadataGeneration next.taskGraphNavigation.metadataGeneration
+            ,\_ -> Expect.equal {showDone=False,showCancelled=False} next.taskGraph.filters,\_ -> Expect.equal 0 next.taskGraph.fitRevision
+            ,\_ -> Expect.equal 1 toggled.taskGraph.fitRevision] ()
+    , test "hidden stale activation is rejected and current filtered URL survives detail hops" <| \_ ->
+        let
+            state=base.taskGraph
+            data=state.data
+            graph=data.graph |> Maybe.map (\value -> {value|tasks=Dict.map (\_ task -> {task|status=Api.Done}) value.tasks})
+            nextUrl=History.withFilters {showDone=False,showCancelled=True} base.url |> Url.fromString |> Maybe.withDefault base.url
+            filtered={base|url=nextUrl,taskGraph={state|data={data|graph=graph},filters={showDone=False,showCancelled=True}}}
+            rejected=View.update (TaskGraphOpenTask "task") filtered |> Tuple.first
+            opened=View.update (TaskGraphOpenTask "task") {base|url=nextUrl} |> Tuple.first
+        in Expect.equal (Nothing,Just (Url.toString nextUrl)) (rejected.taskGraph.detail,opened.taskGraph.detail |> Maybe.map .graphUrl)
+    , test "stale graph activation cannot use a remembered different project" <| \_ ->
+        let
+            currentUrl=base.url
+            nav=base.taskGraphNavigation
+            history=nav.history
+            entry={guard={workspaceId="w",audienceId="reader",sessionEpoch=1},projectId="wrong",sourceUrl="",graphUrl=Url.toString currentUrl,origin={focus=base.focus,filters={query="",showOnly=ShowAll,showEmptyProjects=True,hasActiveSession=False,priority=AnyPriority,projectStatuses=[],taskStatuses=[]},focusedFilters=Nothing,collapsedNodes=Dict.empty,nodesCollapsedByDefault=False,expandedCards=Dict.empty,viewportTop=0,viewportIndex=base.cards.viewport.index,scrollTop=0,anchorDelta=Nothing}}
+            stale={base|url={currentUrl|fragment=Just "tab=projects"},taskGraphNavigation={nav|history={history|entries=Dict.singleton "original-entry" entry}}}
+            next=View.update (TaskGraphOpenTask "task") stale |> Tuple.first
+        in Expect.equal Nothing next.taskGraph.detail
     ]
 
 

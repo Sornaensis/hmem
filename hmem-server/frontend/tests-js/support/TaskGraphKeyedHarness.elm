@@ -31,4 +31,5 @@ fixture added =
         ids=if added then ["a-new","m-stable","z-target"] else ["m-stable","z-target"]
         graph={selectedProjectId="p",projects=Dict.singleton "p" {id="p",name="Project",parentId=Nothing,external=False},tasks=List.map (\id -> (id,task id)) ids |> Dict.fromList,edges=[],inScopeTaskIds=Set.fromList ids,externalTaskIds=Set.empty}
         data=Graph.init
-    in {initial|taskGraph={data={data|status=Graph.Ready,graph=Just graph},generation=1,measurements=Dict.empty,projectMeasurements=Dict.empty,layout=Just (Layout.build Dict.empty graph),canvasKey=Just "keyed-fixture",detail=Nothing,returnFocus=Nothing,nextFocusToken=1}}
+        view=View.init
+    in {initial|taskGraph={view|data={data|status=Graph.Ready,graph=Just graph},generation=1,layout=Just (Layout.build Dict.empty graph),canvasKey=Just "keyed-fixture"}}

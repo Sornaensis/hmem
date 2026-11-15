@@ -23,12 +23,20 @@ preview context and Search, Timeline or Audit return controls.
 ## Task graphs
 
 Hover or focus the graph icon immediately after **Move to** on a project card,
-then choose **Task Graph**. The diagram includes that project's subtree and
-directly connected tasks outside it. Each project has its own circle. Arrows
-point from prerequisite to dependent; subtasks sit inside their parent card.
+then choose **Task Graph**. The diagram recursively includes the selected project
+and its subprojects. Each owning project has a separate circle; subproject circles
+are not nested. Dependencies can cross circles. Breadcrumbs show project ancestry.
+Outside tasks appear only when directly connected to a visible task anywhere in
+the selected subtree. Arrows point from prerequisite to dependent; subtasks sit
+inside their parent card.
 The graph refreshes as readable tasks, projects and dependencies change. If an
 update fails, the previous diagram stays visible with a stale notice; choose
 **Retry** to reconnect and refresh it.
+
+**Show Done** and **Show Cancelled** start enabled. Turn either off to hide those
+cards and their incident arrows. A visible subtask whose parent is hidden appears
+on its own. Each filter change fits the remaining diagram; live updates keep your
+camera. Filter choices and the camera survive task details and graph history.
 
 Drag the canvas to pan, use the wheel or pinch to zoom, or choose **Zoom in**,
 **Zoom out** and **Fit**. Task and subtask cards open the normal task details.

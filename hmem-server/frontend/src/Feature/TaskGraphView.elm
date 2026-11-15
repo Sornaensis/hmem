@@ -13,6 +13,7 @@ import Html.Events exposing (onCheck, onClick)
 import Json.Decode as Decode
 import Json.Encode as Encode
 import Ports
+import SessionActivityLight
 import Svg
 import Svg.Attributes as S
 import Svg.Keyed
@@ -23,7 +24,7 @@ import Url
 
 
 init : TaskGraphViewModel
-init = {data=Graph.init,generation=0,measurements=Dict.empty,projectMeasurements=Dict.empty,layout=Nothing,canvasKey=Nothing,detail=Nothing,returnFocus=Nothing,nextFocusToken=1,filters=Graph.defaultFilters,fitRevision=0,focusNotice=Nothing}
+init = {data=Graph.init,generation=0,measurements=Dict.empty,projectMeasurements=Dict.empty,layout=Nothing,canvasKey=Nothing,detail=Nothing,returnFocus=Nothing,nextFocusToken=1,filters=Graph.defaultFilters,fitRevision=0,focusNotice=Nothing,activityTargets=[],activity=Dict.empty}
 
 
 visible : TaskGraphViewModel -> Maybe Graph.Graph
@@ -44,6 +45,17 @@ guardDecoder = Decode.map5 Graph.Guard (Decode.field "workspaceId" Decode.string
 
 reconcile : Msg -> Model -> (Model,Cmd Msg) -> (Model,Cmd Msg)
 reconcile msg previous (model,command) =
+    let
+        (next,nextCommand)=reconcileGraph msg previous (model,command)
+        state=next.taskGraph
+        ids=if Navigation.current next == Nothing then [] else visible state |> Maybe.map (.tasks >> Dict.keys) |> Maybe.withDefault []
+        changed=ids/=state.activityTargets || state.data.guard/=previous.taskGraph.data.guard
+        activityCommand=if changed then state.data.guard |> Maybe.map (\owner -> Ports.taskGraphDataCommand (Encode.object [("kind",Encode.string "activity"),("guard",encodeGuard owner),("taskIds",Encode.list Encode.string ids)])) |> Maybe.withDefault Cmd.none else Cmd.none
+    in ({next|taskGraph={state|activityTargets=ids,activity=Dict.filter (\id _ -> List.member id ids) state.activity}},Cmd.batch [nextCommand,activityCommand])
+
+
+reconcileGraph : Msg -> Model -> (Model,Cmd Msg) -> (Model,Cmd Msg)
+reconcileGraph msg previous (model,command) =
     let
         state = model.taskGraph
         scope = Navigation.guard model
@@ -70,7 +82,7 @@ reconcile msg previous (model,command) =
                 let
                     generation = max state.generation previous.taskGraph.generation+1
                     requested = {workspaceId=owner.workspaceId,projectId=target.projectId,audienceId=owner.audienceId,sessionEpoch=owner.sessionEpoch,targetGeneration=generation}
-                    next = {state|data=Graph.begin requested,generation=generation,measurements=Dict.empty,projectMeasurements=Dict.empty,layout=Nothing,canvasKey=Just key,detail=Nothing,returnFocus=Nothing,filters=History.filters model.url,fitRevision=0,focusNotice=Nothing}
+                    next = {state|data=Graph.begin requested,generation=generation,measurements=Dict.empty,projectMeasurements=Dict.empty,layout=Nothing,canvasKey=Just key,detail=Nothing,returnFocus=Nothing,filters=History.filters model.url,fitRevision=0,focusNotice=Nothing,activity=Dict.empty,activityTargets=[]}
                 in ({model|taskGraph=next},Cmd.batch [command,Ports.taskGraphDataCommand (Encode.object [("kind",Encode.string "load"),("guard",encodeGuard requested)])])
         _ ->
             if detail /= Nothing then ({model|taskGraph={state|detail=detail}},command)
@@ -87,6 +99,10 @@ update msg model =
                 Err _ -> (model,Cmd.none)
                 Ok owner ->
                     if state.data.guard /= Just owner then (model,Cmd.none)
+                    else if Decode.decodeValue (Decode.field "kind" Decode.string) raw == Ok "activity" then
+                        case Decode.decodeValue (Decode.map3 (\id active failed -> (id,{active=active,failed=failed})) (Decode.field "taskId" Decode.string) (Decode.field "active" (Decode.nullable Decode.bool)) (Decode.field "failed" Decode.bool)) raw of
+                            Ok (id,proof) -> if List.member id state.activityTargets then ({model|taskGraph={state|activity=Dict.insert id proof state.activity}},Cmd.none) else (model,Cmd.none)
+                            Err _ -> (model,Cmd.none)
                     else
                         let
                             kind = Decode.decodeValue (Decode.field "kind" Decode.string) raw |> Result.withDefault ""
@@ -111,7 +127,7 @@ update msg model =
                             returnUrl = state.detail |> Maybe.andThen (\receipt -> if kind /= "retired" && (unavailable || (authoritative && not (taskPresent (activeTask receipt)))) then Just receipt.graphUrl else Nothing)
                             currentDetail = if kind == "retired" then Nothing else state.detail
                             command = returnUrl |> Maybe.andThen (\url -> model.key |> Maybe.map (\key -> Nav.replaceUrl key url)) |> Maybe.withDefault Cmd.none
-                        in ({model|taskGraph={state|data=next,layout=layout,measurements=measurements,projectMeasurements=projectMeasurements,detail=currentDetail,returnFocus=if kind == "retired" || returnUrl /= Nothing then Nothing else state.returnFocus}},command)
+                        in ({model|taskGraph={state|data=next,layout=layout,measurements=measurements,projectMeasurements=projectMeasurements,detail=currentDetail,activity=if kind=="retired" then Dict.empty else state.activity,returnFocus=if kind == "retired" || returnUrl /= Nothing then Nothing else state.returnFocus}},command)
         TaskGraphCanvasReceived raw ->
             if (Decode.decodeValue (Decode.field "key" Decode.string) raw |> Result.toMaybe) /= state.canvasKey || state.canvasKey == Nothing then (model,Cmd.none)
             else if Decode.decodeValue (Decode.field "kind" Decode.string) raw == Ok "focused" then
@@ -157,6 +173,8 @@ update msg model =
             case state.data.guard of
                 Just owner -> ({model|taskGraph={state|data=Graph.refresh owner state.data}},Ports.taskGraphDataCommand (Encode.object [("kind",Encode.string "retry"),("guard",encodeGuard owner)]))
                 Nothing -> (model,Cmd.none)
+        TaskGraphActivityRetry ->
+            (model,state.data.guard |> Maybe.map (\owner -> Ports.taskGraphDataCommand (Encode.object [("kind",Encode.string "activity_retry"),("guard",encodeGuard owner)])) |> Maybe.withDefault Cmd.none)
         _ -> (model,Cmd.none)
 
 
@@ -182,6 +200,7 @@ view model =
             [ label [] [input [H.type_ "checkbox",H.id "task-graph-show-done",H.checked state.filters.showDone,onCheck (TaskGraphSetFilter "done")] [],text " Show Done"]
             , label [] [input [H.type_ "checkbox",H.id "task-graph-show-cancelled",H.checked state.filters.showCancelled,onCheck (TaskGraphSetFilter "cancelled")] [],text " Show Cancelled"] ]
         , state.focusNotice |> Maybe.map (\message -> div [H.class "task-status-text",H.attribute "role" "status"] [text message]) |> Maybe.withDefault (text "")
+        , if Dict.values state.activity |> List.any .failed then div [H.class "task-status-text",H.attribute "role" "status"] [text "Agent activity could not be checked. ",button [H.type_ "button",H.class "btn-small btn-ghost",onClick TaskGraphActivityRetry] [text "Retry agent activity"]] else text ""
         , case state.layout of
             Just layout ->
                 div [] [liveStatus model,layout.problem |> Maybe.map (\message -> div [H.attribute "role" "alert"] [text message]) |> Maybe.withDefault (text ""),if Dict.isEmpty layout.nodes then div [H.class "empty-state",H.attribute "role" "status"] [text (if state.data.graph |> Maybe.map (.tasks >> Dict.isEmpty) |> Maybe.withDefault True then "This project has no tasks." else "No tasks match filters.")] else canvas model layout]
@@ -212,11 +231,15 @@ canvas model layout =
         number=String.fromFloat
         boxAttributes box=[S.x (number box.x),S.y (number box.y),S.width (number box.width),S.height (number box.height)]
         nodeView node =
+            let
+                active=Dict.get node.task.id model.taskGraph.activity |> Maybe.andThen .active |> (==) (Just True)
+                appearance=Helpers.taskPresentationFromChildren node.task.status (Dict.get node.task.id model.taskGraph.data.runningChildren |> Maybe.withDefault 0) |> Helpers.taskCardStatusClass
+            in
             Svg.foreignObject (boxAttributes node.box)
-                [button [H.type_ "button",H.class ("task-graph-node " ++ statusClass node.task.status ++ Helpers.taskCardStatusClass node.task.status ++ (if node.task.parentId /= Nothing then " graph-subtask" else ""))
-                    ,H.attribute "data-graph-task" node.task.id,H.attribute "aria-label" (node.task.title ++ ", " ++ Api.taskStatusToString node.task.status)
+                [button [H.type_ "button",H.class ("task-graph-node " ++ statusClass node.task.status ++ appearance ++ (if node.task.parentId /= Nothing then " graph-subtask" else ""))
+                    ,H.attribute "data-graph-task" node.task.id,H.attribute "aria-label" (node.task.title ++ ", " ++ Api.taskStatusToString node.task.status ++ (if active then ", active agent session" else ""))
                     ,onClick (TaskGraphOpenTask node.task.id)]
-                    [span [H.class "task-graph-node-title"] [text node.task.title],span [H.class ("task-graph-status " ++ Helpers.taskStatusBadgeClass node.task.status)] [text (Helpers.taskStatusDisplayText node.task.status)]]]
+                    [span [H.class "task-graph-node-title"] [text node.task.title],span [H.class "task-graph-node-meta"] [span [H.class ("task-graph-status " ++ Helpers.statusControlClass "task" (Api.taskStatusToString node.task.status))] [text (Helpers.taskStatusDisplayText node.task.status)],SessionActivityLight.view active "Active agent session on this task"]]]
         circleView circle = Svg.g []
             [Svg.circle [S.cx (number circle.x),S.cy (number circle.y),S.r (number circle.radius),H.attribute "data-graph-project" circle.project.id,S.class (if circle.project.external then "task-graph-project graph-external-project" else "task-graph-project")] []
             ,Svg.foreignObject (boxAttributes circle.label) [div [H.class "task-graph-project-name",H.attribute "data-graph-project-label" circle.project.id] [text circle.project.name]]]

@@ -978,11 +978,7 @@ viewStatusSelectWithDisabled : Model -> String -> String -> String -> List a -> 
 viewStatusSelectWithDisabled model entityType entityId currentStr allValues toString disabledReason toMsg =
     let
         selectClass =
-            if entityType == "task" && currentStr == "blocked" then
-                "status-select task-status-select-blocked"
-
-            else
-                "status-select badge badge-" ++ currentStr
+            Helpers.statusControlClass entityType currentStr
 
         selectTitle =
             if entityType == "task" then

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createTaskGraphLive, GRAPH_MAX_RESEEDS } from '../src/task-graph-live.js'
+import { createTaskGraphActivity } from '../src/task-graph-activity.js'
 
 const guard = { workspaceId: 'w', projectId: 'p', audienceId: 'reader', sessionEpoch: 1, targetGeneration: 2 }
 const checkpoint = { schema_version: 1, type: 'checkpoint', catch_up: 'complete', resume_token: 'private-checkpoint' }
@@ -21,11 +22,12 @@ function clock() {
 }
 
 function harness() {
-  const c = clock(), streams = [], loaders = [], snapshots = [], states = [], authorities = []
-  let context = { ...guard }
+  const c = clock(), streams = [], loaders = [], snapshots = [], states = [], authorities = [], activity = []
+  let context = { ...guard }, accepting = true, activityConsumer = () => {}
   const live = createTaskGraphLive({ apiUrl: 'https://api.example', wsUrl: 'wss://api.example/ws', ...c,
     isCurrent: value => JSON.stringify(value) === JSON.stringify(context),
-    onSnapshot: (owner, items) => { snapshots.push({ owner, items }); return true }, onState: (...value) => states.push(value),
+    onSnapshot: (owner, items) => { snapshots.push({ owner, items }); return accepting }, onState: (...value) => states.push(value),
+    onActivity: (...value) => { activity.push(value); activityConsumer(...value) },
     onUnauthorized: owner => authorities.push(['unauthenticated', owner]), onForbidden: owner => authorities.push(['forbidden', owner]),
     streamFactory(options) {
       const stream = { options, stopped: false, config: null,
@@ -42,9 +44,48 @@ function harness() {
         cancel() { this.cancels++; for (const resolve of this.pending.splice(0)) resolve(false) } }
       loaders.push(loader); return loader
     } })
-  return { live, c, streams, loaders, snapshots, states, authorities, stream: () => streams.at(-1), loader: () => loaders.at(-1),
-    context(value) { context = value }, start() { live.load(guard, { Authorization: 'test-only' }); streams.at(-1).snapshot(); streams.at(-1).frame(checkpoint) } }
+  return { live, c, streams, loaders, snapshots, states, authorities, activity, stream: () => streams.at(-1), loader: () => loaders.at(-1),
+    accept(value) { accepting = value }, activityConsumer(value) { activityConsumer = value }, context(value) { context = value }, start() { live.load(guard, { Authorization: 'test-only' }); streams.at(-1).snapshot(); streams.at(-1).frame(checkpoint) } }
 }
+
+test('activity has a separate lifecycle with progress ignored and stream reseeds retiring all proofs', async () => {
+  const h = harness(); h.start(); h.activity.length = 0
+  h.stream().frame(event('progress', 'agent_session'))
+  assert.deepEqual(h.activity, [])
+  const foreign = event('foreign-membership', 'agent_session'); foreign.event.invalidations.push({ kind: 'collection', target: 'active_sessions:other' }); h.stream().frame(foreign)
+  const wrongKind = event('noncanonical-kind', 'agent_session'); wrongKind.event.invalidations.push({ kind: 'active_sessions', target: 'w' }); h.stream().frame(wrongKind)
+  assert.deepEqual(h.activity, [])
+  const membership = event('termination', 'agent_session'); membership.event.invalidations.push({ kind: 'collection', target: 'active_sessions:w' })
+  h.stream().frame(membership); h.stream().frame(event('association', 'task_session'))
+  h.stream().frame({ schema_version: 1, type: 'session_activity_changed', workspace_id: 'w' })
+  assert.deepEqual(h.activity.map(v => v[1]), ['invalidate', 'invalidate', 'invalidate'])
+  assert.equal(h.loader().reads.length, 0, 'activity never requests a graph snapshot')
+  h.stream().state('reconnecting'); assert.equal(h.activity.at(-1)[1], 'pause')
+  h.stream().frame(checkpoint); assert.equal(h.activity.at(-1)[1], 'ready')
+  h.stream().frame({ schema_version: 1, type: 'resync_required' }); await h.c.next()
+  h.stream().snapshot(); assert.equal(h.activity.at(-1)[1], 'pause', 'true stream seed invalidates positive AND negative proofs')
+  h.stream().frame(checkpoint); assert.equal(h.activity.at(-1)[1], 'ready')
+  h.live.cancel()
+})
+
+test('finite snapshot Retry restores activity proof through a healthy stream without another checkpoint', async () => {
+  const h = harness(), proofs = []
+  let reads = 0
+  const activity = createTaskGraphActivity({ apiUrl: 'https://api.example', isCurrent: () => true, onProof: (_, id, active) => proofs.push([id, active]), setTimer: h.c.setTimer, clearTimer: h.c.clearTimer,
+    fetchImpl: async () => { reads++; return { ok: true, status: 200, json: async () => ({ items: [{ id: 's', workspace_id: 'w', state: 'active', format_label: 'codex', created_at: 'date', last_seen_at: 'old', committed_bytes: 0, committed_records: 0, revision: 0, ends_with_newline: true }], next_cursor: null }) } } })
+  activity.load(guard); activity.reconcile(guard, ['task']); h.activityConsumer((owner, kind) => activity.signal(owner, kind)); h.start(); await tick()
+  assert.equal(reads, 1); assert.deepEqual(proofs.at(-1), ['task', true])
+  h.stream().frame(event('task-invalidated')); await h.c.next(); h.loader().fail('snapshot_500'); await tick()
+  assert.deepEqual(proofs.at(-1), ['task', null]); assert.equal(reads, 1)
+  h.live.retry(); h.loader().finish(); await tick()
+  assert.equal(h.states.at(-1)[1], 'live'); assert.equal(reads, 2); assert.deepEqual(proofs.at(-1), ['task', true])
+  h.stream().frame(event('another-task')); await h.c.next(); h.loader().fail('snapshot_500'); await tick()
+  h.accept(false); h.live.retry(); h.loader().finish(); await tick()
+  h.stream().frame(checkpoint); await tick()
+  assert.equal(reads, 2, 'rejected finite snapshot cannot resume activity proof')
+  assert.deepEqual(proofs.at(-1), ['task', null])
+  activity.cancel(); h.live.cancel()
+})
 
 test('own full snapshot seeds its stream, capabilities stay private and no primary storage is accepted', () => {
   const h = harness(); h.start()

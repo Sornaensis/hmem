@@ -40,6 +40,140 @@ const transform = async h => {
 }
 const world = h => h.page.locator('[data-graph-world]').evaluate(n => [...n.querySelectorAll('foreignObject')].map(v => [v.getAttribute('x'), v.getAttribute('y'), v.getAttribute('width'), v.getAttribute('height')]))
 
+const sessionRow = (workspace, changes = {}) => ({ id: 'active-agent', workspace_id: workspace, state: 'active', format_label: 'codex', created_at: '2026-01-01T00:00:00Z', last_seen_at: '2020-01-01T00:00:00Z', committed_bytes: 0, committed_records: 0, revision: 0, ends_with_newline: true, ...changes })
+const statusStyle = element => { const s = getComputedStyle(element); return Object.fromEntries(['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'textTransform', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderRadius', 'backgroundColor', 'color', 'borderTopWidth', 'borderTopStyle', 'borderTopColor'].map(key => [key, s[key]])) }
+
+test('all five graph statuses match computed hierarchy display and direct quiet-active agents use the same native light', { timeout: 30000 }, async () => {
+  const f = fixture(), t = f.tasks[0], statuses = ['todo', 'in_progress', 'blocked', 'done', 'cancelled']
+  f.tasks = statuses.map(status => ({ ...t, id: 'status-' + status, title: 'Status ' + status, status, auto_blocked: false, parent_id: null })); f.dependencies = []
+  const h = await openGraph(f)
+  const reads = []
+  await h.page.route(/\/api\/v1\/workspaces\/[^/]+\/tasks\/[^/]+\/sessions\?/, async route => {
+    const url = new URL(route.request().url()), id = url.pathname.split('/').at(-2); reads.push({ id, query: url.search })
+    return route.fulfill({ json: { items: id === 'status-in_progress' ? [sessionRow(f.workspace.id)] : [], next_cursor: null } })
+  })
+  try {
+    await h.start()
+    const hierarchy = {}
+    for (const status of statuses) {
+      await h.page.goto(h.origin + '/workspace/' + f.workspace.id + '#tab=projects&focus=task%3Astatus-' + status); await h.idle()
+      const select = h.page.locator(`#entity-status-${status} select.status-select`)
+      await select.waitFor({ timeout: 10000 }); hierarchy[status] = await select.evaluate(statusStyle)
+      if (process.env.HMEM_TASK_GRAPH_AGENT_SCREENSHOT === '1' && status === 'in_progress') {
+        await mkdir('../../output/playwright/task-graph-agent-status', { recursive: true })
+        await h.page.locator('#entity-status-in_progress').screenshot({ path: '../../output/playwright/task-graph-agent-status/hierarchy-status-reference.png' })
+      }
+    }
+    await h.page.goto(h.origin + '/workspace/' + f.workspace.id + '#tab=projects&focus=project%3Aroot-project'); await h.idle()
+    await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.page.locator('[data-graph-task="status-in_progress"] .session-activity-light').waitFor()
+    for (const status of statuses) {
+      const card = h.page.locator(`[data-graph-task="status-${status}"]`)
+      assert.deepEqual(await card.locator('.task-graph-status').evaluate(statusStyle), hierarchy[status], status)
+      assert.equal(await card.locator('.task-graph-status').innerText(), status.replaceAll('_', ' ').toUpperCase())
+      assert.equal(await card.locator('select').count(), 0)
+      assert.equal(await card.locator('.session-activity-light').count(), status === 'in_progress' ? 1 : 0)
+    }
+    assert.match(await h.page.locator('[data-graph-task="status-in_progress"]').getAttribute('aria-label'), /active agent session/)
+    const light = await h.page.locator('[data-graph-task="status-in_progress"] .session-activity-light').evaluate(n => ({ width: getComputedStyle(n).width, height: getComputedStyle(n).height, duration: getComputedStyle(n.querySelector('.session-activity-ring')).animationDuration }))
+    assert.deepEqual(light, { width: '16px', height: '16px', duration: '1.8s' })
+    assert.ok(reads.some(r => r.query === '?limit=1&state=active'))
+    if (process.env.HMEM_TASK_GRAPH_AGENT_SCREENSHOT === '1') {
+      await h.page.setViewportSize({ width: 1600, height: 1400 }); await h.page.getByRole('button', { name: 'Fit', exact: true }).click(); await h.idle()
+      await h.page.screenshot({ path: '../../output/playwright/task-graph-agent-status/task-graph-five-statuses.png' })
+    }
+    await h.page.emulateMedia({ reducedMotion: 'reduce' }); assert.equal(await h.page.locator('.task-graph-node .session-activity-ring').evaluate(n => getComputedStyle(n).animationName), 'none')
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
+test('graph agent lifecycle is direct, coalesced and independent of snapshots with honest retry', { timeout: 30000 }, async () => {
+  const f = fixture(), t = f.tasks[0]
+  f.tasks.find(v => v.id === 'child-b').status = 'in_progress'
+  const external = f.tasks.find(v => v.id === 'external-task'); external.status = 'blocked'; external.auto_blocked = true
+  f.tasks.push({ ...t, id: 'hidden-external-child', project_id: 'external', parent_id: 'external-task', status: 'in_progress' })
+  const h = await openGraph(f), counts = new Map([['child-b', 2]]), reads = []
+  let failure = false, hold = null, arrived = null, completed = null
+  await h.page.route(/\/api\/v1\/workspaces\/[^/]+\/tasks\/[^/]+\/sessions\?/, async route => {
+    const url = new URL(route.request().url()), id = url.pathname.split('/').at(-2); reads.push(id)
+    if (id === 'child-b' && hold) { arrived?.(); await hold }
+    if (id === 'child-b' && failure) await route.fulfill({ status: 500, json: { error: 'controlled' } })
+    else await route.fulfill({ json: { items: counts.get(id) ? [sessionRow(f.workspace.id)] : [], next_cursor: null } })
+    completed?.()
+  })
+  const nextRound = () => new Promise(resolve => { let remaining = 5; completed = () => { if (--remaining === 0) { completed = null; resolve() } } })
+  const invalidate = async (id, type = 'agent_session', membership = true) => {
+    const frame = graphEvent(f, id, type, 'agent')
+    if (membership) frame.event.invalidations.push({ kind: 'collection', target: 'active_sessions:' + f.workspace.id })
+    await h.page.evaluate(value => window.pushHierarchyRawFrames([value]), frame)
+  }
+  try {
+    await h.start(); await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    const light = h.page.locator('[data-graph-task="child-b"] .session-activity-light')
+    await light.waitFor()
+    assert.equal(await h.page.locator('[data-graph-task="parent"] .session-activity-light').count(), 0)
+    const parent = h.page.locator('[data-graph-task="parent"]'), externalCard = h.page.locator('[data-graph-task="external-task"]')
+    for (const node of [parent, externalCard]) { assert.equal(await node.locator('.task-graph-status').innerText(), 'BLOCKED'); assert.ok((await node.getAttribute('class')).includes('card-status-in_progress')) }
+    assert.equal(await h.page.locator('[data-graph-task="hidden-external-child"]').count(), 0)
+    assert.equal(reads.includes('hidden-external-child'), false)
+    let release
+    hold = new Promise(resolve => { release = resolve }); const reading = new Promise(resolve => { arrived = resolve })
+    counts.set('child-b', 1); await invalidate('one-of-two-terminated'); await reading
+    await light.waitFor({ state: 'detached' }); hold = null; release(); await light.waitFor()
+    const negative = nextRound()
+    counts.set('child-b', 0); await invalidate('last-terminated'); await light.waitFor({ state: 'detached' }); await negative; await h.idle()
+    const afterInactive = reads.length
+    await h.page.waitForTimeout(250); assert.equal(reads.length, afterInactive, 'no per-render probing')
+    const positive = nextRound()
+    counts.set('child-b', 1); await invalidate('direct-association', 'task_session'); await positive; await light.waitFor()
+    const beforeProgress = reads.length
+    for (let i = 0; i < 25; i++) await invalidate('append-' + i, 'agent_session', false)
+    await h.page.waitForTimeout(250); assert.equal(reads.length, beforeProgress, 'append-only events cannot poll task activity')
+    const errored = nextRound()
+    failure = true; await invalidate('activity-error'); await light.waitFor({ state: 'detached' }); await errored
+    const retry = h.page.getByRole('button', { name: 'Retry agent activity', exact: true }); await retry.waitFor()
+    const failedReads = reads.length; await h.page.waitForTimeout(250); assert.equal(reads.length, failedReads)
+    failure = false; await retry.click(); await light.waitFor(); await retry.waitFor({ state: 'detached' })
+    assert.equal(h.snapshots(), 1, 'agent membership never reloads the full graph')
+    await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click(); const camera = await transform(h)
+    await h.page.locator('[data-graph-task="child-b"]').click(); await h.page.waitForURL(/focus=task%3Achild-b/)
+    await h.page.getByRole('button', { name: 'Back to graph', exact: true }).click(); await light.waitFor()
+    assert.deepEqual(await transform(h), camera)
+    if (process.env.HMEM_TASK_GRAPH_AGENT_SCREENSHOT === '1') {
+      await h.page.setViewportSize({ width: 1600, height: 1400 }); await h.page.getByRole('button', { name: 'Fit', exact: true }).click(); await h.idle()
+      await mkdir('../../output/playwright/task-graph-agent-status', { recursive: true }); await h.page.screenshot({ path: '../../output/playwright/task-graph-agent-status/task-graph-agent-status.png' })
+    }
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
+test('finite graph read failure and Retry restore direct activity without any later checkpoint', { timeout: 30000 }, async () => {
+  const f = fixture(); let failure = false, activityReads = 0
+  const h = await openGraph(f, { failure: () => failure })
+  await h.page.route(/\/api\/v1\/workspaces\/[^/]+\/tasks\/[^/]+\/sessions\?/, route => {
+    activityReads++
+    const id = new URL(route.request().url()).pathname.split('/').at(-2)
+    return route.fulfill({ json: { items: id === 'child-b' ? [sessionRow(f.workspace.id)] : [], next_cursor: null } })
+  })
+  try {
+    await h.start(); await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    const light = h.page.locator('[data-graph-task="child-b"] .session-activity-light'); await light.waitFor(); await h.idle()
+    await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click(); const camera = await transform(h)
+    failure = true
+    // Raw delivery deliberately supplies no checkpoint or activity hint after
+    // this event. Recovery must come only from the finite HTTP Retry.
+    await h.page.evaluate(frame => window.pushHierarchyRawFrames([frame]), graphEvent(f, 'finite-read-failed', 'task', 'child-b'))
+    const retry = h.page.getByRole('button', { name: 'Retry', exact: true }); await retry.waitFor(); await light.waitFor({ state: 'detached' })
+    const before = activityReads
+    failure = false; await retry.click()
+    await h.page.locator('[data-graph-live="true"]').waitFor(); await light.waitFor()
+    assert.ok(activityReads > before, 'activity proof was reread after finite recovery')
+    assert.equal(h.snapshots(), 3)
+    assert.deepEqual(await transform(h), camera)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
 const diagramGeometry = h => h.page.locator('#task-graph-canvas').evaluate(canvas => {
   const box = n => ({ x: +n.getAttribute('x'), y: +n.getAttribute('y'), width: +n.getAttribute('width'), height: +n.getAttribute('height') })
   return { circles: [...canvas.querySelectorAll('[data-graph-project]')].map(n => ({ id: n.dataset.graphProject, x: +n.getAttribute('cx'), y: +n.getAttribute('cy'), radius: +n.getAttribute('r') })),
@@ -131,7 +265,7 @@ test('three-level project nesting shows own cards and cross-circle arrows in the
     const geometry = await diagramGeometry(h)
     assert.equal(geometry.circles.length, 3); assert.equal(geometry.nodes.length, 3); assert.equal(geometry.edges.length, 2)
     assert.deepEqual(geometry.edges.map(edge => [edge.source, edge.target]).sort(), [['application-task', 'frontend-task'], ['frontend-task', 'graph-task']])
-    for (const [id, badge] of [['application-task', 'TODO'], ['frontend-task', 'blocked'], ['graph-task', 'blocked']]) assert.equal(await h.page.locator(`[data-graph-task="${id}"] .task-graph-status`).innerText(), badge)
+    for (const [id, badge] of [['application-task', 'TODO'], ['frontend-task', 'BLOCKED'], ['graph-task', 'BLOCKED']]) assert.equal(await h.page.locator(`[data-graph-task="${id}"] .task-graph-status`).innerText(), badge)
     assertSafeSegments(geometry)
     for (let i = 1; i < 3; i++) assert.ok(Math.hypot(geometry.circles[i].x - geometry.circles[i - 1].x, geometry.circles[i].y - geometry.circles[i - 1].y) + geometry.circles[i].radius < geometry.circles[i - 1].radius)
     const canvas = h.page.locator('#task-graph-canvas'), box = await canvas.boundingBox(), initial = await transform(h), graphUrl = h.page.url()
@@ -190,7 +324,11 @@ test('status filters are independent local presentation, prune external orphans 
   try {
     await h.start(); await h.page.locator('#task-graph-open-root-project').click()
     await h.page.locator('[data-graph-live="true"]').waitFor(); await h.idle()
-    const requests = [], request = value => { if (value.url().includes('/api/')) requests.push(value.url().split('?')[0]) }
+    const requests = [], request = value => {
+      const url = new URL(value.url())
+      const directActivity = value.method() === 'GET' && /\/workspaces\/[^/]+\/tasks\/[^/]+\/sessions$/.test(url.pathname) && url.search === '?limit=1&state=active'
+      if (url.pathname.includes('/api/') && !directActivity) requests.push(url.origin + url.pathname)
+    }
     h.page.on('request', request)
     const beforeUrl = new URL(h.page.url()), beforeLength = await h.page.evaluate(() => history.length)
     const done = h.page.getByRole('checkbox', { name: 'Show Done', exact: true }), cancelled = h.page.getByRole('checkbox', { name: 'Show Cancelled', exact: true })

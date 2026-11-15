@@ -98,6 +98,7 @@ route msg model =
         TaskGraphOpenTask _ -> Ok (Feature.TaskGraphView.update msg model)
         TaskGraphReturn -> Ok (Feature.TaskGraphView.update msg model)
         TaskGraphRetry -> Ok (Feature.TaskGraphView.update msg model)
+        TaskGraphActivityRetry -> Ok (Feature.TaskGraphView.update msg model)
         TaskGraphSetFilter _ _ -> Ok (Feature.TaskGraphView.update msg model)
         OpenTaskGraph _ -> Ok (Feature.TaskGraphNavigation.update msg model)
         TaskGraphBack -> Ok (Feature.TaskGraphNavigation.update msg model)

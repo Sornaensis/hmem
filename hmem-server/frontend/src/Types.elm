@@ -1038,6 +1038,8 @@ type alias TaskGraphViewModel =
     , filters : Feature.TaskGraph.Filters
     , fitRevision : Int
     , focusNotice : Maybe String
+    , activityTargets : List String
+    , activity : Dict String { active : Maybe Bool, failed : Bool }
     }
 
 
@@ -1668,6 +1670,7 @@ type Msg
     | TaskGraphOpenTask String
     | TaskGraphReturn
     | TaskGraphRetry
+    | TaskGraphActivityRetry
     | TaskGraphSetFilter String Bool
     | OpenTaskGraph String
     | TaskGraphBack

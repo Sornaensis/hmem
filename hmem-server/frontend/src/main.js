@@ -3,6 +3,7 @@ import { installSearchNavigation } from './search-navigation.js'
 import { installTaskGraphNavigation } from './task-graph-navigation.js'
 import { createTaskGraphLive } from './task-graph-live.js'
 import { installTaskGraphCanvas } from './task-graph-canvas.js'
+import { createTaskGraphActivity } from './task-graph-activity.js'
 import { installSearchEditViewport } from './search-edit-viewport.js'
 import { installObservationSearch } from './observation-search.js'
 import { installHierarchyViewport } from './hierarchy-viewport.js'
@@ -797,9 +798,13 @@ installTaskGraphNavigation(app)
 installTaskGraphCanvas(app)
 let graphDataGuard = null
 let graphDataAuthority = null
+const currentGraphAuthority = guard => JSON.stringify(guard) === JSON.stringify(graphDataGuard)
+  && graphDataAuthority?.generation === authTokenGeneration && graphDataAuthority?.signature === authTokenSignature()
+const graphActivity = createTaskGraphActivity({ apiUrl, isCurrent: currentGraphAuthority,
+  onProof: (guard, taskId, active, failed) => app.ports.taskGraphDataEvent.send({ kind: 'activity', guard, taskId, active, failed }), onUnauthorized: notifyUnauthorized })
 const graphData = createTaskGraphLive({ apiUrl, wsUrl,
-  isCurrent: guard => JSON.stringify(guard) === JSON.stringify(graphDataGuard)
-    && graphDataAuthority?.generation === authTokenGeneration && graphDataAuthority?.signature === authTokenSignature(),
+  isCurrent: currentGraphAuthority,
+  onActivity: (guard, kind) => graphActivity.signal(guard, kind),
   onSnapshot: (guard, items) => app.ports.taskGraphDataEvent.send({ kind: 'snapshot', guard, items }),
   onState: (guard, kind) => app.ports.taskGraphDataEvent.send({ kind, guard }),
   onUnauthorized: notifyUnauthorized,
@@ -809,13 +814,15 @@ const graphData = createTaskGraphLive({ apiUrl, wsUrl,
       frame: { schema_version: 1, type: 'access_revoked', workspace_id: guard.workspaceId } }))
   }
 })
-retireTaskGraphAuthority = () => graphData.retire()
+retireTaskGraphAuthority = () => { graphActivity.cancel(); graphData.retire() }
 app.ports.taskGraphDataCommand.subscribe(command => {
-  if (command.kind === 'load') { graphDataGuard = command.guard; graphDataAuthority = { generation: authTokenGeneration, signature: authTokenSignature() }; graphData.load(command.guard, { ...authHeaderObject(), ...csrfHeaderObject() }) }
+  if (command.kind === 'load') { graphDataGuard = command.guard; graphDataAuthority = { generation: authTokenGeneration, signature: authTokenSignature() }; const headers = { ...authHeaderObject(), ...csrfHeaderObject() }; graphActivity.load(command.guard, headers); graphData.load(command.guard, headers) }
   else if (command.kind === 'retry' && JSON.stringify(command.guard) === JSON.stringify(graphDataGuard)) graphData.retry()
-  else { graphDataGuard = null; graphDataAuthority = null; graphData.cancel() }
+  else if (command.kind === 'activity') graphActivity.reconcile(command.guard, command.taskIds)
+  else if (command.kind === 'activity_retry') graphActivity.retry(command.guard)
+  else { graphDataGuard = null; graphDataAuthority = null; graphActivity.cancel(); graphData.cancel() }
 })
-window.addEventListener('pagehide', () => graphData.cancel())
+window.addEventListener('pagehide', () => { graphActivity.cancel(); graphData.cancel() })
 installObservationSearch(app)
 installObservationPreferences(app)
 installTimestampDisplay(app)

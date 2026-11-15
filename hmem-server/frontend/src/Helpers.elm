@@ -1518,6 +1518,17 @@ taskStatusBadgeClass status =
             "badge badge-" ++ Api.taskStatusToString status
 
 
+statusControlClass : String -> String -> String
+statusControlClass entityType status =
+    if entityType == "task" && status == "blocked" then "status-select task-status-select-blocked"
+    else "status-select badge badge-" ++ status
+
+
+taskPresentationFromChildren : Api.TaskStatus -> Int -> Api.TaskStatus
+taskPresentationFromChildren status runningChildren =
+    if status == Api.Blocked && runningChildren > 0 then Api.InProgress else status
+
+
 taskPopoverStatusClass : Api.TaskStatus -> String
 taskPopoverStatusClass status =
     case status of
@@ -1535,11 +1546,7 @@ taskCardAppearanceClass status maybeRollup =
 
 taskPresentationStatus : Api.TaskStatus -> Maybe Api.TaskReadinessRollup -> Api.TaskStatus
 taskPresentationStatus status maybeRollup =
-    if status == Api.Blocked && (maybeRollup |> Maybe.map .inProgressSubtaskCount |> Maybe.withDefault 0) > 0 then
-        Api.InProgress
-
-    else
-        status
+    taskPresentationFromChildren status (maybeRollup |> Maybe.map .inProgressSubtaskCount |> Maybe.withDefault 0)
 
 
 taskPresentationOrder : Model -> { a | id : String, status : Api.TaskStatus } -> Int

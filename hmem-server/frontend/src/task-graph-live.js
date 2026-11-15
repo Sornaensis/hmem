@@ -23,7 +23,7 @@ function validEnvelope(event, workspaceId) {
 
 // This stream owns its snapshot boundary and private checkpoints. The ordinary
 // workspace-shell stream is never an authority for the graph's projection.
-export function createTaskGraphLive({ apiUrl, wsUrl, isCurrent, onSnapshot, onState = () => {},
+export function createTaskGraphLive({ apiUrl, wsUrl, isCurrent, onSnapshot, onState = () => {}, onActivity = () => {},
   onUnauthorized = () => {}, onForbidden = () => {}, fetchImpl = globalThis.fetch,
   WebSocketImpl = globalThis.WebSocket, cryptoImpl = globalThis.crypto,
   AbortControllerImpl = globalThis.AbortController, setTimer = setTimeout, clearTimer = clearTimeout,
@@ -33,7 +33,7 @@ export function createTaskGraphLive({ apiUrl, wsUrl, isCurrent, onSnapshot, onSt
   const active = entry => {
     try { return current === entry && isCurrent(entry.guard) } catch { return false }
   }
-  const emit = (entry, kind, reason) => { if (active(entry)) onState(entry.guard, kind, reason) }
+  const emit = (entry, kind, reason) => { if (active(entry)) { onState(entry.guard, kind, reason); if (['recovering', 'failed', 'retired'].includes(kind)) onActivity(entry.guard, kind === 'retired' ? 'retire' : 'pause') } }
   const stopTimer = (entry, field) => { if (entry[field] != null) clearTimer(entry[field]); entry[field] = null }
 
   function dispose(entry) {
@@ -44,12 +44,16 @@ export function createTaskGraphLive({ apiUrl, wsUrl, isCurrent, onSnapshot, onSt
   function retire(entry, reason, authorization) {
     if (!active(entry)) return
     onState(entry.guard, 'retired', reason)
+    onActivity(entry.guard, 'retire')
     cancel()
     if (authorization === 'unauthenticated') onUnauthorized(entry.guard)
     else if (authorization === 'forbidden') onForbidden(entry.guard)
   }
   function live(entry) {
-    if (entry.seeded && entry.streamLive && !entry.reading && !entry.dirty && !entry.failed) emit(entry, 'live')
+    if (active(entry) && entry.seeded && entry.streamLive && !entry.reading && !entry.dirty && !entry.failed) {
+      emit(entry, 'live')
+      onActivity(entry.guard, 'ready')
+    }
   }
   function failed(entry, reason, stream = false) {
     if (!active(entry)) return
@@ -70,7 +74,8 @@ export function createTaskGraphLive({ apiUrl, wsUrl, isCurrent, onSnapshot, onSt
     entry.loader.load(entry.guard, entry.headers).then(success => {
       if (!active(entry) || serial !== entry.readSerial) return
       entry.reading = false
-      if (!success || entry.failed) return
+      if (!success) { if (!entry.failed) failed(entry, 'Graph snapshot could not be accepted.'); return }
+      if (entry.failed) return
       if (entry.dirty) schedule(entry)
       else live(entry)
     })
@@ -103,12 +108,14 @@ export function createTaskGraphLive({ apiUrl, wsUrl, isCurrent, onSnapshot, onSt
     if (!active(entry)) return
     entry.failed = false; entry.streamLive = false; entry.seeded = false; entry.eventIds.clear()
     emit(entry, 'refreshing')
+    onActivity(entry.guard, 'pause')
     const storage = { getItem: key => entry.storage.get(key) ?? null, setItem: (key, value) => entry.storage.set(key, value), removeItem: key => entry.storage.delete(key) }
     let manager
     const owned = () => active(entry) && entry.manager === manager
     manager = streamFactory({ apiUrl, wsUrl, fetchImpl, WebSocketImpl, cryptoImpl, AbortControllerImpl, setTimer, clearTimer, storage,
       onSnapshot(scope, workspaceId, snapshot) {
         if (!owned() || scope !== 'workspace' || workspaceId !== entry.guard.workspaceId || snapshot.snapshotProfile !== FULL_SNAPSHOT_PROFILE) return false
+        onActivity(entry.guard, 'pause')
         if (onSnapshot(entry.guard, snapshot.items) === false) return false
         entry.seeded = true
         return owned()
@@ -137,6 +144,9 @@ export function createTaskGraphLive({ apiUrl, wsUrl, isCurrent, onSnapshot, onSt
           entry.eventIds.add(event.event_id)
           if (entry.eventIds.size > MAX_EVENT_IDS) entry.eventIds.delete(entry.eventIds.values().next().value)
           if (['task', 'project', 'task_dependency', 'workspace'].includes(event.entity?.type)) dirty(entry)
+          if (event.entity.type === 'task_session' || (event.entity.type === 'agent_session' && (event.entity.action !== 'updated' || event.invalidations.some(value => value.kind === 'collection' && value.target === 'active_sessions:' + workspaceId)))) onActivity(entry.guard, 'invalidate')
+        } else if (frame.type === 'session_activity_changed') {
+          if (frame.workspace_id === workspaceId) onActivity(entry.guard, 'invalidate')
         } else if (!['access_revoked', 'access_granted', 'session_activity_changed'].includes(frame.type)) { reseed(entry); return false }
         return true
       }
@@ -178,7 +188,7 @@ export function createTaskGraphLive({ apiUrl, wsUrl, isCurrent, onSnapshot, onSt
         entry.restartStream = false; entry.reseeds = 0; entry.dirty = false; entry.storage.clear(); emit(entry, 'recovering'); connect(entry)
       } else { entry.dirty = true; refresh(entry) }
     },
-    retire() { const entry = current; if (entry) { onState(entry.guard, 'retired', 'authority_changed'); cancel() } },
+    retire() { const entry = current; if (entry) { onState(entry.guard, 'retired', 'authority_changed'); onActivity(entry.guard, 'retire'); cancel() } },
     cancel
   }
 }

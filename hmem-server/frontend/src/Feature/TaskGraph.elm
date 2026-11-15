@@ -36,6 +36,7 @@ type alias State =
     , pending : Bool
     , live : Bool
     , revision : Int
+    , runningChildren : Dict String Int
     }
 
 
@@ -90,7 +91,7 @@ visibleGraph filters raw =
 
 init : State
 init =
-    { guard = Nothing, status = Idle, graph = Nothing, pending = False, live = False, revision = 0 }
+    { guard = Nothing, status = Idle, graph = Nothing, pending = False, live = False, revision = 0, runningChildren = Dict.empty }
 
 
 begin : Guard -> State
@@ -131,7 +132,7 @@ markLive guard state =
 invalidate : Guard -> String -> State -> State
 invalidate guard message state =
     if state.guard == Just guard then
-        { state | status = Failed message, pending = False, graph = Nothing, live = False }
+        { state | status = Failed message, pending = False, graph = Nothing, live = False, runningChildren = Dict.empty }
     else state
 
 
@@ -160,7 +161,8 @@ acceptSnapshot guard items state =
             Ok snapshot ->
                 if not (Dict.member guard.projectId snapshot.projects) then invalidate guard "selected graph project is unavailable" state
                 else case project guard.projectId snapshot of
-                    Ok graph -> { state | status = Ready, graph = Just graph, pending = False, live = False, revision = state.revision + 1 }
+                    Ok graph -> { state | status = Ready, graph = Just graph, pending = False, live = False, revision = state.revision + 1
+                        , runningChildren = Dict.values snapshot.tasks |> List.filter (\task -> task.status == Api.InProgress) |> List.filterMap .parentId |> List.foldl (\id -> Dict.update id (\count -> Just (1+Maybe.withDefault 0 count))) Dict.empty }
                     Err message -> fail guard message state
 
 

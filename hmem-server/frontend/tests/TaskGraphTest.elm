@@ -34,6 +34,10 @@ suite =
                             , ownership = Dict.get "b" graph.tasks |> Maybe.map (\task -> ( task.projectId, task.parentId, task.external ))
                             , subtask = Dict.get "s2" graph.tasks |> Maybe.map (\task -> ( task.parentId, task.status ))
                             }
+        , test "external parent presentation counts running direct children from the complete snapshot without adding them to the scene" <| \_ ->
+            let
+                state=TaskGraph.acceptSnapshot guard [workspaceItem,projectItem "p" Nothing,projectItem "external" Nothing,taskItem "a" (Just "p") Nothing "todo",taskItem "parent" (Just "external") Nothing "blocked",taskItem "hidden-child" (Just "external") (Just "parent") "in_progress",dependency "a" "parent"] (TaskGraph.begin guard)
+            in Expect.equal (Just 1,Just ["a","parent"]) (Dict.get "parent" state.runningChildren,state.graph |> Maybe.map (.tasks >> Dict.keys))
         , test "empty selected projects remain a complete empty graph" <|
             \_ ->
                 let

@@ -5916,7 +5916,10 @@ textarea.observation-edit-content {
 .task-graph-node:hover { outline: 1px solid #818cf8; outline-offset: -1px; }
 .task-graph-node:focus-visible { outline: 3px solid #818cf8; outline-offset: -3px; }
 .task-graph-node-title { width: 100%; white-space: normal; overflow-wrap: anywhere; font-weight: 600; }
-.task-graph-node .task-graph-status { flex: none; max-width: 100%; white-space: normal; line-height: 18px; }
+.task-graph-node-meta { display: flex; align-items: center; gap: 8px; }
+.task-graph-node .task-graph-status { flex: none; max-width: 100%; white-space: normal; font-family: Arial; line-height: normal; }
+/* Match the native hierarchy select's field fallback for the raw enum class. */
+.task-graph-status.badge-in_progress { background: Field; color: FieldText; }
 
 .titlebar-breadcrumbs .focus-crumb { white-space: normal; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 

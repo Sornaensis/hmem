@@ -36,6 +36,10 @@ inside their parent card.
 The graph refreshes as readable tasks, projects and dependencies change. If an
 update fails, the previous diagram stays visible with a stale notice; choose
 **Retry** to reconnect and refresh it.
+Status labels and card surfaces match the hierarchy cards. A spinning green light
+marks an active agent session directly associated with that task, including a
+quiet session. If activity cannot be checked, the light clears; use **Retry agent
+activity** to check again.
 
 **Show Done** and **Show Cancelled** start enabled. Turn either off to hide those
 cards and their incident arrows. A visible subtask whose parent is hidden appears

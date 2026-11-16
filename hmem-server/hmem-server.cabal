@@ -566,6 +566,7 @@ test-suite hmem-server-test
       HMem.Server.KeycloakHarness
       HMem.Server.KeycloakHarnessSpec
       HMem.Server.LocalSandboxSpec
+      HMem.Server.LoggingSpec
       HMem.Server.LogRotationSpec
       HMem.Server.ObservationDiscoverySpec
       HMem.Server.OidcCallbackSpec

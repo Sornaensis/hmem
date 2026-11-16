@@ -17,6 +17,7 @@ module HMem.Server.TestHarness
   , withDeployedSandboxAppEnv
   , withDeployedSandboxAppContext
   , withDeployedSandboxAppConfig
+  , withDeployedSandboxAppLogged
   , withDeployedSandboxCrossOriginAppContext
   , createDeployedSandboxUser
   , createDeployedSandboxUserWithSubject
@@ -40,7 +41,7 @@ import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
-import Network.Wai (Application)
+import Network.Wai (Application, Middleware)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Data.String (fromString)
 
@@ -247,7 +248,12 @@ withDeployedSandboxCrossOriginAppContext origins =
   withDeployedSandboxAppConfig (`mkDeployedSandboxCrossOriginConfig` origins)
 
 withDeployedSandboxAppConfig :: (TestEnv -> Config.HMemConfig) -> (DeployedSandboxApp -> IO a) -> IO a
-withDeployedSandboxAppConfig mkCfg action = withClearedAmbientSandboxProfileEnv $
+withDeployedSandboxAppConfig = withDeployedSandboxAppLogged id
+
+-- | The deployed sandbox with a supplied request logger in its production
+-- position inside the request-ID middleware.
+withDeployedSandboxAppLogged :: Middleware -> (TestEnv -> Config.HMemConfig) -> (DeployedSandboxApp -> IO a) -> IO a
+withDeployedSandboxAppLogged requestLogger mkCfg action = withClearedAmbientSandboxProfileEnv $
   withTestEnv $ \env -> do
     tracker <- newAccessTracker env.pool 3600
     wsState <- newWSState
@@ -255,7 +261,7 @@ withDeployedSandboxAppConfig mkCfg action = withClearedAmbientSandboxProfileEnv 
     if env.testDb.testDbUnsafeExternal
       then fail "Deployed sandbox profile refuses unsafe external DB mode"
       else pure ()
-    app <- mkApp id cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState cfg.web.webStaticDir True
+    app <- mkApp requestLogger cfg.auth cfg.cors cfg.rateLimit env.pool tracker wsState cfg.web.webStaticDir True
     action DeployedSandboxApp
       { deployedEnv = env
       , deployedConfig = cfg

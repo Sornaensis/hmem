@@ -135,7 +135,8 @@ sanitized snapshot and its byte count and digest.
 
 ## Query-free access logging
 
-The application JSON request logger records `rawPathInfo`, without query strings.
+The application JSON request logger records route templates, without raw paths,
+identifiers or query strings; see the [request logging reference](request-logging.md).
 Configure every upstream access log similarly. For example, an Nginx log format
 can use `$uri` and must not include `$request`, `$request_uri`, `$args` or request
 headers containing credentials:

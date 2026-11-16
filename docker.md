@@ -123,8 +123,9 @@ preview isolation automatically.
 
 Keep queries and credential headers out of all proxy/access/tracing logs: use
 query-free `$uri`, not `$request_uri`, `$request` or `$args`, in an Nginx access
-format. The application request logger records query-free paths; this does not
-certify upstream operator-controlled layers. See the
+format. The application request logger records route templates without
+queries or identifiers ([request logging](docs/reference/request-logging.md));
+this does not certify upstream operator-controlled layers. See the
 [document capability deployment settings and log example](docs/reference/document-capabilities.md#configuration).
 Do not forward application Cookie/Authorization headers to the preview virtual
 host or install browser authentication there. It sets no cookies and serves no

@@ -21,6 +21,8 @@ it.
 | `complete_ms` | Admission to completion or failure. |
 
 Paths, identifiers, query strings, headers and bodies are not logged.
+[Session traffic telemetry](session-traffic-telemetry.md) adds fixed outcomes
+for session capture routes, including why a prefix proof was unknown.
 
 ## Duration boundaries
 

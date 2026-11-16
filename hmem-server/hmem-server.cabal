@@ -131,6 +131,7 @@ library
       HMem.Server.SessionOccurrence
       HMem.Server.SessionPrefix
       HMem.Server.SessionReaper
+      HMem.Server.SessionTraffic
       HMem.Server.Snapshot
       HMem.Server.Static
       HMem.Server.WebSocket

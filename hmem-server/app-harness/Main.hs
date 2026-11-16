@@ -56,7 +56,7 @@ import HMem.Server.AccessTracker (flushNow, newAccessTracker)
 import HMem.Server.App (mkAppWithPrefixProofs)
 import HMem.Server.CtlArchives (ArchivesOperation(..), runArchivesOperationWithPool)
 import HMem.Server.Document.Worker (withPreviewWorker)
-import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
+import HMem.Server.SessionPrefix (newPrefixRegistryLogging, closePrefixRegistry)
 import HMem.Server.AuthBootstrap qualified as AuthBootstrap
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
@@ -248,7 +248,7 @@ runHarnessEnvWith qualified wsState opts env = do
           (newFastLogger (LogFile fileSpec defaultBufSize))
           (\(_, cleanupLog) -> cleanupLog)
           (\(logAction, _) -> bracket_ (attachWebSocketTelemetryLog wsState logAction) (detachWebSocketTelemetryLog wsState) $
-            bracket (newPrefixRegistry env.pool) closePrefixRegistry $ \prefixes -> do
+            bracket (newPrefixRegistryLogging logAction env.pool) closePrefixRegistry $ \prefixes -> do
             let logger = newLogger logAction (parseLogLevel "info")
             requestLogger <- jsonRequestLogger logAction
 

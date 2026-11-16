@@ -22,6 +22,8 @@ import Data.Map.Strict qualified as Map
 import Data.Char (toLower)
 import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
+import Data.Int (Int64)
+import GHC.Clock (getMonotonicTime)
 import GHC.Conc (threadStatus, ThreadStatus(..))
 import HMem.AgentSession qualified as Core
 import HMem.AgentSession.Transport qualified as Wire
@@ -47,7 +49,8 @@ import HMem.MCP.TaskTriage (validateArchive, validateArchiveWith)
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkAppWithPrefixProofs)
 import HMem.Server.Archive.Worker (runArchiveLease)
-import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
+import HMem.Server.SessionPrefix (PrefixRegistry, newPrefixRegistry, newPrefixRegistryAt, closePrefixRegistry, prefixTraffic)
+import HMem.Server.SessionTraffic (ComputeStats(..), RequestStats(..), SessionTrafficSnapshot(..), readSessionTraffic)
 import HMem.Server.WebSocket (newWSState)
 import HMem.SessionArchive.Codec qualified as ArchiveCodec
 import HMem.SessionArchive.Replacement qualified as Replacement
@@ -58,7 +61,7 @@ import Network.Wai qualified as Wai
 import Network.HTTP.Types (hAuthorization, status200)
 import Network.HTTP.Types.URI (parseQuery)
 import System.Directory
-import System.Environment (getEnv)
+import System.Environment (getEnv, lookupEnv)
 import System.IO
 import System.Process (createPipe)
 import System.Process qualified as Process
@@ -306,6 +309,50 @@ spec = describe "Session follower" $ do
         readTVarIO pages >>= (`shouldSatisfy` (>=3))
         part <- Sessions.readSessionRange env.pool wid sid 0 100
         part.bytes `shouldBe` "{}\n[]\n"
+
+  it "FollowerTraffic counts one lifecycle's requests, proof recovery and committed bytes and emits one fixed-label summary" $
+    withBackend $ \env wid manager base -> withSourceFile "{}\n[]\n" $ \path -> withCapturedHTTP base $ \captured -> do
+      sid <- UUID.nextRandom
+      _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing Nothing wid)
+      _ <- Sessions.appendSession env.pool wid sid (Core.AppendSession 0 0 "{}\n" False)
+      missing <- newTVarIO False; summaries <- newTVarIO ([] :: [Value])
+      let action verb target body = do
+            lose <- if verb == "GET" && "/prefix-verifications/" `T.isInfixOf` T.pack target
+              then atomically $ do old <- readTVar missing; writeTVar missing True; pure (not old)
+              else pure False
+            if lose then pure (Left (HTTPStatus 404)) else followerRequest captured verb target body
+          sink value = atomically $ modifyTVar' summaries (<> [value])
+          counted :: FollowerTraffic -> (Text,Text) -> Int
+          counted traffic key = Map.findWithDefault 0 key traffic.requests
+      withRegistry fast {requestOverride = Just action, trafficLog = Just sink} $ \registry -> do
+        _ <- start registry manager base wid sid path
+        _ <- await registry manager base wid sid (\value -> hasOffset 6 value && hasStatus "caught_up" value)
+        Just live <- followerTraffic registry sid
+        counted live ("metadata","ok") `shouldBe` 1
+        counted live ("proof_poll","verification_unknown") `shouldBe` 1
+        counted live ("append","ok") `shouldBe` 1
+        sum [count | ((route,_),count) <- Map.toList live.requests, route == "proof_submit"] `shouldSatisfy` (>= 2)
+        (live.proofRecoveries,live.committedBytes,live.transientRetries,live.emitted) `shouldBe` (1,3,0,False)
+        live.localHashBytes `shouldSatisfy` (>= 6)
+        readTVarIO summaries `shouldReturn` []
+        _ <- control registry manager base wid sid "session_upload_stop"
+        _ <- await registry manager base wid sid (hasStatus "stopped")
+        Just final <- followerTraffic registry sid
+        final.emitted `shouldBe` True
+        emitted <- readTVarIO summaries
+        length emitted `shouldBe` 1
+        let summary = head emitted
+        field "event" summary `shouldBe` Just (String "session_follower_traffic")
+        field "status" summary `shouldBe` Just (String "stopped")
+        field "proof_recoveries" summary `shouldBe` Just (Number 1)
+        field "committed_bytes" summary `shouldBe` Just (Number 3)
+        let encoded = TE.decodeUtf8 (BL.toStrict (encode summary))
+        forM_ [T.pack (show sid), T.pack (show wid), T.pack path] $ \secret -> encoded `shouldSatisfy` (not . T.isInfixOf secret)
+      readTVarIO summaries >>= (`shouldSatisfy` ((== 1) . length))
+
+  it "SessionTrafficMeasurement attributes matched cohort traffic and proof misses (opt-in)" $ do
+    enabled <- lookupEnv "HMEM_SESSION_TRAFFIC_MEASUREMENT"
+    if enabled /= Just "1" then pendingWith "opt-in session traffic attribution measurement" else measureSessionTraffic
 
   it "PrefixProofClient bounds repeated operation loss despite pending acknowledgements" $
     withBackend $ \env wid manager base -> withSourceFile "{}\n[]\n" $ \path -> withCapturedHTTP base $ \captured -> do
@@ -1255,6 +1302,171 @@ spec = describe "Session follower" $ do
 
 fast :: FollowerOptions
 fast = defaultFollowerOptions {intervalMicros = 1000, controlWaitMicros = 50000, helperExecutable = testHelperExecutable}
+
+-- Opt-in traffic attribution: production follower cadence against a real
+-- server, database and prefix registry, with matched three-follower cohorts.
+-- Each cohort owns a fresh primary and replacement server process model that
+-- share the database; a restart routes the followers to the replacement.
+-- A mixed cohort has one quiet follower beside three live peers.
+data TrafficMode = TrafficLive | TrafficQuiet | TrafficMixed deriving Eq
+
+data TrafficServers = TrafficServers
+  { route :: TVar CapturedHTTP, replacementHTTP :: CapturedHTTP, fixtureHTTP :: CapturedHTTP
+  , skew :: TVar NominalDiffTime, workspaceId :: UUID, fixtureSession :: UUID }
+
+measureSessionTraffic :: IO ()
+measureSessionTraffic = withTestEnv $ \env -> do
+  wid <- (.id) <$> createTestWorkspace env "traffic-measurement"
+  runSession env.pool $ SQL.sql ("INSERT INTO tasks(id,workspace_id,title,status) VALUES ('"<>BS8.pack (show wid)<>"','"<>BS8.pack (show wid)<>"','Traffic measurement task','in_progress')")
+  let mib = 1048576
+      none _ = pure Null
+  small <- trafficCohort env wid "small_live" mib TrafficLive none Nothing
+  large <- trafficCohort env wid "large_live" (100*mib) TrafficLive none Nothing
+  restart <- trafficCohort env wid "restart" mib TrafficQuiet (\servers -> Null <$ atomically (writeTVar servers.route servers.replacementHTTP)) (Just "unknown_since_start")
+  expiry <- trafficCohort env wid "expiry" mib TrafficQuiet (\servers -> Null <$ atomically (modifyTVar' servers.skew (+301))) (Just "expired")
+  eviction <- trafficCohort env wid "eviction" mib TrafficQuiet evictTerminalResults (Just "evicted")
+  mixed <- trafficCohort env wid "mixed_churn" mib TrafficMixed none Nothing
+  putStrLn ("session traffic measurement: " <> T.unpack (TE.decodeUtf8 (BL.toStrict (encode [small,large,restart,expiry,eviction,mixed]))))
+
+trafficCohort :: TestEnv -> UUID -> Text -> Int64 -> TrafficMode -> (TrafficServers -> IO Value) -> Maybe Text -> IO Value
+trafficCohort env wid name prefix mode disturb expected = do
+  skew <- newTVarIO 0
+  fixture <- UUID.nextRandom
+  _ <- Sessions.createSession env.pool (Core.CreateSession fixture wid "jsonl" "Test session work" Nothing Nothing wid)
+  let serverNow = addUTCTime <$> readTVarIO skew <*> getCurrentTime
+      chunk = BS.concat (replicate 1024 ("{\"type\":\"traffic\",\"pad\":\"" <> BS.replicate 996 97 <> "\"}\n"))
+      record = BS.concat (replicate 6 (BS.take 1024 chunk))
+      unused = "http://unused.invalid"
+  bracket (newPrefixRegistryAt serverNow env.pool) closePrefixRegistry $ \primary ->
+    bracket (newPrefixRegistryAt serverNow env.pool) closePrefixRegistry $ \replacement ->
+    withTrafficApp env primary $ \baseA -> withTrafficApp env replacement $ \baseB ->
+    withCapturedHTTP baseA $ \capA -> withCapturedHTTP baseB $ \capB -> withCapturedHTTP baseA $ \capFixture -> withManager $ \manager -> do
+      route <- newTVarIO capA
+      let servers = TrafficServers route capB capFixture skew wid fixture
+          action verb target body = readTVarIO route >>= \cap -> followerRequest cap verb target body
+          options = defaultFollowerOptions {helperExecutable = testHelperExecutable, requestOverride = Just action}
+      withTrafficSources (if mode == TrafficMixed then 4 else 3) (seedTrafficSource env wid prefix chunk) $ \sources -> withRegistry options $ \registry -> do
+        started <- getMonotonicTime
+        forM_ sources $ \(sid,path) -> start registry manager unused wid sid path
+        forM_ sources $ \(sid,_) -> awaitFor 300 registry manager wid sid (\value -> hasStatus "caught_up" value && hasOffset (fromIntegral prefix) value)
+        resumed <- getMonotonicTime
+        fixtureTraffic <- case mode of
+          TrafficQuiet -> do
+            threadDelay 12000000
+            value <- disturb servers
+            threadDelay 22000000
+            pure value
+          _ -> do
+            let live = if mode == TrafficMixed then drop 1 sources else sources
+                tick :: Int -> IO ()
+                tick n = when (n > 0) $ do
+                  forM_ live $ \(_,path) -> BS.appendFile path record
+                  threadDelay 100000
+                  tick (n-1)
+            Null <$ tick (if mode == TrafficMixed then 600 else 300)
+        observed <- getMonotonicTime
+        receipts <- forM sources $ \(sid,path) -> do
+          _ <- control registry manager unused wid sid "session_upload_stop"
+          final <- awaitFor 300 registry manager wid sid (\value -> hasStatus "stopped" value || hasStatus "failed" value)
+          size <- withBinaryFile path ReadMode hFileSize
+          pure (hasStatus "stopped" final && nested ["receipt","source_verified"] final == Just (Bool True)
+            && nested ["receipt","committed_offset"] final == Just (Number (fromIntegral size)))
+        stopped <- getMonotonicTime
+        traffic <- mapM (fmap (fromMaybe (error "follower traffic missing")) . followerTraffic registry . fst) sources
+        serverA <- readSessionTraffic (prefixTraffic primary)
+        serverB <- readSessionTraffic (prefixTraffic replacement)
+        length (filter id receipts) `shouldBe` length sources
+        forM_ expected $ \reason -> do
+          let misses :: SessionTrafficSnapshot -> Int
+              misses snapshot = maybe 0 (.count) (Map.lookup ("proof_lookup","verification_unknown",reason) snapshot.requestStats)
+          misses serverA + misses serverB `shouldSatisfy` (>= 1)
+        let followerRequests = Map.unionsWith (+) (map (.requests) traffic)
+            ms from to = (to - from) * 1000 :: Double
+            snapshotValue :: SessionTrafficSnapshot -> Value
+            snapshotValue snapshot = object
+              [ "requests" .= [object ["route" .= r, "outcome" .= o, "reason" .= reason, "count" .= stats.count, "bytes" .= stats.bytes]
+                  | ((r,o,reason),stats) <- Map.toList snapshot.requestStats]
+              , "compute" .= [object ["result" .= result, "prefix" .= bucket, "proofs" .= stats.proofs, "prefix_bytes" .= stats.prefixBytes, "total_ms" .= stats.totalMs, "max_ms" .= stats.maxMs]
+                  | ((result,bucket),stats) <- Map.toList snapshot.computeStats]
+              , "dropped_events" .= snapshot.droppedEvents ]
+        pure $ object
+          [ "cohort" .= name, "followers" .= length sources, "prefix_bytes" .= prefix
+          , "mode" .= (case mode of TrafficLive -> "live"; TrafficQuiet -> "quiet"; TrafficMixed -> "mixed" :: Text)
+          , "resume_ms" .= ms started resumed, "observe_ms" .= ms resumed observed, "stop_ms" .= ms observed stopped
+          , "receipts_verified" .= length (filter id receipts)
+          , "follower" .= object
+              [ "requests" .= [object ["route" .= r, "outcome" .= o, "count" .= c] | ((r,o),c) <- Map.toList followerRequests]
+              , "committed_bytes" .= sum (map (.committedBytes) traffic), "local_hash_bytes" .= sum (map (.localHashBytes) traffic)
+              , "proof_recoveries" .= sum (map (.proofRecoveries) traffic), "transient_retries" .= sum (map (.transientRetries) traffic) ]
+          , "lifecycles" .= [object
+              [ "requests" .= [object ["route" .= r, "outcome" .= o, "count" .= c] | ((r,o),c) <- Map.toList lifecycle.requests]
+              , "committed_bytes" .= lifecycle.committedBytes, "local_hash_bytes" .= lifecycle.localHashBytes
+              , "proof_recoveries" .= lifecycle.proofRecoveries ] | lifecycle <- traffic]
+          , "server" .= object ["primary" .= snapshotValue serverA, "replacement" .= snapshotValue serverB]
+          , "fixture" .= fixtureTraffic ]
+
+withTrafficApp :: TestEnv -> PrefixRegistry -> (String -> IO a) -> IO a
+withTrafficApp env registry action = do
+  tracker <- newAccessTracker env.pool 3600
+  websocket <- newWSState
+  let cfg = Config.defaultConfig
+      auth = cfg.auth {Config.mode = Config.AuthModeDeployed, Config.enabled = False}
+      principal = Principal ActorBot "follower-tests" "Follower test" PrincipalSyntheticLocalSuperadmin
+      authorized app req respond = withPrincipalContext (Just principal) (app req respond)
+  app <- mkAppWithPrefixProofs registry Nothing cfg.changeStream authorized auth cfg.cors cfg.rateLimit env.pool tracker websocket Nothing True
+  testWithApplication (pure app) $ \port -> action ("http://127.0.0.1:" <> show port)
+
+withTrafficSources :: Int -> IO (UUID, FilePath) -> ([(UUID, FilePath)] -> IO a) -> IO a
+withTrafficSources count acquire action
+  | count <= 0 = action []
+  | otherwise = bracket acquire (removeFile . snd) $ \source -> withTrafficSources (count-1) acquire (action . (source :))
+
+seedTrafficSource :: TestEnv -> UUID -> Int64 -> BS.ByteString -> IO (UUID, FilePath)
+seedTrafficSource env wid prefix chunk = do
+  sid <- UUID.nextRandom
+  _ <- Sessions.createSession env.pool (Core.CreateSession sid wid "jsonl" "Test session work" Nothing Nothing wid)
+  temp <- getTemporaryDirectory
+  (path,handle) <- openBinaryTempFile temp "hmem-traffic-jsonl"
+  let pieces = fromIntegral (prefix `div` fromIntegral (BS.length chunk)) :: Int
+      seedDatabase offset revision remaining = when (remaining > 0) $ do
+        result <- Sessions.appendSession env.pool wid sid (Core.AppendSession offset revision chunk False)
+        seedDatabase result.session.committedBytes result.session.revision (remaining - 1 :: Int)
+  (do
+    forM_ [1..pieces] (\_ -> BS.hPut handle chunk)
+    hClose handle
+    seedDatabase 0 0 pieces) `onException` (hClose handle >> removeFile path)
+  pure (sid,path)
+
+-- Sixteen later terminal results evict the followers' retained proofs.
+evictTerminalResults :: TrafficServers -> IO Value
+evictTerminalResults servers = do
+  let path = "/api/v1/workspaces/" <> show servers.workspaceId <> "/sessions/" <> show servers.fixtureSession <> "/prefix-verifications"
+  lookups <- forM [1..16 :: Int] $ \_ -> do
+    operation <- UUID.nextRandom
+    submitted <- followerRequest servers.fixtureHTTP "POST" path (Just (toJSON (Wire.PrefixProofRequest operation 0 0 (Core.sessionSha256 ""))))
+    submitted `shouldSatisfy` either (const False) (const True)
+    let poll count = do
+          result <- followerRequest servers.fixtureHTTP "GET" (path <> "/" <> show operation) Nothing
+          case result of
+            Right value | field "state" value == Just (String "pending") -> threadDelay 10000 >> poll (count+1)
+            Right value | field "state" value == Just (String "verified") -> pure (count+1)
+            _ -> expectationFailure "fixture proof did not verify" >> pure (count+1)
+    timeout 10000000 (poll (0 :: Int)) >>= maybe (expectationFailure "fixture proof deadline" >> pure 0) pure
+  pure (object ["proof_submits" .= length lookups, "proof_lookups" .= sum lookups])
+
+awaitFor :: Double -> Registry -> Manager -> UUID -> UUID -> (Value -> Bool) -> IO Value
+awaitFor seconds registry manager wid sid predicate = do
+  result <- timeout (round (seconds * 1000000)) loop
+  case result of
+    Just value -> pure value
+    Nothing -> do
+      current <- control registry manager "http://unused.invalid" wid sid "session_upload_status"
+      expectationFailure ("Traffic cohort deadline: " <> show current)
+      pure current
+  where
+    loop = do
+      current <- control registry manager "http://unused.invalid" wid sid "session_upload_status"
+      if predicate current then pure current else threadDelay 50000 >> loop
 
 helperProbe :: Text -> BS.ByteString
 helperProbe phase = BL.toStrict $ encode $ object ["url" .= ("http://127.0.0.1:0/" :: Text),"method" .= ("GET" :: Text),"headers" .= ([] :: [(Text,Text)]),"body" .= Null,"probe" .= phase]

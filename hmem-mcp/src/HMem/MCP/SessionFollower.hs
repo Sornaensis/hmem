@@ -2,6 +2,7 @@
 module HMem.MCP.SessionFollower
   ( Registry, FollowerOptions(..), defaultFollowerOptions, newRegistry, newRegistryWith
   , closeRegistry, uploadToolDefinitions, isUploadTool, handleUploadTool, registryMetrics
+  , FollowerTraffic(..), followerTraffic, followerTrafficValue
   ) where
 
 import Control.Concurrent
@@ -45,9 +46,12 @@ data FollowerOptions = FollowerOptions
   , transition :: Text -> IO ()
   , helperExecutable :: IO FilePath
   , processScopeFactory :: IO ProcessScope
+  -- Optional diagnostics sink receiving one fixed-label traffic summary per
+  -- follower lifecycle when it reaches a terminal state.
+  , trafficLog :: Maybe (Value -> IO ())
   }
 defaultFollowerOptions :: FollowerOptions
-defaultFollowerOptions = FollowerOptions getCurrentTime 1000000 900000 2000000 Nothing forkIOWithUnmask (const (pure ())) getExecutablePath newProcessScope
+defaultFollowerOptions = FollowerOptions getCurrentTime 1000000 900000 2000000 Nothing forkIOWithUnmask (const (pure ())) getExecutablePath newProcessScope Nothing
 
 data Registry = Registry
   { jobs :: TVar (Map.Map UUID Job), order :: TVar [UUID], closed :: TVar Bool
@@ -58,8 +62,20 @@ data Registry = Registry
 data Job = Job
   { sid :: UUID, workspace :: UUID, sourcePath :: FilePath, formatLabel :: Text, title :: Text, parentSessionId :: Maybe UUID, initialRuntimeIdentity :: Maybe Core.RuntimeIdentity, taskId :: UUID, imported :: Bool
   , http :: CapturedHTTP, state :: TVar JobState, control :: TVar (Maybe Control)
-  , busy :: TVar Bool
+  , busy :: TVar Bool, traffic :: TVar FollowerTraffic
   }
+
+-- | Per-lifecycle follower HTTP and verification work. Labels are fixed;
+-- paths, identifiers and transcript bytes are never recorded.
+data FollowerTraffic = FollowerTraffic
+  { registeredAt :: !UTCTime
+  , requests :: !(Map.Map (Text,Text) Int) -- ^ (route, outcome) counts
+  , committedBytes :: !Int64 -- ^ bytes committed by this lifecycle's appends
+  , localHashBytes :: !Int64 -- ^ local source bytes hashed by verification sweeps
+  , proofRecoveries :: !Int -- ^ lost proof operations restarted with a new UUID
+  , transientRetries :: !Int
+  , emitted :: !Bool
+  } deriving (Show, Eq)
 data Control = Control
   { operationId :: UUID, stop :: Bool, boundary :: Maybe Int64, result :: Maybe Value, completion :: TMVar Value }
 data SweepPurpose = Resume | Periodic | Receipt deriving (Eq)
@@ -191,6 +207,7 @@ closeRegistry registry = mask $ \restore -> do
         atomically $ do
           completeControl job (object ["error" .= ("process_shutdown" :: Text), "source_verified" .= False])
           modifyTVar' job.state (\s -> s {source = Nothing, phase = if terminal s.phase then s.phase else "stopped", completedAt = if terminal s.phase then s.completedAt else Just time, failure = if terminal s.phase then s.failure else Just "process_shutdown"})
+        _ <- try @SomeException (emitTraffic registry job)
         putMVar done (either (const False) (const True) outcome)
     pure done
   closed <- timeout registry.options.shutdownMicros $ restore $ do
@@ -217,7 +234,8 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
           , nextVerification = time, lastProof = Nothing, lostProofs = 0
           , importScan = Nothing, importManifest = Nothing, importDeadline = if name == "session_import" then Just (addUTCTime 900 time) else Nothing, importCompleted = Nothing }
         control <- newTVarIO Nothing; busy <- newTVarIO False
-        let job = Job sid workspace path label title parentSessionId initialRuntimeIdentity taskId (name == "session_import") captured state control busy
+        traffic <- newTVarIO (FollowerTraffic time Map.empty 0 0 0 0 False)
+        let job = Job sid workspace path label title parentSessionId initialRuntimeIdentity taskId (name == "session_import") captured state control busy traffic
         result <- atomically $ do
           closing <- readTVar registry.closed
           existing <- readTVar registry.jobs
@@ -355,13 +373,16 @@ retireWithDetails registry job phase reason details = do
   atomically $ do
     completeControl job (object ["error" .= reason, "source_verified" .= False])
     modifyTVar' job.state (\s -> s {phase = phase, source = Nothing, failure = Just (either (const "source_close_failed") (const reason) closed), failureDetails = either (const Nothing) (const details) closed, completedAt = Just time})
+  emitTraffic registry job
 
 request :: Registry -> Job -> ByteString -> String -> Maybe Value -> IO (Either HTTPFault Value)
 request registry job verb suffix body = bracket_ acquire release $ do
   let path = "/api/v1/workspaces/" <> show job.workspace <> "/sessions/" <> show job.sid <> suffix
-  case registry.options.requestOverride of
+  result <- case registry.options.requestOverride of
     Nothing -> followerRequest job.http verb path body
     Just action -> action verb path body
+  countRequest job (requestRoute verb suffix) result
+  pure result
   where
     acquire = atomically $ do
       n <- readTVar registry.slots
@@ -371,6 +392,75 @@ request registry job verb suffix body = bracket_ acquire release $ do
     release = atomically $ do
       poisoned <- scopePoisoned registry.processScope
       if poisoned then writeTVar registry.closed True else modifyTVar' registry.slots (subtract 1)
+
+requestRoute :: ByteString -> String -> Text
+requestRoute verb suffix = case (verb, suffix) of
+  ("GET", "") -> "metadata"
+  ("POST", "/heartbeat") -> "heartbeat"
+  ("POST", "/append") -> "append"
+  ("POST", "/prefix-verifications") -> "proof_submit"
+  ("GET", _) | "/prefix-verifications/" `T.isPrefixOf` T.pack suffix -> "proof_poll"
+  ("POST", "/terminate") -> "terminate"
+  _ -> "other"
+
+countRequest :: Job -> Text -> Either HTTPFault Value -> IO ()
+countRequest job route result = atomically $ modifyTVar' job.traffic $ \current ->
+  current {requests = Map.insertWith (+) (route, outcome) 1 current.requests}
+  where
+    proofRoute = route `elem` ["proof_submit", "proof_poll"]
+    outcome = case result of
+      Right (Object fields)
+        | proofRoute -> case KM.lookup "state" fields of
+            Just (String state) | state `elem` ["pending", "verified", "mismatch", "failed"] -> state
+            _ -> "invalid_response"
+        | route == "append", KM.lookup "replayed" fields == Just (Bool True) -> "replayed"
+      Right _ | proofRoute -> "invalid_response"
+              | otherwise -> "ok"
+      Left (HTTPStatus 404) | route == "proof_poll" -> "verification_unknown"
+      Left (HTTPStatus code) -> "http_" <> T.pack (show code)
+      Left HTTPTaskRejected{} -> "task_rejected"
+      Left HTTPUnavailable -> "unavailable"
+      Left HTTPInvalid -> "invalid_response"
+      Left HTTPTooLarge -> "too_large"
+
+noteTraffic :: Job -> (FollowerTraffic -> FollowerTraffic) -> IO ()
+noteTraffic job = atomically . modifyTVar' job.traffic
+
+-- | Current traffic counters of a follower retained by this process.
+followerTraffic :: Registry -> UUID -> IO (Maybe FollowerTraffic)
+followerTraffic registry sid = do
+  found <- Map.lookup sid <$> readTVarIO registry.jobs
+  traverse (readTVarIO . (.traffic)) found
+
+followerTrafficValue :: UTCTime -> FollowerTraffic -> Value
+followerTrafficValue time traffic = object
+  [ "lifetime_ms" .= (realToFrac (diffUTCTime time traffic.registeredAt) * 1000 :: Double)
+  , "requests" .= [object ["route" .= route, "outcome" .= outcome, "count" .= count] | ((route, outcome), count) <- Map.toList traffic.requests]
+  , "committed_bytes" .= traffic.committedBytes, "local_hash_bytes" .= traffic.localHashBytes
+  , "proof_recoveries" .= traffic.proofRecoveries, "transient_retries" .= traffic.transientRetries ]
+
+-- One diagnostics line per lifecycle, after its terminal state is published.
+emitTraffic :: Registry -> Job -> IO ()
+emitTraffic registry job = case registry.options.trafficLog of
+  Nothing -> pure ()
+  Just sink -> do
+    first <- atomically $ do
+      current <- readTVar job.traffic
+      writeTVar job.traffic current {emitted = True}
+      pure (if current.emitted then Nothing else Just current)
+    case first of
+      Nothing -> pure ()
+      Just traffic -> do
+        state <- readTVarIO job.state
+        time <- registry.options.now
+        let summary = case followerTrafficValue time traffic of
+              Object fields -> Object (KM.insert "event" (String "session_follower_traffic")
+                (KM.insert "status" (String state.phase) (KM.insert "error" (toJSON state.failure) fields)))
+              value -> value
+        outcome <- try @SomeException (sink summary)
+        case outcome of
+          Left failure | Just (_ :: SomeAsyncException) <- fromException failure -> throwIO failure
+          _ -> pure ()
 
 -- Each fair turn performs at most one HTTP request and at most one 1 MiB
 -- source read. Hash sweeps use local 1 MiB windows and freeze their N/R target.
@@ -412,7 +502,9 @@ turn registry job = do
           HTTPStatus 400 -> retire registry job "failed" "invalid_record_or_boundary"
           HTTPStatus 413 -> retire registry job "failed" "record_too_large"
           _ | state.failures >= 4 -> retire registry job "failed" "retry_exhausted"
-            | otherwise -> atomically $ modifyTVar' job.state (\current -> state {observedSize = current.observedSize, phase = "retry", failures = state.failures+1, failure = Just "transient_http", due = addUTCTime (fromIntegral (min 16 (2 ^ state.failures) :: Int)) failedAt})
+            | otherwise -> do
+                noteTraffic job (\current -> current {transientRetries = current.transientRetries + 1})
+                atomically $ modifyTVar' job.state (\current -> state {observedSize = current.observedSize, phase = "retry", failures = state.failures+1, failure = Just "transient_http", due = addUTCTime (fromIntegral (min 16 (2 ^ state.failures) :: Int)) failedAt})
       acceptSession value = do
         session <- decodeValue value
         unless ((session :: Core.AgentSession).id == job.sid && session.workspaceId == job.workspace && session.formatLabel == job.formatLabel && session.parentSessionId == job.parentSessionId && maybe True (==job.title) session.title) $ throwIO SourceChanged
@@ -431,6 +523,7 @@ turn registry job = do
         atomically $ do
           completeControl job receiptValue
           modifyTVar' job.state (settled completed state {phase="imported",source=Nothing,remote=Just session,receipt=Just receiptValue,completedAt=Just completed,lastAck=Just completed,failure=Nothing})
+        emitTraffic registry job
       begin source session = if session.state == Core.Terminated then
           if job.imported then save state {remote=Just session,importCompleted=Just session,importScan=Just (ImportScan session.committedBytes 0 hashInit BS.empty)} else retire registry job "terminated" "session_terminated"
         else acknowledge state {remote = Just session, createNeeded = False, sweep = Just (newSweep Resume session), phase = "validating"}
@@ -505,6 +598,9 @@ turn registry job = do
               Right value -> do
                 response <- decodeValue value :: IO Wire.AppendSessionResponse
                 canonical <- acceptSession (toJSON response.session)
+                let sent = fromIntegral (either (const 0) BS.length (Wire.decodeSessionBytes append.dataBase64))
+                when (canonical.committedBytes == append.expectedOffset + sent) $
+                  noteTraffic job (\current -> current {committedBytes = current.committedBytes + sent})
                 if canonical.state == Core.Terminated then if job.imported then begin source canonical else retire registry job "terminated" "session_terminated" else
                   mutated state {remote = Just canonical, pending = Nothing, phase = "following"
                     , sweep = if response.replayed || canonical.committedBytes /= append.expectedOffset + fromIntegral (either (const 0) BS.length (Wire.decodeSessionBytes append.dataBase64))
@@ -520,6 +616,7 @@ turn registry job = do
                   unless (BS.length bytes == count) $ throwIO SourceTruncated
                   let updated = hashUpdate verify.context bytes
                   updated `seq` registry.options.transition "local_prefix_page"
+                  noteTraffic job (\current -> current {localHashBytes = current.localHashBytes + fromIntegral count})
                   save state {sweep = Just verify {offset = verify.offset+fromIntegral count, context = updated}, verifyNext = False}
                 _ | verify.proven -> do
                   let digest = T.pack (show (hashFinalize verify.context :: Digest SHA256))
@@ -569,6 +666,7 @@ turn registry job = do
                               completeControl job resultValue
                               modifyTVar' job.state (settled stoppedAt state {phase = "stopped", remote = Just canonical, source = Nothing, receipt = Just resultValue
                                 , completedAt = Just stoppedAt, sweep = Nothing, pending = Nothing, lastAck = Just completed, failures = 0, failure = Nothing})
+                            emitTraffic registry job
                 _ -> case verify.proof of
                   Nothing -> do
                     let digest = T.pack (show (hashFinalize verify.context :: Digest SHA256))
@@ -589,7 +687,7 @@ turn registry job = do
                       -- when a new canonical cursor starts another sweep.
                       Left (HTTPStatus 404) | verify.submitted ->
                         if state.lostProofs >= 4 then retire registry job "failed" "verification_retry_exhausted"
-                        else save state
+                        else noteTraffic job (\current -> current {proofRecoveries = current.proofRecoveries + 1}) >> save state
                           { sweep = Just verify {offset = 0, context = hashInit, proof = Nothing, audience = Nothing, submitted = False, nextPoll = Nothing}
                           , lastProof = Nothing, lostProofs = state.lostProofs + 1
                           }
@@ -650,7 +748,9 @@ createRemote registry job = bracket_ acquire release $ do
       body = Just $ case state.importManifest of
         Just (total,digest) | job.imported -> toJSON (Wire.ImportSessionRequest metadata total digest)
         _ -> toJSON metadata
-  case registry.options.requestOverride of Nothing -> followerRequest job.http "POST" path body; Just action -> action "POST" path body
+  result <- case registry.options.requestOverride of Nothing -> followerRequest job.http "POST" path body; Just action -> action "POST" path body
+  countRequest job "create" result
+  pure result
   where
     acquire = atomically $ do n <- readTVar registry.slots; check (n < 2); writeTVar registry.slots (n+1); modifyTVar' registry.peak (max (n+1))
     release = atomically $ do

@@ -7,6 +7,7 @@ import Control.Monad (forM, forM_, replicateM, void, when)
 import Data.ByteString qualified as BS
 import Data.IORef
 import Data.List (nub,sort)
+import Data.Map.Strict qualified as Map
 import Data.Time
 import Data.UUID.V4 qualified as UUID
 import System.Timeout (timeout)
@@ -15,6 +16,7 @@ import Test.Hspec
 import HMem.AgentSession (sessionSha256)
 import HMem.AgentSession.Transport qualified as Wire
 import HMem.Server.SessionPrefix
+import HMem.Server.SessionTraffic (ComputeStats(..), MissReason(..), SessionTrafficSnapshot(..), readSessionTraffic)
 
 spec :: Spec
 spec = describe "PrefixProof service" $ do
@@ -168,6 +170,47 @@ spec = describe "PrefixProof service" $ do
       modifyIORef' clock (addUTCTime 300)
       lookupPrefixProof registry latest.workspace latest.session latest.audience latest.request.operationId `shouldReturn` Nothing
     bracket (newPrefixRegistryWith options) closePrefixRegistry $ \registry -> prefixRegistryCounts registry `shouldReturn` (0,0)
+
+  it "classifies each unknown operation internally while every lookup stays unknown" $ do
+    clock <- getCurrentTime >>= newIORef
+    let options = PrefixOptions (readIORef clock) (const (pure True)) (\_ _ -> pure BS.empty)
+        classify registry target = lookupPrefixProofClassified registry target.workspace target.session target.audience target.request.operationId
+        unknown registry target = lookupPrefixProof registry target.workspace target.session target.audience target.request.operationId `shouldReturn` Nothing
+    (survivor, foreignTarget) <- bracket (newPrefixRegistryWith options) closePrefixRegistry $ \registry -> do
+      never <- targetFor BS.empty
+      classify registry never `shouldReturn` Left MissUnknownSinceStart
+      unknown registry never
+      first <- targetFor BS.empty
+      submitPrefixProof registry first >>= (`shouldSatisfy` isRight)
+      _ <- await registry first
+      let foreignTarget = first {audience = "user:other-fixture"}
+          otherSession = first {session = never.session}
+      classify registry foreignTarget `shouldReturn` Left MissTargetMismatch
+      classify registry otherSession `shouldReturn` Left MissTargetMismatch
+      unknown registry foreignTarget
+      later <- forM [1..16 :: Int] $ \_ -> do
+        modifyIORef' clock (addUTCTime 0.001)
+        target <- targetFor BS.empty
+        submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
+        _ <- await registry target
+        pure target
+      classify registry first `shouldReturn` Left MissEvicted
+      classify registry foreignTarget `shouldReturn` Left MissTargetMismatch
+      unknown registry first
+      let survivor = last later
+      classify registry survivor >>= (`shouldSatisfy` either (const False) ((== "verified") . (.state)))
+      modifyIORef' clock (addUTCTime 300)
+      classify registry survivor `shouldReturn` Left MissExpired
+      unknown registry survivor
+      modifyIORef' clock (addUTCTime 300)
+      classify registry never `shouldReturn` Left MissUnknownOperation
+      snapshot <- readSessionTraffic (prefixTraffic registry)
+      fmap (.proofs) (Map.lookup ("verified","le_1mib") snapshot.computeStats) `shouldBe` Just 17
+      pure (survivor, foreignTarget)
+    -- A restarted process retains no operation or attribution from its predecessor.
+    bracket (newPrefixRegistryWith options) closePrefixRegistry $ \registry -> do
+      classify registry survivor `shouldReturn` Left MissUnknownSinceStart
+      classify registry foreignTarget `shouldReturn` Left MissUnknownSinceStart
 
   it "admits more than sixteen sweeps from four followers without evicting their live work" $ do
     let bytes = BS.replicate (3*1048576) 97

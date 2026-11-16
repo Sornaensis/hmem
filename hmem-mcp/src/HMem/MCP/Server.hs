@@ -35,6 +35,7 @@ import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Network.HTTP.Client (Manager, newManager, managerResponseTimeout, responseTimeoutMicro)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
+import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush, hSetBuffering, stdin, stdout, stderr, hPutStrLn, BufferMode (..), hIsEOF)
 import HMem.BotIdentity (BotIdentity)
 import HMem.MCP.SessionFollower (Registry, FollowerOptions(..), defaultFollowerOptions, newRegistryWith, closeRegistry, handleUploadTool, isUploadTool)
@@ -139,8 +140,13 @@ runMCPServerWithHandlesObservedWithFork = runMCPServerWithHandlesObservedWithFol
 runMCPServerWithHandlesObservedWithFollowerOptions :: FollowerOptions -> (IO () -> IO ThreadId) -> ([ThreadId] -> IO ()) -> Int -> Int -> Handle -> Handle -> Handle -> Manager -> String -> Maybe Text -> IO ()
 runMCPServerWithHandlesObservedWithFollowerOptions options forkWorker observeWorkers workerCount queueDepth input output errHandle mgr serverUrl mApiKey = do
   helper <- options.helperExecutable
+  -- Opt-in per-lifecycle follower traffic summaries; see reference.md.
+  diagnostics <- lookupEnv "HMEM_SESSION_TRAFFIC_DIAGNOSTICS"
+  let trafficLog = case (options.trafficLog, diagnostics) of
+        (Nothing, Just "1") -> Just (\value -> BL8.hPutStrLn errHandle (encode value))
+        (configured, _) -> configured
   bracket (HTTP.newAttachmentScope helper) cleanupAttachment $ \attachment ->
-    bracket (newRegistryWith options {helperExecutable=pure helper}) cleanupFollower $ \registry -> mask $ \restore -> do
+    bracket (newRegistryWith options {helperExecutable=pure helper, trafficLog=trafficLog}) cleanupFollower $ \registry -> mask $ \restore -> do
       lock   <- newMVar ()
       queue  <- newTBQueueIO (fromIntegral $ max 1 queueDepth)
       active <- newTVarIO (0 :: Int)

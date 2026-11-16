@@ -3,8 +3,9 @@ module HMem.Server.SessionPrefix
   ( PrefixRegistry, PrefixTarget(..), PrefixOptions(..), PrefixFault(..)
   , newPrefixRegistry, newPrefixRegistryWith, newPrefixRegistryWithWorkerHook, closePrefixRegistry
   , newPrefixRegistryWithWorkerHookAndCleanupHook
-  , newPrefixRegistryWithRequeueHook
-  , submitPrefixProof, lookupPrefixProof, prefixRegistryCounts
+  , newPrefixRegistryWithRequeueHook, newPrefixRegistryAt, newPrefixRegistryLogging
+  , submitPrefixProof, lookupPrefixProof, lookupPrefixProofClassified, prefixRegistryCounts
+  , prefixTraffic
   ) where
 
 import Control.Concurrent
@@ -15,19 +16,24 @@ import Crypto.Hash (Context, Digest, SHA256, hashInit, hashUpdate, hashFinalize)
 import Data.ByteString qualified as BS
 import Data.Int (Int64)
 import Data.List (sortOn)
+import Data.Foldable (find)
 import Data.Map.Strict qualified as Map
 import Data.Pool (Pool)
+import Data.Sequence (Seq)
+import Data.Sequence qualified as Seq
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
+import System.Log.FastLogger (FastLogger)
 import System.Timeout (timeout)
 
 import HMem.AgentSession qualified as Session
 import HMem.AgentSession.Transport qualified as Wire
 import HMem.DB.AgentSession qualified as DB
+import HMem.Server.SessionTraffic (MissReason(..), ProofResult(..), SessionTraffic, attachTrafficLog, detachTrafficLog, flushTrafficLog, newSessionTraffic, recordComputeSTM)
 
 data PrefixTarget = PrefixTarget
   { workspace :: !UUID, session :: !UUID, audience :: !Text, request :: !Wire.PrefixProofRequest }
@@ -48,12 +54,36 @@ data PrefixRegistry = PrefixRegistry
   , unfinished :: TVar [Job]
   , workers :: [(ThreadId, MVar (Either SomeException ()))], options :: PrefixOptions
   , openReader :: !(Maybe (PrefixTarget -> IO DB.SessionReader)), readerCleanupHook :: !([UUID] -> IO ())
-  , afterRequeue :: !(PrefixTarget -> IO ()) }
+  , afterRequeue :: !(PrefixTarget -> IO ())
+  , traffic :: !SessionTraffic, startedAt :: !UTCTime, tombstones :: !(TVar (Seq Tombstone)) }
+
+-- Internal attribution of removed operations only. Lookups of every missing,
+-- expired, evicted, restarted or foreign operation still return unknown.
+data Tombstone = Tombstone { operation :: !UUID, target :: !PrefixTarget, reason :: !MissReason }
+
+tombstoneLimit :: Int
+tombstoneLimit = 256
+
+-- Five-minute live deadline plus five-minute terminal retention.
+operationLifetime :: NominalDiffTime
+operationLifetime = 600
 
 newPrefixRegistry :: Pool Hasql.Connection -> IO PrefixRegistry
-newPrefixRegistry pool = newRegistry (\_ action -> action)
+newPrefixRegistry = newPrefixRegistryAt getCurrentTime
+
+-- | The production registry, writing its traffic events to the server log
+-- until 'closePrefixRegistry' detaches them.
+newPrefixRegistryLogging :: FastLogger -> Pool Hasql.Connection -> IO PrefixRegistry
+newPrefixRegistryLogging logAction pool = mask_ $ do
+  registry <- newPrefixRegistry pool
+  attachTrafficLog registry.traffic logAction `onException` closePrefixRegistry registry
+  pure registry
+
+-- | The production registry with an injectable deadline/retention clock.
+newPrefixRegistryAt :: IO UTCTime -> Pool Hasql.Connection -> IO PrefixRegistry
+newPrefixRegistryAt clock pool = newRegistry (\_ action -> action)
   (Just (\target -> DB.newSessionReader pool target.workspace target.session target.request.expectedOffset)) $
-  PrefixOptions getCurrentTime
+  PrefixOptions clock
     (\target -> DB.validateSessionPrefixBoundary pool target.workspace target.session target.request.expectedOffset target.request.expectedRevision)
     (\target -> DB.readSessionPrefixWindow pool target.workspace target.session target.request.expectedOffset)
 
@@ -84,7 +114,8 @@ newRegistryWithHooks :: (Int -> IO () -> IO ()) -> Maybe (PrefixTarget -> IO DB.
 newRegistryWithHooks hook openReader readerCleanupHook afterRequeue options = mask_ $ do
   entries <- newTVarIO Map.empty; ready <- newTBQueueIO 4; closed <- newTVarIO False
   unfinished <- newTVarIO []
-  let registry = PrefixRegistry entries ready closed unfinished [] options openReader readerCleanupHook afterRequeue
+  traffic <- newSessionTraffic; started <- options.currentTime; tombstones <- newTVarIO Seq.empty
+  let registry = PrefixRegistry entries ready closed unfinished [] options openReader readerCleanupHook afterRequeue traffic started tombstones
       spawn index = do
         done <- newEmptyMVar
         tid <- forkIOWithUnmask $ \unmask -> do
@@ -112,7 +143,7 @@ stopWorkersWith afterJoined workers = do
       unless (null failures) $ throwIO (userError ("prefix verification workers failed after all joins: " <> show (length failures)))
 
 closePrefixRegistry :: PrefixRegistry -> IO ()
-closePrefixRegistry registry = do
+closePrefixRegistry registry = flip finally (detachTrafficLog registry.traffic) $ do
   atomically $ writeTVar registry.closed True
   stopWorkersWith (do
     jobs <- atomically $ do
@@ -161,10 +192,12 @@ prune registry time = do
   entries <- readTVar registry.entries
   forM_ (Map.elems entries) $ \job -> do
     progress <- readTVar job.progress
-    when (progress.phase == "pending" && diffUTCTime time job.startedAt >= 300) $
+    when (progress.phase == "pending" && diffUTCTime time job.startedAt >= 300) $ do
       writeTVar job.progress progress { phase = "failed", failure = Just "verification_deadline", completedAt = Just time }
+      recordResult registry job time ResultFailedDeadline
   states <- mapM (readTVar . (.progress)) entries
   let expired = [key | (key,value) <- Map.toList states, Just ended <- [value.completedAt], diffUTCTime time ended >= 300]
+  bury registry MissExpired [job | key <- expired, Just job <- [Map.lookup key entries]]
   writeTVar registry.entries (foldr Map.delete entries expired)
   queued <- flushTBQueue registry.ready
   forM_ queued $ \job -> do
@@ -196,6 +229,7 @@ submitPrefixProof registry target
                 let terminal = sortOn (\(key,state) -> (state.completedAt,key)) [(key,state) | (key,state) <- Map.toList states, state.phase /= "pending"]
                     remove = map fst (take (max 0 (Map.size entries-15)) terminal)
                     retained = foldr Map.delete entries remove
+                bury registry MissEvicted [job | key <- remove, Just job <- [Map.lookup key entries]]
                 progress <- newTVar (Progress 0 hashInit "pending" Nothing Nothing)
                 admissionHeld <- newTVar True
                 let job = Job target time progress reader admissionHeld
@@ -205,14 +239,44 @@ submitPrefixProof registry target
                 Right <$> response job
 
 lookupPrefixProof :: PrefixRegistry -> UUID -> UUID -> Text -> UUID -> IO (Maybe Wire.PrefixProofResponse)
-lookupPrefixProof registry workspace session audience operation = do
+lookupPrefixProof registry workspace session audience operation =
+  either (const Nothing) Just <$> lookupPrefixProofClassified registry workspace session audience operation
+
+-- | Like 'lookupPrefixProof', with an internal reason for an unknown result.
+-- Callers see every reason as the same unknown operation.
+lookupPrefixProofClassified :: PrefixRegistry -> UUID -> UUID -> Text -> UUID -> IO (Either MissReason Wire.PrefixProofResponse)
+lookupPrefixProofClassified registry workspace session audience operation = do
   time <- registry.options.currentTime
-  atomically $ do
+  result <- atomically $ do
     prune registry time
     entries <- readTVar registry.entries
+    let matches target = target.workspace == workspace && target.session == session && target.audience == audience
     case Map.lookup operation entries of
-      Just job | job.target.workspace == workspace && job.target.session == session && job.target.audience == audience -> Just <$> response job
-      _ -> pure Nothing
+      Just job | matches job.target -> Right <$> response job
+               | otherwise -> pure (Left MissTargetMismatch)
+      Nothing -> do
+        buried <- find (\tombstone -> tombstone.operation == operation) <$> readTVar registry.tombstones
+        pure $ Left $ case buried of
+          Just tombstone | matches tombstone.target -> tombstone.reason
+                         | otherwise -> MissTargetMismatch
+          Nothing | diffUTCTime time registry.startedAt < operationLifetime -> MissUnknownSinceStart
+                  | otherwise -> MissUnknownOperation
+  flushTrafficLog registry.traffic
+  pure result
+
+-- | Request and proof-compute telemetry owned by this registry.
+prefixTraffic :: PrefixRegistry -> SessionTraffic
+prefixTraffic registry = registry.traffic
+
+-- Newest first; the bounded ring forgets the oldest attribution.
+bury :: PrefixRegistry -> MissReason -> [Job] -> STM ()
+bury registry reason jobs = unless (null jobs) $
+  modifyTVar' registry.tombstones $ \existing ->
+    Seq.take tombstoneLimit (Seq.fromList [Tombstone job.target.request.operationId job.target reason | job <- jobs] <> existing)
+
+recordResult :: PrefixRegistry -> Job -> UTCTime -> ProofResult -> STM ()
+recordResult registry job time result =
+  recordComputeSTM registry.traffic time result job.target.request.expectedOffset (diffUTCTime time job.startedAt)
 
 prefixRegistryCounts :: PrefixRegistry -> IO (Int,Int)
 prefixRegistryCounts registry = do
@@ -261,19 +325,25 @@ turn registry job = mask $ \restore -> do
         current <- readTVar job.progress
         closing <- readTVar registry.closed
         if current.phase == "pending" && not closing then do
-          let failed code = current { phase = "failed", failure = Just code, completedAt = Just updatedAt }
+          let failed code outcome = do
+                writeTVar job.progress current { phase = "failed", failure = Just code, completedAt = Just updatedAt }
+                recordResult registry job updatedAt outcome
+                pure False
           case result of
-            _ | diffUTCTime updatedAt job.startedAt >= 300 -> writeTVar job.progress (failed "verification_deadline") >> pure False
+            _ | diffUTCTime updatedAt job.startedAt >= 300 -> failed "verification_deadline" ResultFailedDeadline
             Right (Just updated)
               | updated.offset == job.target.request.expectedOffset -> do
                 let digest = T.pack (show (hashFinalize updated.context :: Digest SHA256))
-                writeTVar job.progress updated { phase = if digest == job.target.request.sha256 then "verified" else "mismatch", completedAt = Just updatedAt }
+                    matched = digest == job.target.request.sha256
+                writeTVar job.progress updated { phase = if matched then "verified" else "mismatch", completedAt = Just updatedAt }
+                recordResult registry job updatedAt (if matched then ResultVerified else ResultMismatch)
                 pure False
               | otherwise -> writeTVar job.progress updated >> writeTBQueue registry.ready job >> pure True
             Left failure | Just (Session.SessionException Session.SessionOriginalUnavailable _) <- fromException failure ->
-              writeTVar job.progress (failed "original_evidence_unavailable") >> pure False
-            _ -> writeTVar job.progress (failed "verification_unavailable") >> pure False
+              failed "original_evidence_unavailable" ResultFailedEvidence
+            _ -> failed "verification_unavailable" ResultFailedUnavailable
         else pure False
+  flushTrafficLog registry.traffic
   -- A successful handoff transfers this turn's ownership to the queue. Later
   -- expiry must be cleaned by its next dequeuing worker, never by this turn.
   if queued then registry.afterRequeue job.target else closeJobReader registry job

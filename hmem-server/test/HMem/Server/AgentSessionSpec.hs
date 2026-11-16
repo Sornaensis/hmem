@@ -19,6 +19,9 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Map.Strict qualified as Map
+import Data.Time (addUTCTime, getCurrentTime)
 import Data.Time.Format.ISO8601 (iso8601Show)
 import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
@@ -42,7 +45,8 @@ import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.AuthTokens qualified as AuthTokens
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkAppWithPrefixProofs)
-import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
+import HMem.Server.SessionPrefix (newPrefixRegistry, newPrefixRegistryAt, closePrefixRegistry, prefixTraffic)
+import HMem.Server.SessionTraffic (RequestStats(..), ComputeStats(..), SessionTrafficSnapshot(..), readSessionTraffic)
 import HMem.Server.TestHarness
 import HMem.Types qualified as Types
 
@@ -128,6 +132,48 @@ spec = describe "Agent session HTTP" $ do
       -- Compatibility constructors preserve old resources without starting an
       -- unowned worker service in an application with no release interface.
       post ctx.localApplication path [] (toJSON input) >>= status status503
+
+  it "SessionTraffic attributes unknown proofs internally while every cause keeps one public 404" $
+    withLocalSandboxAppContext $ \ctx -> do
+      clock <- getCurrentTime >>= newIORef
+      bracket (newPrefixRegistryAt (readIORef clock) ctx.localEnv.pool) closePrefixRegistry $ \registry -> do
+        let env=ctx.localEnv; cfg=ctx.localConfig
+        tracker <- newAccessTracker env.pool 3600
+        app <- mkAppWithPrefixProofs registry Nothing cfg.changeStream id cfg.auth cfg.cors cfg.rateLimit env.pool tracker ctx.localWSState cfg.web.webStaticDir True
+        workspace <- createTestWorkspace env "http-prefix-traffic"
+        row <- seed env workspace.id
+        other <- seed env workspace.id
+        let bytes="{\"traffic\":true}\n"
+            target=sessions workspace.id<>"/"<>uuid row.id
+            path=target<>"/prefix-verifications"
+            append=AppendSessionRequest 0 0 (encodeSessionBytes bytes) False
+            unknownBody="{\"error\":\"verification_unknown\",\"message\":\"Prefix verification operation unknown; revalidate source with a new operation\"}"
+            unknown response = status status404 response >> (simpleBody response `shouldBe` unknownBody)
+        appended <- post app (target<>"/append") [] (toJSON append) >>= decoded @AppendSessionResponse
+        replay <- post app (target<>"/append") [] (toJSON append) >>= decoded @AppendSessionResponse
+        replay.replayed `shouldBe` True
+        _ <- post app (target<>"/heartbeat") [] Null >>= decoded @Core.AgentSession
+        missing <- UUID.nextRandom
+        call app methodGet (path<>"/"<>uuid missing) [] "" >>= unknown
+        operation <- UUID.nextRandom
+        let input=PrefixProofRequest operation appended.session.committedBytes appended.session.revision (Core.sessionSha256 bytes)
+        _ <- post app path [] (toJSON input) >>= decoded @PrefixProofResponse
+        awaitHttpProof app (path<>"/"<>uuid operation) [] >>= (\value -> value.state `shouldBe` "verified")
+        call app methodGet (sessions workspace.id<>"/"<>uuid other.id<>"/prefix-verifications/"<>uuid operation) [] "" >>= unknown
+        modifyIORef' clock (addUTCTime 301)
+        call app methodGet (path<>"/"<>uuid operation) [] "" >>= unknown
+        absent <- UUID.nextRandom
+        call app methodGet (sessions workspace.id<>"/"<>uuid absent<>"/prefix-verifications/"<>uuid operation) [] "" >>= status status404
+        snapshot <- readSessionTraffic (prefixTraffic registry)
+        let counted key = maybe 0 (.count) (Map.lookup key snapshot.requestStats)
+        map counted [("proof_lookup","verification_unknown",reason) | reason <- ["unknown_since_start","target_mismatch","expired","evicted","unknown_operation"]]
+          `shouldBe` [1,1,1,0,0]
+        counted ("proof_lookup","session_missing","") `shouldBe` 1
+        counted ("proof_lookup","verified","") `shouldSatisfy` (>= 1)
+        counted ("proof_submit","pending","") + counted ("proof_submit","verified","") `shouldBe` 1
+        (counted ("append","committed",""),counted ("append","replayed",""),counted ("heartbeat","accepted","")) `shouldBe` (1,1,1)
+        fmap (.bytes) (Map.lookup ("append","committed","") snapshot.requestStats) `shouldBe` Just (fromIntegral (BS.length bytes))
+        fmap (.proofs) (Map.lookup ("verified","le_1mib") snapshot.computeStats) `shouldBe` Just 1
 
   it "PrefixProof isolates credentials sharing grants and reauthorizes before decode and result" $
     withDeployedSandboxAppContext $ \ctx -> bracket (newPrefixRegistry ctx.deployedEnv.pool) closePrefixRegistry $ \registry -> do

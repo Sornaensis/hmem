@@ -32,7 +32,7 @@ module HMem.Server.API
   , archiveAudience
   ) where
 
-import Control.Exception (try, throwIO)
+import Control.Exception (SomeAsyncException, SomeException, fromException, try, throwIO)
 import Control.Monad (forM, forM_, when, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (FromJSON, Value, object, (.=), ToJSON(..), Result(..))
@@ -43,6 +43,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
 import Data.ByteString.Lazy.Char8 qualified as LBS8
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Int (Int64)
 import Data.List (nub)
 import Data.Map.Strict qualified as Map
@@ -84,6 +85,7 @@ import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
 import HMem.Server.AccessTracker (AccessTracker, bufferSize)
 import HMem.Server.ObservationDiscovery qualified as Discovery
 import HMem.Server.SessionPrefix qualified as Prefix
+import HMem.Server.SessionTraffic qualified as Traffic
 import HMem.Server.WebSocket qualified as WS
 import HMem.Server.Snapshot (materializeSnapshotWithProfile)
 import HMem.SessionArchive.Codec qualified as ArchiveCodec
@@ -690,9 +692,65 @@ sessionRangeIO expectedState workspace action = do
       {errHeaders=[("Content-Type","application/json"),("Retry-After","1")]}
     Right (Just value) -> pure value
 
+-- | Count one session-capture request with a fixed outcome label. The body may
+-- note a specific outcome; otherwise success uses the route default and a
+-- rejection is classified by its fixed status and error code. Responses are
+-- unchanged. See docs/reference/session-traffic-telemetry.md.
+observeSessionTraffic :: Maybe Traffic.SessionTraffic -> Traffic.TrafficRoute -> ((Traffic.TrafficOutcome -> Int64 -> Handler ()) -> Handler a) -> Handler a
+observeSessionTraffic Nothing _ action = action (\_ _ -> pure ())
+observeSessionTraffic (Just traffic) route action = do
+  noted <- liftIO (newIORef Nothing)
+  let note outcome bytes = liftIO (writeIORef noted (Just (outcome, bytes)))
+      record outcome bytes = liftIO (Traffic.recordRequest traffic route outcome bytes)
+  result <- liftIO (try @SomeException (runHandler (action note)))
+  explicit <- liftIO (readIORef noted)
+  case result of
+    Right (Right value) -> do
+      uncurry record (fromMaybe (defaultOutcome, 0) explicit)
+      pure value
+    Right (Left failure) -> do
+      uncurry record (fromMaybe (classifySessionError failure, 0) explicit)
+      throwError failure
+    Left exception -> do
+      when (isNothing (fromException @SomeAsyncException exception)) (record Traffic.OutcomeError 0)
+      liftIO (throwIO exception)
+  where
+    defaultOutcome = case route of
+      Traffic.RouteAppend -> Traffic.OutcomeCommitted
+      Traffic.RouteHeartbeat -> Traffic.OutcomeAccepted
+      _ -> Traffic.OutcomePending
+
+-- Map a rejection to a fixed outcome from its status and server error code.
+classifySessionError :: ServerError -> Traffic.TrafficOutcome
+classifySessionError failure = case failure.errHTTPCode of
+  401 -> Traffic.OutcomeUnauthorized
+  403 -> Traffic.OutcomeUnauthorized
+  404 -> Traffic.OutcomeSessionMissing
+  409 -> case code of
+    Just "session_terminated" -> Traffic.OutcomeTerminated
+    Just "original_evidence_unavailable" -> Traffic.OutcomeEvidenceUnavailable
+    _ -> Traffic.OutcomeConflict
+  503 -> if code == Just "verification_busy" then Traffic.OutcomeBusy else Traffic.OutcomeUnavailable
+  status | status `elem` [400, 413, 415, 422] -> Traffic.OutcomeInvalid
+  _ -> Traffic.OutcomeError
+  where
+    code = case Aeson.decode failure.errBody of
+      Just (Aeson.Object fields) | Just (Aeson.String value) <- AesonKeyMap.lookup "error" fields -> Just value
+      _ -> Nothing :: Maybe Text
+
+proofStateOutcome :: Text -> Traffic.TrafficOutcome
+proofStateOutcome = \case
+  "pending" -> Traffic.OutcomePending
+  "verified" -> Traffic.OutcomeVerified
+  "mismatch" -> Traffic.OutcomeMismatch
+  "failed" -> Traffic.OutcomeFailed
+  _ -> Traffic.OutcomeError
+
 agentSessions :: Maybe AgentSessions.ReaderCache -> Maybe Prefix.PrefixRegistry -> Pool Hasql.Connection -> UUID -> Server AgentSessionAPI
 agentSessions readers prefixes pool workspace = listH :<|> facetsH :<|> createH :<|> importH :<|> getH :<|> appendH :<|> heartbeatH :<|> runtimeH :<|> tasksH :<|> associateH :<|> terminateH :<|> rangeH AgentSession.Active :<|> rangeH AgentSession.Terminated :<|> proofH :<|> proofResultH
   where
+    observed :: Traffic.TrafficRoute -> ((Traffic.TrafficOutcome -> Int64 -> Handler ()) -> Handler a) -> Handler a
+    observed = observeSessionTraffic (Prefix.prefixTraffic <$> prefixes)
     readAccess = requireSessionWorkspace pool workspace Auth.WorkspaceRoleRead
     writeAccess = authorizeAgentSessionWrite pool workspace
     proofRegistry = maybe (throwError $ sessionError err503 "verification_unavailable" "Prefix verification service unavailable") pure prefixes
@@ -704,23 +762,31 @@ agentSessions readers prefixes pool workspace = listH :<|> facetsH :<|> createH 
         Just original | PrincipalSyntheticLocalSuperadmin <- original.authority ->
           pure ("local-superadmin:" <> actorTypeToText original.actorType <> ":" <> original.actorId)
         _ -> throwError $ sessionError err401 "unauthorized" "Authentication required"
-    proofH identifier request = do
+    proofH identifier request = observed Traffic.RouteProofSubmit $ \note -> do
       writeAccess
       _ <- requireAgentSession pool workspace identifier
       audience <- proofAudience
       input <- sessionRequest request
       registry <- proofRegistry
       result <- sessionIO pool workspace $ Prefix.submitPrefixProof registry (Prefix.PrefixTarget workspace identifier audience input)
-      either (throwError . proofError) pure result
-    proofResultH identifier operation = do
+      proof <- either (throwError . proofError) pure result
+      note (proofStateOutcome proof.state) 0
+      pure proof
+    proofResultH identifier operation = observed Traffic.RouteProofLookup $ \note -> do
       writeAccess
       _ <- requireAgentSession pool workspace identifier
       audience <- proofAudience
       registry <- proofRegistry
-      result <- liftIO $ Prefix.lookupPrefixProof registry workspace identifier audience operation
+      result <- liftIO $ Prefix.lookupPrefixProofClassified registry workspace identifier audience operation
       case result of
-        Nothing -> throwError $ sessionError err404 "verification_unknown" "Prefix verification operation unknown; revalidate source with a new operation"
-        Just proof -> sessionIO pool workspace (AgentSessions.requireOriginalEvidence pool workspace identifier) >> pure proof
+        -- Every miss reason has the same public unknown response.
+        Left reason -> do
+          note (Traffic.OutcomeUnknown reason) 0
+          throwError $ sessionError err404 "verification_unknown" "Prefix verification operation unknown; revalidate source with a new operation"
+        Right proof -> do
+          sessionIO pool workspace (AgentSessions.requireOriginalEvidence pool workspace identifier)
+          note (proofStateOutcome proof.state) 0
+          pure proof
     proofError = \case
       Prefix.PrefixInvalid -> sessionError err400 "verification_target_invalid" "Prefix target must be an exact committed append boundary and SHA-256"
       Prefix.PrefixConflict -> sessionError err409 "verification_operation_conflict" "Operation UUID is already bound to another target"
@@ -755,7 +821,7 @@ agentSessions readers prefixes pool workspace = listH :<|> facetsH :<|> createH 
       sessionIO pool workspace $ AgentSessions.importSession pool
         (AgentSession.ImportSession (AgentSession.CreateSession metadata.id workspace metadata.formatLabel metadata.title metadata.parentSessionId metadata.initialRuntimeIdentity metadata.taskId) input.finalBytes input.finalSha256)
     getH identifier = readAccess >> requireAgentSession pool workspace identifier
-    appendH identifier request = do
+    appendH identifier request = observed Traffic.RouteAppend $ \note -> do
       writeAccess
       _ <- requireAgentSession pool workspace identifier
       input <- sessionRequest request
@@ -765,8 +831,10 @@ agentSessions readers prefixes pool workspace = listH :<|> facetsH :<|> createH 
         Right value -> pure value
       result <- sessionIO pool workspace $ AgentSessions.appendSession pool workspace identifier
         (AgentSession.AppendSession input.expectedOffset input.expectedRevision bytes input.allowFinalRecord)
+      if result.replayed then note Traffic.OutcomeReplayed 0
+      else note Traffic.OutcomeCommitted (fromIntegral (BS.length bytes))
       pure $ SessionWire.AppendSessionResponse result.session result.replayed
-    heartbeatH identifier = do
+    heartbeatH identifier = observed Traffic.RouteHeartbeat $ \_ -> do
       writeAccess
       sessionIO pool workspace $ AgentSessions.heartbeatSession pool workspace identifier
     runtimeH identifier request = do

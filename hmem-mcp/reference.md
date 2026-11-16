@@ -230,6 +230,13 @@ ID. It allows four such recoveries without a verified proof, then reports
 `verification_retry_exhausted`. Correct the routing or server availability and
 start again with the same session UUID and source.
 
+Set `HMEM_SESSION_TRAFFIC_DIAGNOSTICS=1` to write one fixed-label traffic
+summary per follower lifecycle to the MCP error stream when the follower reaches
+a terminal state. It counts requests by route and outcome, committed and locally
+hashed bytes, proof recoveries and transient retries, without paths, identifiers
+or transcript bytes. See
+[session traffic telemetry](../docs/reference/session-traffic-telemetry.md).
+
 Normal following uploads complete LF-terminated records, preserving UTF-8 and
 CRLF bytes. Partial tails stay pending; malformed terminated records, oversized
 records, replacement, truncation and observed committed-prefix changes fail the

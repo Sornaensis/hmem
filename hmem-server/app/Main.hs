@@ -35,7 +35,7 @@ import HMem.Server.App (mkAppWithPrefixProofs,mkAppWithDocumentAuthority)
 import HMem.Server.Document.Grant (newDocumentAuthority)
 import HMem.Server.Document.PreviewOrigin (withPreviewListener)
 import HMem.Server.Document.Worker (withPreviewWorker)
-import HMem.Server.SessionPrefix (newPrefixRegistry, closePrefixRegistry)
+import HMem.Server.SessionPrefix (newPrefixRegistryLogging, closePrefixRegistry)
 import HMem.Server.ObservationDiscovery (newObservationDiscovery, publishDiscoveryProvider)
 import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker)
 import HMem.Server.SessionReaper (startSessionReaper, stopSessionReaper)
@@ -190,7 +190,7 @@ runDevMode opts = do
           awaitWebSocketDrain wsState 5000000
           flushNow pool tracker `catch` \(_ :: SomeException) -> pure ()
           detachWebSocketTelemetryLog wsState `finally` cleanupLog
-    (bracket (newPrefixRegistry pool) closePrefixRegistry $ \prefixes -> do
+    (bracket (newPrefixRegistryLogging logAction pool) closePrefixRegistry $ \prefixes -> do
       app <- mkAppWithPrefixProofs prefixes Nothing Config.defaultConfig.changeStream requestLogger devAuth devCors devRateLimit pool tracker wsState mStaticDir pgvec
       bracket (startSessionReaper pool) stopSessionReaper $ \_ ->
         runPlainWithNativeWebSockets wsState settings app) `finally` shutdown
@@ -487,4 +487,4 @@ runNormalMode opts = do
           [ mapM_ stopManagedTei managed
           , mapM_ (\task -> cancel task >> void (waitCatch task)) external
           ]
-    withPreservingCleanup (restore (bracket (newPrefixRegistry pool) closePrefixRegistry $ \prefixes -> bracket (startSessionReaper pool) stopSessionReaper (\_ -> runWarp prefixes))) shutdownVectors
+    withPreservingCleanup (restore (bracket (newPrefixRegistryLogging logAction pool) closePrefixRegistry $ \prefixes -> bracket (startSessionReaper pool) stopSessionReaper (\_ -> runWarp prefixes))) shutdownVectors

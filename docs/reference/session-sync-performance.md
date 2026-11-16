@@ -466,3 +466,67 @@ teardown. These tests use accelerated correctness polling and a default backend
 without WebSocket traffic; they do not qualify dispatch lifecycle or performance.
 Their input and binary bindings are separate from the earlier component build in
 `session-sync.db.summary.json`; the original component receipts remain unchanged.
+
+## Traffic attribution
+
+[Session traffic telemetry](session-traffic-telemetry.md) classifies capture
+requests and unknown prefix proofs. The opt-in measurement runs the production
+follower cadence (1 s source checks, 10 s periodic verification, 50 ms pending
+polls) against a real server, prefix registry and isolated PostgreSQL:
+
+```text
+HMEM_SESSION_TRAFFIC_MEASUREMENT=1 stack test hmem-mcp:test:hmem-mcp-test --ta "--match SessionTrafficMeasurement"
+```
+
+Each cohort has three followers (the mixed cohort four) and its own primary
+and replacement server process sharing one database; a restart routes the
+followers to the replacement. Live followers each receive 6 KiB every 100 ms
+(about the frozen 183,500.8 B/s aggregate for three followers) for 30 s (mixed:
+60 s), then stop with verified receipts. Quiet
+cohorts receive no output and are disturbed once after 12 s. The compact result
+is `tools/session-capture-traffic.qualification.json`; follower and server
+counts agree for every route.
+
+| Cohort | Appends | Proof submits | Proof polls (pending) | Server compute per proof | Local hash |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Live, 1 MiB prefix | 42.0 | 5.0 | 10.0 (5.0) | mean 80 ms | 13.9 MiB |
+| Live, 100 MiB prefix | 62.0 | 4.0 | 60.3 (56.0) | mean 854 ms, max 1,034 ms | 663.5 MiB |
+
+Values are per follower lifecycle; each lifecycle also made one metadata read
+and three heartbeats and committed 1.76 MiB. Per committed MiB the large
+prefix needed 34.3 polls against 5.7. Pending polls follow server compute
+(about 8.5 ms per prefix MiB) at the 50 ms cadence, and every periodic sweep
+of a growing session hashes the whole prefix locally and on the server.
+
+Each deliberate disturbance of quiet 1 MiB followers produced exactly one
+`verification_unknown` per follower with the expected reason: restart
+`unknown_since_start`, a 301 s server clock advance `expired`, and sixteen
+later proofs `evicted`. Each loss cost one recovery: one renewed local hash
+of the prefix, one submission, one or two polls and one server proof. All
+receipts verified with no retries. In a mixed cohort, a quiet follower beside
+three live peers lost its retained result to eviction once in 65 s (1 of 9
+polls); the peers admitted 24 proofs in that time.
+
+Dispositions:
+
+- **Pending polls on large prefixes** dominate avoidable traffic: 93% of the
+  large cohort's lookups were pending. A candidate for the MCP prefix work is
+  spacing polls by expected compute or a server hint, if a matched rerun shows
+  fewer polls without delaying resume and finite receipts beyond one interval.
+- **Periodic full-prefix proofs while growing** cost 10.2 s of server compute
+  per 32 s for three 100 MiB followers. Lengthening the interval with prefix
+  size is a candidate only with continued bounded sweeps and matched evidence.
+- **Reused proofs of quiet followers** become unknown when the five-minute
+  terminal lifetime ends (about 1 in 31 reuse polls by construction) or sooner
+  under eviction churn. Submitting a fresh operation before the lifetime ends
+  would remove the expiry case; whether a verified unchanged boundary still
+  needs a remote lookup is an API/MCP decision question.
+- **Appends, heartbeats and metadata reads** follow output, idle time and
+  lifecycle starts. They are needed for commit latency and liveness; no change.
+- **Restart, expiry and eviction recovery** is bounded at four losses and
+  preserved.
+
+The measurement uses one host and loopback HTTP; projections from code
+constants are not live attribution. The 10 November sample (1,464 polling 404s
+in 30,422 polls) cannot be re-attributed without its server logs; future logs
+carry the reason.

@@ -1,7 +1,7 @@
 module HMem.Server.WebSocketDeliverySpec (spec) where
 
 import Control.Concurrent (newEmptyMVar, putMVar, readMVar, takeMVar, threadDelay, tryPutMVar, tryTakeMVar)
-import Control.Concurrent.Async (AsyncCancelled(..), cancel, wait, waitCatch, withAsync)
+import Control.Concurrent.Async (AsyncCancelled(..), cancel, mapConcurrently_, wait, waitCatch, withAsync)
 import Control.Exception (finally, fromException, try, uninterruptibleMask_)
 import Control.Monad (forM_, replicateM, void)
 import Data.Text qualified as T
@@ -95,7 +95,7 @@ spec = describe "owned WebSocket delivery" $ do
     forM_ (refused:tail same <> others) finishDeliveryOwner
     awaitDeliveryDrain hub 250000
 
-  it "retains a lease and poisons admission after a failed join" $ do
+  it "retains a lease after an unfinished join without closing other admission" $ do
     hub <- newDeliveryHub
     writing <- newEmptyMVar
     release <- newEmptyMVar
@@ -107,15 +107,61 @@ spec = describe "owned WebSocket delivery" $ do
     withAsync (try @DeliveryFailure (withDeliveryTurn owner (const (controlledWrite owner write)))) $ \parent ->
       (do
         within "masked writer entered" (takeMVar writing)
-        within "parent reports retained work" (wait parent) `shouldReturn` Left DeliveryUnconfirmed
+        within "parent retired the connection" (wait parent) `shouldReturn` Right DeliveryRetired
         tryTakeMVar aborted `shouldReturn` Just ()
         tryTakeMVar childEnded `shouldReturn` Nothing
-        extra <- newDeliveryOwner hub (pure ())
-        reservePhysicalConnection extra "other" `shouldReturn` False
-        awaitDeliveryDrain hub 250000 `shouldThrow` (== DeliveryUnconfirmed))
+        extra <- admitted hub (pure ())
+        withDeliveryTurn extra (const (controlledWrite extra (pure (7 :: Int))))
+          `shouldReturn` DeliveryCompleted 7
+        finishDeliveryOwner extra
+        -- Fill the remaining leases: the retained turn still holds the fourth.
+        others <- replicateM 3 (admitted hub (pure ()))
+        gates <- replicateM 3 newEmptyMVar
+        entered <- replicateM 3 newEmptyMVar
+        waiting <- admitted hub (pure ())
+        fourth <- newEmptyMVar
+        let hold other gate ready = withDeliveryTurn other $ \_ -> putMVar ready () >> takeMVar gate
+        withAsync (mapConcurrently_ id (zipWith3 hold others gates entered)) $ \holders -> do
+          forM_ entered (within "remaining lease entered" . takeMVar)
+          withAsync (withDeliveryTurn waiting (const (putMVar fourth ()))) $ \producer -> do
+            timeout 30000 (readMVar fourth) `shouldReturn` Nothing
+            -- The child ends before its outer worker: only the lease returns.
+            putMVar release ()
+            within "released writer actually ended" (takeMVar childEnded)
+            within "reclaimed lease admitted the waiting turn" (wait producer) `shouldReturn` DeliveryCompleted ()
+          forM_ gates (`putMVar` ())
+          within "remaining leases released" (wait holders)
+        forM_ (waiting:others) finishDeliveryOwner
+        awaitDeliveryDrain hub 50000 `shouldThrow` (== DeliveryUnconfirmed)
+        finishDeliveryOwner owner
+        awaitDeliveryDrain hub 250000)
       `finally` void (tryPutMVar release ())
-    within "released writer actually ended" (takeMVar childEnded)
-    finishDeliveryOwner owner `shouldThrow` (== DeliveryUnconfirmed)
+
+  it "keeps a retained seat counted until its child ends after the outer worker" $ do
+    hub <- newDeliveryHub
+    writing <- newEmptyMVar
+    release <- newEmptyMVar
+    childEnded <- newEmptyMVar
+    owner <- admitted hub (pure ())
+    same <- replicateM 31 (admitted hub (pure ()))
+    let write = uninterruptibleMask_ (putMVar writing () >> takeMVar release)
+          `finally` putMVar childEnded ()
+    (do
+      withDeliveryTurn owner (const (controlledWrite owner write)) `shouldReturn` DeliveryRetired
+      within "masked writer entered" (takeMVar writing)
+      finishDeliveryOwner owner
+      -- The aborted owner's seat still counts toward its audience limit.
+      refused <- newDeliveryOwner hub (pure ())
+      reservePhysicalConnection refused "audience" `shouldReturn` False
+      forM_ same finishDeliveryOwner
+      awaitDeliveryDrain hub 50000 `shouldThrow` (== DeliveryUnconfirmed)
+      putMVar release ()
+      within "released writer actually ended" (takeMVar childEnded)
+      awaitDeliveryDrain hub 250000
+      reservePhysicalConnection refused "audience" `shouldReturn` True
+      finishDeliveryOwner refused
+      awaitDeliveryDrain hub 250000)
+      `finally` void (tryPutMVar release ())
 
   it "preserves cancellation after a successful native abort and join" $ do
     hub <- newDeliveryHub
@@ -156,12 +202,12 @@ spec = describe "owned WebSocket delivery" $ do
               fromException cleanup `shouldBe` Just DeliveryUnconfirmed
             Nothing -> expectationFailure ("lost cancellation/cleanup causes: " <> show err)
           Right _ -> expectationFailure "cancelled parent reported successful delivery"
-        extra <- newDeliveryOwner hub (pure ())
-        reservePhysicalConnection extra "other" `shouldReturn` False
-        awaitDeliveryDrain hub 250000 `shouldThrow` (== DeliveryUnconfirmed))
+        assertAdmissionOpen hub
+        finishDeliveryOwner owner
+        awaitDeliveryDrain hub 50000 `shouldThrow` (== DeliveryUnconfirmed))
       `finally` void (tryPutMVar release ())
     within "cancelled parent child actually ended" (takeMVar childEnded)
-    finishDeliveryOwner owner `shouldThrow` (== DeliveryUnconfirmed)
+    awaitDeliveryDrain hub 250000
 
   it "retains cancellation and ownership when cancellation interrupts retirement" $ do
     hub <- newDeliveryHub
@@ -186,12 +232,12 @@ spec = describe "owned WebSocket delivery" $ do
             Nothing -> expectationFailure ("retirement lost cancellation/cleanup causes: " <> show err)
           Right _ -> expectationFailure "interrupted retirement reported successful delivery"
         tryTakeMVar childEnded `shouldReturn` Nothing
-        extra <- newDeliveryOwner hub (pure ())
-        reservePhysicalConnection extra "other" `shouldReturn` False
-        awaitDeliveryDrain hub 250000 `shouldThrow` (== DeliveryUnconfirmed))
+        assertAdmissionOpen hub
+        finishDeliveryOwner owner
+        awaitDeliveryDrain hub 50000 `shouldThrow` (== DeliveryUnconfirmed))
       `finally` void (tryPutMVar releaseAbort ())
     within "interrupted retirement child actually ended" (takeMVar childEnded)
-    finishDeliveryOwner owner `shouldThrow` (== DeliveryUnconfirmed)
+    awaitDeliveryDrain hub 250000
 
   it "completes an interrupted retirement within its original cleanup deadline" $ do
     hub <- newDeliveryHub
@@ -229,6 +275,14 @@ spec = describe "owned WebSocket delivery" $ do
     extra <- newDeliveryOwner hub (pure ())
     reservePhysicalConnection extra "other" `shouldReturn` False
     awaitDeliveryDrain hub 250000 `shouldThrow` (== DeliveryUnconfirmed)
+
+-- Another owner is admitted and completes a turn, then leaves no residue.
+assertAdmissionOpen :: DeliveryHub -> IO ()
+assertAdmissionOpen hub = do
+  extra <- newDeliveryOwner hub (pure ())
+  reservePhysicalConnection extra "other" `shouldReturn` True
+  withDeliveryTurn extra (const (controlledWrite extra (pure ()))) `shouldReturn` DeliveryCompleted ()
+  finishDeliveryOwner extra
 
 admitted :: DeliveryHub -> IO () -> IO DeliveryOwner
 admitted hub abort = do

@@ -152,6 +152,8 @@ startWorker transport settings acceptor socket start = do
             -- exception before its connection maker installs that finalizer.
             let NativeConnection deliveryOwner = owner
             Socket.close' socket `onException` Delivery.retainFailedOwner deliveryOwner
+            -- Retained delivery work defers this release, with the physical
+            -- seat, until its actual handles complete.
             Delivery.finishDeliveryOwnerWith deliveryOwner $
               modifyTVar' transport.workerSockets (Map.delete worker)
   (do

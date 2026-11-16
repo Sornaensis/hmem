@@ -2,8 +2,8 @@
 
 module HMem.Server.ChangeStreamSpec (spec) where
 
-import Control.Concurrent (Chan, MVar, myThreadId, newChan, newEmptyMVar, putMVar, readChan, readMVar, takeMVar, threadDelay, throwTo, tryPutMVar, tryTakeMVar, writeChan)
-import Control.Concurrent.Async (Async, AsyncCancelled(..), async, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch, withAsync)
+import Control.Concurrent (Chan, MVar, getNumCapabilities, myThreadId, newChan, newEmptyMVar, putMVar, readChan, readMVar, takeMVar, threadDelay, throwTo, tryPutMVar, tryTakeMVar, writeChan)
+import Control.Concurrent.Async (Async, AsyncCancelled(..), async, asyncOn, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch, withAsync)
 import Control.Exception (AsyncException(..), IOException, MaskingState(..), SomeAsyncException, SomeException, bracket, catch, finally, fromException, getMaskingState, mask, throwIO, toException, try)
 import Control.Monad (forM, forM_, replicateM_, replicateM, forever, void, when)
 import Data.Aeson (FromJSON, Value(..), decode, encode, object, toJSON, (.=))
@@ -12,6 +12,7 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.FileEmbed (embedFile, makeRelativeToProject)
+import Data.Int (Int64)
 import Data.Maybe (isJust)
 import Data.List (nub, sort)
 import Data.Pool (Pool, destroyAllResources)
@@ -1137,6 +1138,78 @@ spec = describe "canonical change-stream loopback" $ do
                 awaitCanonical reconnectedFrames >>= assertChangeIdentity record project.id
                 awaitCanonical healthyFrames >>= assertChangeIdentity record project.id
 
+  it "admits and dispatches while a catch-up blocked in PostgreSQL stays retained" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      blockedWorkspace <- createTestWorkspace ctx.deployedEnv "retained-canonical-catch-up"
+      liveWorkspace <- createTestWorkspace ctx.deployedEnv "admitted-beside-retained-catch-up"
+      let principal = Principal
+            { actorType = ActorUser, actorId = "retained-peer", actorLabel = "retained peer"
+            , authority = PrincipalSyntheticLocalSuperadmin }
+          audience = TrustedAudience "local:retained-peer"
+          blockedScope = WorkspaceScope blockedWorkspace.id
+          liveScope = WorkspaceScope liveWorkspace.id
+          connectionString = ctx.deployedEnv.testDb.testDbConnStr
+      blocked <- canonicalTicketFor ctx principal blockedScope audience
+      live <- canonicalTicketFor ctx principal liveScope audience
+      entered <- newEmptyMVar
+      release <- newEmptyMVar
+      disconnected <- newEmptyMVar
+      -- Hold the scope row that every replay page locks, so the catch-up's
+      -- libpq call outlasts both the work and the cleanup budgets.
+      let holdScope pool = DBPool.withConn pool $ \connection ->
+            (do
+              result <- Session.run (Session.sql ("BEGIN; SELECT * FROM hmem_change_stream_lock('workspace', '"
+                <> Text.encodeUtf8 (UUID.toText blockedWorkspace.id) <> "')")) connection
+              either (fail . show) pure result
+              putMVar entered ()
+              takeMVar release)
+            `finally` void (Session.run (Session.sql "ROLLBACK") connection)
+          blockedPeer port =
+            WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket blocked.ticket) $ \conn -> do
+              result <- try @WS.ConnectionException (WS.receiveData conn :: IO Text)
+              putMVar disconnected (either (const True) (const False) result)
+      bracket (DBPool.createPool connectionString 1 5.0 30000) destroyAllResources $ \observerPool ->
+       bracket (DBPool.createPool connectionString 1 5.0 30000) destroyAllResources $ \holderPool ->
+        withAsync (holdScope holderPool) $ \holder -> do
+          let lockWaiters = runSession observerPool (Session.statement () scopeLockWaitersStatement)
+              awaitLockWaiter = do
+                waiting <- lockWaiters
+                when (waiting /= 1) (threadDelay 20000 >> awaitLockWaiter)
+              retainedDrain = do
+                -- Only the retained catch-up remains after every peer closed.
+                lockWaiters `shouldReturn` 1
+                awaitWebSocketDrain ctx.deployedWSState 300000 `shouldThrow` (== DeliveryUnconfirmed)
+                putMVar release ()
+                declaredPhase "scope lock release" (wait holder)
+          declaredPhase "scope lock acquisition" (takeMVar entered)
+          lockWaiters `shouldReturn` 0
+          -- Give every application pool stripe an idle connection, so the
+          -- catch-up reaches the held lock well within its work budget.
+          capabilities <- getNumCapabilities
+          mapM_ wait =<< mapM (\capability -> asyncOn capability
+            (runSession ctx.deployedEnv.pool (Session.sql "SELECT 1"))) [0 .. capabilities - 1]
+          withWebSocketApplicationBeforeDrain ctx.deployedWSState ctx.deployedApplication retainedDrain $ \port -> do
+            started <- getMonotonicTimeNSec
+            withAsync (blockedPeer port) $ \peer -> do
+              declaredPhase "catch-up waits on the held scope lock" awaitLockWaiter
+              waited <- getMonotonicTimeNSec
+              milliseconds started waited `shouldSatisfy` (< (750 :: Double))
+              declaredPhase "blocked peer retired" (takeMVar disconnected) `shouldReturn` True
+              retired <- getMonotonicTimeNSec
+              milliseconds started retired `shouldSatisfy` (>= (750 :: Double))
+              declaredPhase "blocked peer closed" (wait peer)
+            -- Let the unfinished join exhaust its cleanup budget.
+            threadDelay 500000
+            lockWaiters `shouldReturn` 1
+            withActivityFrames port live.ticket $ \frames -> do
+              let awaitCanonical = declaredPhase "admitted peer frame" (readChan frames >>= decodeFrame)
+              frameType <$> awaitCanonical `shouldReturn` Just "checkpoint"
+              project <- Project.createProject ctx.deployedEnv.pool
+                (CreateProject liveWorkspace.id Nothing "delivered beside retained catch-up" Nothing Nothing Nothing)
+              record <- latestOutbox ctx liveScope
+              declaredPhase "live dispatch" (dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [record])
+              awaitCanonical >>= assertChangeIdentity record project.id
+
   it "retires the canonical owner when expiry output throws" $
     withDeployedSandboxAppContext $ \ctx -> do
       armed <- newIORef False
@@ -2051,6 +2124,11 @@ safeLast :: [a] -> Maybe a
 safeLast [] = Nothing
 safeLast xs = Just (last xs)
 
+scopeLockWaitersStatement :: Statement.Statement () Int64
+scopeLockWaitersStatement = Statement.Statement
+  "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%hmem_change_stream_lock%'"
+  Enc.noParams (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True
+
 rollbackRenameStatement :: Statement.Statement UUID.UUID ()
 rollbackRenameStatement = Statement.Statement
   "UPDATE workspaces SET name = 'rolled-back-workspace-rename' WHERE id = $1"
@@ -2218,17 +2296,22 @@ upgradeResponseHeaders port =
     declaredPhase "physical rejection headers" (receive BS.empty)
 
 withWebSocketApplication :: WSState -> Application -> (Int -> IO a) -> IO a
-withWebSocketApplication state = withSocketApplication state True runPlainSocket
+withWebSocketApplication state = withSocketApplication state True runPlainSocket (pure ())
+
+-- Runs its step after the listener stops and before the native drain.
+withWebSocketApplicationBeforeDrain :: WSState -> Application -> IO () -> (Int -> IO a) -> IO a
+withWebSocketApplicationBeforeDrain state application beforeDrain =
+  withSocketApplication state True runPlainSocket beforeDrain application
 
 withTlsWebSocketApplication :: WSState -> Application -> (Int -> IO ()) -> IO ()
-withTlsWebSocketApplication state = withSocketApplication state False (runTLSSocket (tlsSettingsMemory cert key))
+withTlsWebSocketApplication state = withSocketApplication state False (runTLSSocket (tlsSettingsMemory cert key)) (pure ())
   where
     cert = $(makeRelativeToProject "test/fixtures/change-stream/loopback-test-cert.pem" >>= embedFile)
     key = $(makeRelativeToProject "test/fixtures/change-stream/loopback-test-key.pem" >>= embedFile)
 
 withSocketApplication
-  :: WSState -> Bool -> (Settings -> Socket.Socket -> Application -> IO ()) -> Application -> (Int -> IO a) -> IO a
-withSocketApplication state forwardApplicationFailures runListener application use =
+  :: WSState -> Bool -> (Settings -> Socket.Socket -> Application -> IO ()) -> IO () -> Application -> (Int -> IO a) -> IO a
+withSocketApplication state forwardApplicationFailures runListener beforeDrain application use =
   bracket openFreePort (Socket.close . snd) $ \(port, listener) -> do
     testOwner <- myThreadId
     ready <- newEmptyMVar
@@ -2249,6 +2332,7 @@ withSocketApplication state forwardApplicationFailures runListener application u
         atomicModifyIORef' stopping (const (True, ()))
         Socket.close listener
         declaredPhase "loopback listener join" (wait server)
+        beforeDrain
         declaredPhase "native worker drain" (awaitWebSocketDrain state 2000000)
       case primary of
         Left failure -> do

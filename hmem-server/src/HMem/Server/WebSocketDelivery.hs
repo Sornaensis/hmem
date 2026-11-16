@@ -23,14 +23,17 @@ module HMem.Server.WebSocketDelivery
   , ownedClose
   ) where
 
-import Control.Concurrent (MVar, ThreadId, modifyMVar, myThreadId, newMVar, readMVar)
+import Control.Concurrent (ThreadId, myThreadId)
 import Control.Concurrent.Async
   ( Async, async, asyncThreadId, asyncWithUnmask, cancel, pollSTM, waitCatch, waitCatchSTM )
 import Control.Concurrent.STM
 import Control.Exception
-  ( Exception, SomeAsyncException, SomeException, fromException, mask, mask_, onException, throwIO, toException, try )
+  ( Exception, SomeAsyncException, SomeException, fromException, mask, mask_, onException, throwIO, toException, try
+  , uninterruptibleMask_ )
 import Control.Monad (forM_, unless, void, when)
+import Data.Functor ((<&>))
 import Data.Map.Strict qualified as Map
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Unique (Unique, newUnique)
 import Data.Word (Word64)
@@ -43,9 +46,17 @@ newtype DeliveryHub = DeliveryHub (TVar HubState)
 data HubState = HubState
   { admissionClosed :: !Bool
   , poisoned :: !Bool
-  , physical :: !(Map.Map Unique (Text, DeliveryOwner))
+  , physical :: !(Map.Map Unique Admission)
   , turns :: !(Map.Map Unique ActiveTurn)
   , participants :: !(Map.Map ThreadId Participant)
+  }
+
+-- An admitted owner keeps its seat until its outer worker has finished and
+-- every retained turn and its native abort have actually completed.
+data Admission = Admission
+  { admittedAudience :: !Text
+  , admittedOwner :: !DeliveryOwner
+  , finishedWorker :: !(Maybe (STM ()))
   }
 
 data DeliveryOwner = DeliveryOwner
@@ -53,8 +64,10 @@ data DeliveryOwner = DeliveryOwner
   , ownerKey :: !Unique
   , closing :: !(TVar Bool)
   , nativeAbort :: !(IO ())
-  , abortHandle :: !(MVar (Maybe (Async ())))
+  , abortState :: !(TVar AbortState)
   }
+
+data AbortState = AbortIdle | AbortRequesting | AbortStarted !(Async ())
 
 data DeliveryTurn = DeliveryTurn
   { owner :: !DeliveryOwner
@@ -67,8 +80,16 @@ data ActiveTurn = ActiveTurn
   { activeOwner :: !Unique
   , activeChild :: !(Maybe (Async ()))
   , activeCancel :: !(Maybe (Async ()))
+  , activeAbort :: !(Maybe (Async ()))
   , activeQuarantined :: !Bool
   }
+
+-- Completion of retained work. A failed native abort or cancellation helper
+-- stays retained and poisons admission.
+data Settlement = Settled | Pending | Failed
+  deriving (Eq, Ord)
+
+data Cleanup = Joined | Unfinished | AbortFailed
 
 data Participant = TurnParent | TurnChild !DeliveryTurn
 
@@ -104,20 +125,20 @@ newDeliveryHub = DeliveryHub <$> newTVarIO (HubState False False Map.empty Map.e
 
 newDeliveryOwner :: DeliveryHub -> IO () -> IO DeliveryOwner
 newDeliveryOwner hub abort =
-  DeliveryOwner hub <$> newUnique <*> newTVarIO False <*> pure abort <*> newMVar Nothing
+  DeliveryOwner hub <$> newUnique <*> newTVarIO False <*> pure abort <*> newTVarIO AbortIdle
 
 reservePhysicalConnection :: DeliveryOwner -> Text -> IO Bool
 reservePhysicalConnection owner audience = atomically $ do
   let DeliveryHub state = owner.hub
-  current <- readTVar state
+  current <- readHub state
   closing <- readTVar owner.closing
   let admitted = current.physical
-      audienceCount = Map.size (Map.filter ((== audience) . fst) admitted)
+      audienceCount = Map.size (Map.filter ((== audience) . (.admittedAudience)) admitted)
   if closing || current.admissionClosed || current.poisoned
       || Map.member owner.ownerKey admitted || Map.size admitted >= 128 || audienceCount >= 32
     then pure False
     else do
-      writeTVar state current { physical = Map.insert owner.ownerKey (audience, owner) admitted }
+      writeTVar state current { physical = Map.insert owner.ownerKey (Admission audience owner Nothing) admitted }
       pure True
 
 -- The outer transport worker calls this only after its application children
@@ -125,35 +146,24 @@ reservePhysicalConnection owner audience = atomically $ do
 finishDeliveryOwner :: DeliveryOwner -> IO ()
 finishDeliveryOwner owner = finishDeliveryOwnerWith owner (pure ())
 
+-- Record outer-worker completion. The seat and the worker release are
+-- reclaimed together, exactly once, when the owner's turns and native abort
+-- have actually completed; retained work does not hold the worker here.
 finishDeliveryOwnerWith :: DeliveryOwner -> STM () -> IO ()
 finishDeliveryOwnerWith owner releaseWorker = mask_ $ do
-  atomically $ writeTVar owner.closing True
   let DeliveryHub state = owner.hub
-  finished <- try @SomeException $ timeout cleanupMicros $ do
-    retained <- atomically $ do
-      current <- readTVar state
-      let owned = filter ((== owner.ownerKey) . (.activeOwner)) (Map.elems current.turns)
-      check (null owned || any (.activeQuarantined) owned)
-      pure owned
-    abort <- readMVar owner.abortHandle
-    forM_ abort $ \handle -> waitCatch handle >>= either throwIO pure
-    forM_ retained $ \turn -> do
-      forM_ turn.activeCancel (void . waitCatch)
-      forM_ turn.activeChild (void . waitCatch)
-    -- A later join does not erase the previous unclean outcome or reopen
-    -- physical admission on this transport.
-    unless (null retained) $ throwIO DeliveryUnconfirmed
-  case finished of
-    Right (Just ()) -> atomically $ do
-      releaseWorker
-      modifyTVar' state $ \current ->
-        current { physical = Map.delete owner.ownerKey current.physical }
-    Left failure -> do
-      retainFailedOwner owner
-      case fromException failure :: Maybe SomeAsyncException of
-        Just _ -> throwIO failure
-        Nothing -> throwIO DeliveryUnconfirmed
-    Right Nothing -> retainFailedOwner owner >> throwIO DeliveryUnconfirmed
+  abortFailed <- atomically $ do
+    writeTVar owner.closing True
+    abort <- readTVar owner.abortState >>= abortSettlement
+    current <- readTVar state
+    case Map.lookup owner.ownerKey current.physical of
+      Just admission -> writeTVar state current
+        { physical = Map.insert owner.ownerKey admission { finishedWorker = Just releaseWorker } current.physical }
+      -- An owner that was never admitted has no turns or requested abort.
+      Nothing -> when (abort /= Failed) releaseWorker
+    reclaimRetained state
+    pure (abort == Failed)
+  when abortFailed $ retainFailedOwner owner >> throwIO DeliveryUnconfirmed
 
 retainFailedOwner :: DeliveryOwner -> IO ()
 retainFailedOwner owner = do
@@ -164,12 +174,21 @@ retainFailedOwner owner = do
 -- Do not wait for that operation while holding the hub registry.
 requestDeliveryAbort :: DeliveryOwner -> IO (Async ())
 requestDeliveryAbort owner = mask_ $ do
-  atomically $ writeTVar owner.closing True
-  modifyMVar owner.abortHandle $ \case
-    Just existing -> pure (Just existing, existing)
+  -- A concurrent request holds its claim only while forking the operation,
+  -- so this wait cannot strand the caller's cleanup without actual handles.
+  claimed <- uninterruptibleMask_ $ atomically $ do
+    writeTVar owner.closing True
+    readTVar owner.abortState >>= \case
+      AbortStarted existing -> pure (Just existing)
+      AbortRequesting -> retry
+      AbortIdle -> Nothing <$ writeTVar owner.abortState AbortRequesting
+  case claimed of
+    Just existing -> pure existing
     Nothing -> do
       handle <- async owner.nativeAbort
-      pure (Just handle, handle)
+        `onException` atomically (writeTVar owner.abortState AbortIdle)
+      atomically $ writeTVar owner.abortState (AbortStarted handle)
+      pure handle
 
 abortDeliveryOwner :: DeliveryOwner -> IO ()
 abortDeliveryOwner owner = do
@@ -182,9 +201,10 @@ abortDeliveryOwner owner = do
 beginDeliveryShutdown :: DeliveryHub -> IO ()
 beginDeliveryShutdown (DeliveryHub state) = mask_ $ do
   owners <- atomically $ do
-    current <- readTVar state
+    current <- readHub state
     writeTVar state current { admissionClosed = True }
-    let owners = map snd (Map.elems current.physical)
+    -- A finished worker has already closed its socket; it awaits reclamation.
+    let owners = [admission.admittedOwner | admission <- Map.elems current.physical, null admission.finishedWorker]
     forM_ owners $ \owner -> writeTVar owner.closing True
     pure owners
   forM_ owners (void . requestDeliveryAbort)
@@ -197,11 +217,11 @@ awaitDeliveryDrain hub micros = do
     Nothing -> throwIO DeliveryUnconfirmed
 
 deliveryClosed :: DeliveryHub -> STM Bool
-deliveryClosed (DeliveryHub state) = (.admissionClosed) <$> readTVar state
+deliveryClosed (DeliveryHub state) = (.admissionClosed) <$> readHub state
 
 deliveryDrained :: DeliveryHub -> STM ()
 deliveryDrained (DeliveryHub state) = do
-  current <- readTVar state
+  current <- readHub state
   when current.poisoned $ throwSTM DeliveryUnconfirmed
   check (Map.null current.physical && Map.null current.turns)
 
@@ -209,13 +229,68 @@ poison :: DeliveryHub -> IO ()
 poison (DeliveryHub state) = atomically $ modifyTVar' state $ \current ->
   current { poisoned = True, admissionClosed = True }
 
-quarantineTurn :: DeliveryTurn -> IO ()
-quarantineTurn turn = do
+-- Every hub reader first reclaims retained work whose actual handles have
+-- completed. Waiting readers retry when any observed handle completes, so no
+-- polling timer or extra thread is needed. Reclamation deletes the entry in
+-- the same transaction that releases it, so each release happens once.
+readHub :: TVar HubState -> STM HubState
+readHub state = reclaimRetained state >> readTVar state
+
+reclaimRetained :: TVar HubState -> STM ()
+reclaimRetained state = do
+  current <- readTVar state
+  turnStates <- traverse turnSettlement (Map.filter (.activeQuarantined) current.turns)
+  let doneTurns = Map.filter (== Settled) turnStates
+      reclaimed = Map.intersection current.turns doneTurns
+      remaining = Map.difference current.turns doneTurns
+      busy = map (.activeOwner) (Map.elems remaining)
+      finished = Map.filterWithKey
+        (\key admission -> isJust admission.finishedWorker && key `notElem` busy) current.physical
+  seatStates <- traverse (\admission -> readTVar admission.admittedOwner.abortState >>= abortSettlement) finished
+  let doneSeats = Map.filter (== Settled) seatStates
+      released = Map.intersection finished doneSeats
+      failed = Failed `elem` Map.elems turnStates || Failed `elem` Map.elems seatStates
+  forM_ released $ \admission -> sequence_ admission.finishedWorker
+  unless (Map.null reclaimed && Map.null released && (not failed || current.poisoned)) $
+    writeTVar state current
+      { turns = remaining
+      , physical = Map.difference current.physical released
+      , participants = foldr Map.delete current.participants
+          [asyncThreadId child | entry <- Map.elems reclaimed, Just child <- [entry.activeChild]]
+      , poisoned = current.poisoned || failed
+      , admissionClosed = current.admissionClosed || failed
+      }
+
+turnSettlement :: ActiveTurn -> STM Settlement
+turnSettlement entry = do
+  -- The child's own failure is the expected result of its cancellation.
+  child <- maybe (pure Settled) (fmap (maybe Pending (const Settled)) . pollSTM) entry.activeChild
+  cancelled <- maybe (pure Settled) handleSettlement entry.activeCancel
+  native <- maybe (pure Settled) handleSettlement entry.activeAbort
+  pure (maximum [child, cancelled, native])
+
+abortSettlement :: AbortState -> STM Settlement
+abortSettlement = \case
+  AbortIdle -> pure Settled
+  AbortRequesting -> pure Pending
+  AbortStarted handle -> handleSettlement handle
+
+handleSettlement :: Async a -> STM Settlement
+handleSettlement handle = pollSTM handle <&> \case
+  Nothing -> Pending
+  Just (Right _) -> Settled
+  Just (Left _) -> Failed
+
+-- An unfinished join retains the turn's lease and handles for reclamation but
+-- does not stop other admission. Its parent leaves; its child stays fenced.
+quarantineTurn :: DeliveryTurn -> ThreadId -> Bool -> IO ()
+quarantineTurn turn parent failed = do
   let DeliveryHub state = turn.owner.hub
   atomically $ modifyTVar' state $ \current -> current
-    { poisoned = True
-    , admissionClosed = True
+    { poisoned = current.poisoned || failed
+    , admissionClosed = current.admissionClosed || failed
     , turns = Map.adjust (\entry -> entry { activeQuarantined = True }) turn.turnKey current.turns
+    , participants = Map.delete parent current.participants
     }
 
 withDeliveryTurn :: DeliveryOwner -> (DeliveryTurn -> IO a) -> IO (DeliveryResult a)
@@ -239,14 +314,23 @@ withDeliveryTurn owner action = mask $ \restore -> do
       pure (ended, result))
       `onException` release Nothing
     let childId = asyncThreadId child
+        unconfirmed :: Maybe SomeException -> IO b
+        unconfirmed = \case
+          Just cause -> throwIO (DeliveryCleanupFailure cause (toException DeliveryUnconfirmed))
+          Nothing -> throwIO DeliveryUnconfirmed
+        -- Returns any cancellation received during cleanup and whether the
+        -- join remains unfinished. Only a failed native abort or cleanup
+        -- startup poisons admission.
         retire = do
           joined <- try @SomeException (abortAndJoin turn child)
           case joined of
-            Right interrupted -> release (Just childId) >> pure interrupted
+            Right (interrupted, Joined) -> release (Just childId) >> pure (interrupted, False)
+            Right (interrupted, Unfinished) -> quarantineTurn turn parent False >> pure (interrupted, True)
+            Right (interrupted, AbortFailed) -> quarantineTurn turn parent True >> unconfirmed interrupted
             Left failure -> do
-              quarantineTurn turn
+              quarantineTurn turn parent True
               case fromException failure :: Maybe SomeAsyncException of
-                Just _ -> throwIO (DeliveryCleanupFailure failure (toException DeliveryUnconfirmed))
+                Just _ -> unconfirmed (Just failure)
                 Nothing -> throwIO failure
     atomically $ do
       modifyTVar' state $ \current -> current
@@ -259,18 +343,22 @@ withDeliveryTurn owner action = mask $ \restore -> do
     case observed of
       Left (primary :: SomeException) -> do
         -- Cancellation is clean only after the owned native abort and child
-        -- join are proven. Preserve an unconfirmed cleanup as the result.
+        -- join are proven. Annotate an unconfirmed cleanup on the cause.
         retired <- try @SomeException retire
         case retired of
           Left cleanupFailure -> throwIO (DeliveryCleanupFailure primary cleanupFailure)
-          Right _ -> throwIO primary
+          Right (_, True) -> throwIO (DeliveryCleanupFailure primary (toException DeliveryUnconfirmed))
+          Right (_, False) -> throwIO primary
       Right (TurnFinished result) -> do
         release (Just childId)
         DeliveryCompleted <$> either throwIO pure result
       Right (TurnRetired failure) -> do
-        interrupted <- retire
+        (interrupted, unfinished) <- retire
         case interrupted of
-          Just cancellation -> throwIO cancellation
+          Just cancellation
+            | unfinished -> unconfirmed interrupted
+            | otherwise -> throwIO cancellation
+          -- An unfinished join is a per-connection retirement.
           Nothing -> case failure of
             Just err | Just (_ :: SomeAsyncException) <- fromException err -> throwIO err
             _ -> pure DeliveryRetired
@@ -278,26 +366,29 @@ withDeliveryTurn owner action = mask $ \restore -> do
 admitTurn :: DeliveryOwner -> Unique -> ThreadId -> STM Bool
 admitTurn owner key parent = do
   let DeliveryHub state = owner.hub
-  current <- readTVar state
+  current <- readHub state
   when (Map.member parent current.participants) $ throwSTM DeliveryOwnershipViolation
   when current.poisoned $ throwSTM DeliveryQuarantined
   closing <- readTVar owner.closing
   if closing || current.admissionClosed || not (Map.member owner.ownerKey current.physical)
     then pure False
     else do
+      -- Retained turns keep their leases until reclaimed.
       check (Map.size current.turns < 4)
       writeTVar state current
-        { turns = Map.insert key (ActiveTurn owner.ownerKey Nothing Nothing False) current.turns
+        { turns = Map.insert key (ActiveTurn owner.ownerKey Nothing Nothing Nothing False) current.turns
         , participants = Map.insert parent TurnParent current.participants
         }
       pure True
 
 releaseTurn :: TVar HubState -> Unique -> ThreadId -> Maybe ThreadId -> IO ()
-releaseTurn state key parent child = atomically $ modifyTVar' state $ \current ->
-  current
+releaseTurn state key parent child = atomically $ do
+  modifyTVar' state $ \current -> current
     { turns = Map.delete key current.turns
     , participants = Map.delete parent (maybe id Map.delete child current.participants)
     }
+  -- The owner's finished worker may have been waiting only for this turn.
+  reclaimRetained state
 
 data TurnOutcome a = TurnFinished !(Either SomeException a) | TurnRetired !(Maybe SomeException)
 
@@ -343,23 +434,21 @@ samePhase (Idle a) (Idle b) = a == b
 samePhase (Writing a deadlineA) (Writing b deadlineB) = a == b && deadlineA == deadlineB
 samePhase _ _ = False
 
-abortAndJoin :: DeliveryTurn -> Async a -> IO (Maybe SomeException)
+abortAndJoin :: DeliveryTurn -> Async a -> IO (Maybe SomeException, Cleanup)
 abortAndJoin turn child = mask_ $ do
   started <- getMonotonicTimeNSec
   abort <- requestDeliveryAbort turn.owner
   -- The cancellation helper cannot interrupt the child ahead of the first
-  -- native operation. Both helpers stay owned by the quarantined turn.
+  -- native operation. Both helpers stay owned by a quarantined turn.
   stopper <- async $ void (waitCatch abort) >> cancel child
   let DeliveryHub state = turn.owner.hub
   atomically $ modifyTVar' state $ \current -> current
-    { turns = Map.adjust (\entry -> entry { activeCancel = Just stopper }) turn.turnKey current.turns }
+    { turns = Map.adjust (\entry -> entry { activeCancel = Just stopper, activeAbort = Just abort })
+        turn.turnKey current.turns }
   let deadline = started + fromIntegral cleanupMicros * 1000
-      unconfirmed interrupted = case interrupted of
-        Just cause -> throwIO (DeliveryCleanupFailure cause (toException DeliveryUnconfirmed))
-        Nothing -> throwIO DeliveryUnconfirmed
       await interrupted = do
         now <- getMonotonicTimeNSec
-        if now >= deadline then unconfirmed interrupted else do
+        if now >= deadline then pure (interrupted, Unfinished) else do
           -- timeout unregisters its scoped timer on interruption. Rearming
           -- uses the unchanged absolute deadline, never a fresh cleanup budget.
           joined <- try @SomeAsyncException $ timeout (nanosToMicros (deadline - now)) $
@@ -372,8 +461,9 @@ abortAndJoin turn child = mask_ $ do
             Left cancellation -> await $ case interrupted of
               Just original -> Just original
               Nothing -> Just (toException cancellation)
-            Right (Just (Right (), Right ())) -> pure interrupted
-            _ -> unconfirmed interrupted
+            Right (Just (Right (), Right ())) -> pure (interrupted, Joined)
+            Right (Just _) -> pure (interrupted, AbortFailed)
+            Right Nothing -> pure (interrupted, Unfinished)
   await Nothing
 
 -- Called only at a completed-record boundary. Leave one full write budget

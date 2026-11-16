@@ -16,7 +16,7 @@
     }
   },
   "owner": "repository maintainers",
-  "retention": "Retain this compact receipt until a matched rerun, an authorized passive native sample or a qualified pool, discovery or timeline change supersedes it. Generated logs, plan logs, sandbox databases and raw summaries were task scratch and were removed after the run.",
+  "retention": "Retain this compact receipt until a matched rerun, a production sample or a qualified timeline, pool, discovery or change-stream change supersedes it. Generated logs, plan logs, sandbox databases and raw summaries were task scratch and were removed after the run. The container environment, its logs and summaries are scratch under .tmp/perftest and Docker resources named hmem-perftest*, retained for the later tasks of this project and removed by the last of them.",
   "method": "Opt-in hspec measurement in hmem-server RequestLatencyMeasurementSpec. The real application (local auth, production middleware order including the metadata-only request logger and its phase fields) runs on Warp over loopback with a production-default pool (10 connections, 60 s idle, 30 s statement timeout, 127.0.0.1 DSN) against an isolated native PostgreSQL test cluster. A fixed-seed (0x9bb3fedd, SplitMix64) workspace of the large perf fixture shape is created through HTTP; audit history is spread over 90 days and VACUUM ANALYZE refreshes statistics. Twenty route variants run in a pool-cold sequential pass (200 rounds; the first sample per variant is reported as cold) and in concurrent profiles of 4 and 16 clients with disjoint write targets; the 16-client profile is repeated against a one-stripe pool and then against the production pool again. Each phase records request-log phases joined by X-Request-Id, process checkout counters, pg_stat_activity and pg_locks samples every 25 ms, pg_stat_database deltas and pg_stat_statements. Matched plans come from auto_explain (analyze) on fresh connections for the six slowest sequential variants; a separate RequestPlanModes probe runs nine variants eight times on one connection under plan_cache_mode auto and force_custom_plan. Times are monotonic; app is complete minus wait, hold and provider time.",
   "commands": [
     "HMEM_REQUEST_LATENCY_MEASUREMENT=1 HMEM_TEST_SESSION_DIAGNOSTICS=1 HMEM_REQUEST_LATENCY_OUTPUT=<task scratch> stack test hmem-server:test:hmem-server-test --ta \"--match RequestLatencyMeasurement\"",
@@ -791,52 +791,672 @@
     "Lock activity is minor: lock waits, all advisory, in at most 94 of 1,099 activity samples (126 advisory wait events), at most 3 ungranted locks, no deadlocks and no heap reads (blks_read 0).",
     "The run opened 34 connections. A direct connect averaged 47.9 ms on 127.0.0.1 and 66.5 ms (max 226 ms) on localhost; the first sequential request of a variant paid up to 219 ms of connection time."
   ],
+  "containerSample": {
+    "status": "Isolated Docker container on synthetic data at the stated scale, not production. It replaces the uncollected passive native sample by the user decision of 2026-11-16; the live system was not contacted.",
+    "revision": "8d5101d06c1c1ad839b3449f9292d7fb11141eef",
+    "inputs": {
+      "hmem-core/src/HMem/DB/RequestTiming.hs": "beee43e8cdc555c03605f6635c42f3afb57c69b943da97a6b0545533d4a58981",
+      "hmem-core/src/HMem/DB/Pool.hs": "5d0104903ec68f604edd1435bd12714b10a36f1638dfad1f79055e194018afad",
+      "hmem-core/src/HMem/DB/Timeline.hs": "57a72cc5f0ead6189e1e7557f213bdace640c2c3b952f086acde1694fa0a6720",
+      "hmem-core/src/HMem/DB/ChangeStream.hs": "9dbb63fbb84a22fc0242bf6274187a04d648d7d61c961af7fb0f9fe3de6d48e9",
+      "hmem-server/src/HMem/Server/Logging.hs": "cb1094b88f70429f3afcc54be063904fce5597064667fcdcc753098dcfe70a5e",
+      "hmem-server/src/HMem/Server/API.hs": "f409a3c59a9ac7efc9eee2786fefe57f80a8c592a26695deb52db290b6f58720",
+      "hmem-server/src/HMem/Server/ObservationDiscovery.hs": "0921d78a0a3ad86d4959e395e8baf46064e8a023d2f32d91abd3a5cb23aaefbd",
+      "Dockerfile": "f101f43e9144bd0bed01ae3a3b15aa06b18c60ef546396aded6e199bfa14337a",
+      "tools/perftest/compose.yaml": "3cc7ae68eafa21034e2f7b288594b431643d5453c471264e74f58a5594ab0e3d",
+      "tools/perftest/perftest.mjs": "b581687897d42f7899e387b8d85ac46c4a16097f87ab7de315f4527f5ba32d68",
+      "output/database-sizing-20261102.json": "41b053900aa2888286be614e03fbf300c4bb4e9af8deaff68c2b51adaf895340"
+    },
+    "environment": {
+      "image": "hmem-perftest:8d5101d0 (runtime target, sha256:4ba33992fd0635a24df4ba41ad3f62ee005e3ac7d0e5357b7e7b972987018222)",
+      "dockerfile": "The 8d5101d0 Dockerfile (sha256 c2c920f9e720478715810318ed7ec57a3200a462c68bd6331aa4bfc4711df545) fails because hmem-core cannot find cbits/session_archive.c; the repository Dockerfile now adds COPY hmem-core/cbits hmem-core/cbits. The image was built from a scratch copy (sha256 c68fc6386d8b708df3b94d1a586a32c9ff8708be851554ebfc6fefa0c59be060) that differs from the fixed Dockerfile only by one comment line.",
+      "compose": "tools/perftest/compose.yaml renders the same configuration as the scratch compose file the sample used (docker compose config with identical dummy secrets).",
+      "runner": "perftest.mjs was previously recorded as sha256 3fdff5115371eea323b50b58f5a2fcc91b801b7cd65dbfbcd2d5400cb9a6fead, after the discovery search-session fix made before the capture rerun (observations). The recorded hash adds the image lookup from the running server container before any phase, a summary written even when a phase or the log harvest fails, profile-name validation and line wrapping; seeding and measurement are unchanged.",
+      "host": "Docker Desktop 29.6.1 Linux VM on Windows 11 Pro 10.0.26200, 24 CPUs, 31 GiB",
+      "postgresql": "17.11 (postgres:17-bookworm, the compose.yaml default) with pg_stat_statements (track=top) and track_io_timing; other settings default, including shared_buffers 128 MB and work_mem 4 MB",
+      "server": "compose.yaml hmem service settings (read-only root, tmpfs HOME), local bearer auth with declared bot identities, embedding provider disabled, pool of 10 connections, 60 s idle, 30 s statement timeout, 10 one-connection stripes",
+      "network": "loopback-published ports only; connections averaged 5.5 ms (19 connects)"
+    },
+    "method": "Six workspaces of the large perf shape (the SplitMix64 generator of RequestLatencyMeasurementSpec, seeds 0x9bb3fedd+i) were created through HTTP. 562 terminated and 12 active sessions of transcript-like JSONL (gzip ratio 2.45) were uploaded through the session API in 16 to 256 KiB record-aligned appends, with log-normal sizes normalised to the production totals; the server worker archived the terminated sessions. About 7,100 API task updates were made; task-update audit rows were then replicated 25 times in SQL with fresh ids, spread over 90 days, followed by VACUUM FULL audit_log and VACUUM ANALYZE. Load used the isolated route mix after one warm-up round, with disjoint write targets per client. Profiles: sequential, 4 clients, 16 clients, and 16 clients with four appenders, each sending 4 to 32 KiB to its own active session every 250 ms. Phases come from the server request log joined by X-Request-Id and from GET /api/v1/health pool.checkout deltas; pg_stat_activity and pg_locks are sampled every 25 ms inside the database container, with pg_stat_database deltas and pg_stat_statements per profile. Matched plans come from auto_explain (analyze, buffers) on a restarted server and from EXPLAIN of the outbox replay statement.",
+    "commands": ["docker build -f Dockerfile --target runtime --label hmem.perftest.revision=8d5101d06c1c1ad839b3449f9292d7fb11141eef --label hmem.perftest.owner=task-9bb3fedd --label hmem.perftest.dockerfile=repo-Dockerfile-plus-hmem-core-cbits -t hmem-perftest:8d5101d0 .", "docker compose -p hmem-perftest -f tools/perftest/compose.yaml --env-file .tmp/perftest/secrets.env up -d", "node tools/perftest/perftest.mjs seed-planning --workspaces 6", "node tools/perftest/perftest.mjs seed-sessions --scale 1 --clients 8", "node tools/perftest/perftest.mjs seed-history --updates 150000 --clients 16 --primary-share 0.25 (stopped after about 7,100 updates)", "node tools/perftest/perftest.mjs clone-history --factor 25", "node tools/perftest/perftest.mjs spread-history", "node tools/perftest/perftest.mjs manifest", "node tools/perftest/perftest.mjs load --rounds 80", "node tools/perftest/perftest.mjs plans --variants timeline_buckets_day,timeline_buckets_all_time --min-ms 1000", "node tools/perftest/perftest.mjs load --rounds 80 --profiles c16_capture"],
+    "sequence": ["2026-11-16T21:40Z manifest, before any load", "21:40:27Z load --rounds 80: seq, c4, c16 and the discarded first c16_capture; summary written 22:09:35Z", "22:11:16Z plans: settings applied and the server restarted, plans logged 22:11:24Z and 22:11:27Z, settings reset and the server restarted again before the plan log was written at 22:11:30Z","22:11:44Z capture rerun on the fresh server process (auto_explain off; process-wide maxima restarted, per-phase deltas unaffected); summary written 22:14:43Z"],
+    "scratch": "The commands were run with -f .tmp/perftest/Dockerfile and -f .tmp/perftest/compose.yaml, scratch copies equivalent to the committed files (environment.dockerfile, environment.compose).",
+    "outcome": {
+      "seed": "planning 423.5 s; sessions 452.6 s (33,825 appends, 3,618,637,989 bytes); archives published for all 562 sessions within 1,451 s; history clone 10.2 s; spread and compaction 41.6 s",
+      "load": "sequential 1,018.7 s, 4 clients 283.3 s, 16 clients 210.8 s, capture rerun 163.2 s; 9,061 and 3,375 client samples, all joined to log entries"
+    },
+    "fixture": {
+      "source": "production values from output/database-sizing-20261102.json (pg_total_relation_size allocations; outbox and audit from its rounded 0.848 and 0.742 GiB)",
+      "database_bytes": {
+        "production": 6246069951,
+        "container": 5045704371,
+        "scale": 0.81
+      },
+      "terminated_sessions": {
+        "fields": "count, raw bytes, published gzip bytes",
+        "production": [562, 3266580717, 1336047966],
+        "container": [562, 3271093120, 1337017175]
+      },
+      "active_sessions": {
+        "fields": "count, raw bytes at the manifest",
+        "production": [12, 347465270],
+        "container": [12, 347544869]
+      },
+      "session_chunks": {
+        "production": 2834448384,
+        "container": 2411880448,
+        "scale": 0.85,
+        "note": "33,825 chunks; production chunk count unknown"
+      },
+      "session_archive_parts": {
+        "production": 1445576704,
+        "container": 1435557888,
+        "scale": 0.99
+      },
+      "archive_checkpoints_and_ledger": {
+        "production": 174350336,
+        "container": 78921728,
+        "scale": 0.45,
+        "note": "ledger 11.6 MB against 98.8 MB"
+      },
+      "change_stream_outbox": {
+        "production": 910533099,
+        "container": 127811584,
+        "scale": 0.14,
+        "note": "77,220 rows, all API-generated and within retention"
+      },
+      "audit_log": {
+        "production": 796716224,
+        "container": 852860928,
+        "scale": 1.07,
+        "note": "412,738 rows over 90 days, compacted"
+      },
+      "planning": {
+        "workspaces": 6,
+        "projects": 1500,
+        "tasks": 9153,
+        "dependencies": 4232,
+        "observations": 12000,
+        "production": "unknown"
+      },
+      "measuredWorkspace": {
+        "projects": 250,
+        "tasks": 1559,
+        "dependencies": 719,
+        "observations": 2000,
+        "audit_rows": 86438,
+        "audit_rows_note": "manifest snapshot before load; by changed_at in the same database, 87,068 at the matched plans and 87,164 after the capture rerun",
+        "sessions": 225
+      }
+    },
+    "fields": {
+      "routes": "[n, p50, p95, p99 complete_ms (nearest rank), mean wait, mean hold, mean app, mean checkouts, wait share of the mean tail at or above p95]; c16_capture is the rerun after the runner fix",
+      "bytes": "[request, response] mean bytes"
+    },
+    "phases": [
+      {
+        "phase": "seq",
+        "clients": 1,
+        "rounds": 80,
+        "appenders": 0,
+        "elapsedMs": 1018653,
+        "pool": {
+          "checkouts": 107503,
+          "unattributed": 97933,
+          "connects": 19,
+          "capacity_waits": 1603,
+          "wait_total_ms": 578244,
+          "connect_total_ms": 104.4,
+          "hold_total_ms": 1245820
+        },
+        "waitBuckets": {
+          "le_0.1ms": 105449,
+          "le_0.5ms": 121,
+          "le_1ms": 311,
+          "le_5ms": 955,
+          "le_10ms": 98,
+          "le_50ms": 305,
+          "le_100ms": 5,
+          "le_500ms": 62,
+          "le_1000ms": 44,
+          "overflow": 153
+        },
+        "activity": {
+          "samples": 40753,
+          "maxActiveBackends": 4,
+          "samplesWithLockWait": 0,
+          "maxUngrantedLocks": 0,
+          "lockWaitEvents": {}
+        },
+        "database": {
+          "xact_commit": 149695,
+          "xact_rollback": 0,
+          "blks_read": 61069428,
+          "blks_hit": 48279830,
+          "temp_files": 2640,
+          "temp_bytes": 103087398333,
+          "deadlocks": 0
+        },
+        "topStatements": [
+          {
+            "query": "WITH bounds AS ( SELECT date_trunc($4, $2 AT TIME ZONE 'UTC') AS series_start, d",
+            "calls": 240,
+            "totalMs": 885311.5,
+            "meanMs": 3688.798,
+            "maxMs": 4758.7,
+            "sharedRead": 24028051,
+            "tempWritten": 16861712
+          },
+          {
+            "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space)",
+            "calls": 240,
+            "totalMs": 88024.6,
+            "meanMs": 366.769,
+            "maxMs": 571.1,
+            "sharedRead": 52703,
+            "tempWritten": 0
+          },
+          {
+            "query": "SELECT event_id, cursor, occurred_at, envelope FROM change_stream_outbox WHERE s",
+            "calls": 6308,
+            "totalMs": 73911.8,
+            "meanMs": 11.717,
+            "maxMs": 38.5,
+            "sharedRead": 36597032,
+            "tempWritten": 0
+          }
+        ]
+      },
+      {
+        "phase": "c4",
+        "clients": 4,
+        "rounds": 20,
+        "appenders": 0,
+        "elapsedMs": 283275,
+        "pool": {
+          "checkouts": 19764,
+          "unattributed": 10133,
+          "connects": 1,
+          "capacity_waits": 1960,
+          "wait_total_ms": 712636,
+          "connect_total_ms": 5.9,
+          "hold_total_ms": 918202
+        },
+        "waitBuckets": {
+          "le_0.1ms": 17028,
+          "le_0.5ms": 119,
+          "le_1ms": 655,
+          "le_5ms": 1253,
+          "le_10ms": 92,
+          "le_50ms": 197,
+          "le_100ms": 26,
+          "le_500ms": 143,
+          "le_1000ms": 37,
+          "overflow": 214
+        },
+        "activity": {
+          "samples": 11346,
+          "maxActiveBackends": 6,
+          "samplesWithLockWait": 35,
+          "maxUngrantedLocks": 2,
+          "lockWaitEvents": {
+            "Lock:advisory": 42
+          }
+        },
+        "database": {
+          "xact_commit": 32264,
+          "xact_rollback": 0,
+          "blks_read": 37996050,
+          "blks_hit": 37109123,
+          "temp_files": 2640,
+          "temp_bytes": 103288760710,
+          "deadlocks": 0
+        },
+        "topStatements": [
+          {
+            "query": "WITH bounds AS ( SELECT date_trunc($4, $2 AT TIME ZONE 'UTC') AS series_start, d",
+            "calls": 240,
+            "totalMs": 769031.4,
+            "meanMs": 3204.298,
+            "maxMs": 5683.7,
+            "sharedRead": 22644157,
+            "tempWritten": 16894914
+          },
+          {
+            "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space)",
+            "calls": 240,
+            "totalMs": 76350.1,
+            "meanMs": 318.125,
+            "maxMs": 923.3,
+            "sharedRead": 29865,
+            "tempWritten": 0
+          },
+          {
+            "query": "SELECT event_id, cursor, occurred_at, envelope FROM change_stream_outbox WHERE s",
+            "calls": 2416,
+            "totalMs": 25682,
+            "meanMs": 10.63,
+            "maxMs": 52.6,
+            "sharedRead": 14926747,
+            "tempWritten": 0
+          }
+        ]
+      },
+      {
+        "phase": "c16",
+        "clients": 16,
+        "rounds": 7,
+        "appenders": 0,
+        "elapsedMs": 210797,
+        "pool": {
+          "checkouts": 17895,
+          "unattributed": 4419,
+          "connects": 0,
+          "capacity_waits": 124,
+          "wait_total_ms": 2164717,
+          "connect_total_ms": 0,
+          "hold_total_ms": 1745711
+        },
+        "waitBuckets": {
+          "le_0.1ms": 11253,
+          "le_0.5ms": 90,
+          "le_1ms": 321,
+          "le_5ms": 3291,
+          "le_10ms": 917,
+          "le_50ms": 1030,
+          "le_100ms": 119,
+          "le_500ms": 137,
+          "le_1000ms": 202,
+          "overflow": 535
+        },
+        "activity": {
+          "samples": 8436,
+          "maxActiveBackends": 10,
+          "samplesWithLockWait": 37,
+          "maxUngrantedLocks": 2,
+          "lockWaitEvents": {
+            "Lock:advisory": 45
+          }
+        },
+        "database": {
+          "xact_commit": 27656,
+          "xact_rollback": 0,
+          "blks_read": 39109011,
+          "blks_hit": 45614167,
+          "temp_files": 3696,
+          "temp_bytes": 144935838996,
+          "deadlocks": 0
+        },
+        "topStatements": [
+          {
+            "query": "WITH bounds AS ( SELECT date_trunc($4, $2 AT TIME ZONE $5) AS series_start, date",
+            "calls": 336,
+            "totalMs": 1482068.2,
+            "meanMs": 4410.917,
+            "maxMs": 8052.3,
+            "sharedRead": 31968439,
+            "tempWritten": 23707047
+          },
+          {
+            "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space)",
+            "calls": 336,
+            "totalMs": 157088.3,
+            "meanMs": 467.525,
+            "maxMs": 1141.6,
+            "sharedRead": 147276,
+            "tempWritten": 0
+          },
+          {
+            "query": "SELECT event_id, cursor, occurred_at, envelope FROM change_stream_outbox WHERE s",
+            "calls": 1048,
+            "totalMs": 15159.1,
+            "meanMs": 14.465,
+            "maxMs": 64,
+            "sharedRead": 6466978,
+            "tempWritten": 0
+          }
+        ]
+      },
+      {
+        "phase": "c16_capture",
+        "clients": 16,
+        "rounds": 7,
+        "appenders": 4,
+        "elapsedMs": 163194,
+        "pool": {
+          "checkouts": 25534,
+          "unattributed": 5912,
+          "connects": 2,
+          "capacity_waits": 180,
+          "wait_total_ms": 1962394,
+          "connect_total_ms": 13.7,
+          "hold_total_ms": 1330054
+        },
+        "waitBuckets": {
+          "le_0.1ms": 17219,
+          "le_0.5ms": 154,
+          "le_1ms": 1170,
+          "le_5ms": 4006,
+          "le_10ms": 585,
+          "le_50ms": 1358,
+          "le_100ms": 51,
+          "le_500ms": 326,
+          "le_1000ms": 57,
+          "overflow": 608
+        },
+        "activity": {
+          "samples": 6533,
+          "maxActiveBackends": 11,
+          "samplesWithLockWait": 54,
+          "maxUngrantedLocks": 2,
+          "lockWaitEvents": {
+            "Lock:advisory": 55,
+            "Lock:transactionid": 8
+          }
+        },
+        "database": {
+          "xact_commit": 33530,
+          "xact_rollback": 0,
+          "blks_read": 48099944,
+          "blks_hit": 43901636,
+          "temp_files": 3696,
+          "temp_bytes": 145418498426,
+          "deadlocks": 0
+        },
+        "topStatements": [
+          {
+            "query": "WITH bounds AS ( SELECT date_trunc($4, $2 AT TIME ZONE $5) AS series_start, date",
+            "calls": 336,
+            "totalMs": 1116776,
+            "meanMs": 3323.738,
+            "maxMs": 4487.2,
+            "sharedRead": 31038053,
+            "tempWritten": 23785547
+          },
+          {
+            "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space)",
+            "calls": 336,
+            "totalMs": 113177.1,
+            "meanMs": 336.837,
+            "maxMs": 537.4,
+            "sharedRead": 128972,
+            "tempWritten": 0
+          },
+          {
+            "query": "SELECT event_id, cursor, occurred_at, envelope FROM change_stream_outbox WHERE s",
+            "calls": 1396,
+            "totalMs": 23765.4,
+            "meanMs": 17.024,
+            "maxMs": 35.9,
+            "sharedRead": 16366729,
+            "tempWritten": 0
+          }
+        ]
+      }
+    ],
+    "routes": [
+      {
+        "variant": "timeline_buckets_day",
+        "route": "/api/v1/workspaces/{workspaceId}/timeline/buckets",
+        "seq": [79, 4383.1, 4647.8, 4817.4, 1.9, 4397.8, 3.9, 2, 0],
+        "c4": [80, 3667.7, 5599.1, 6703.1, 173.7, 3892.4, 3.1, 2, 0.31],
+        "c16": [112, 5196.1, 11187.2, 15083.5, 993.2, 5280.8, 4.8, 2, 0.56],
+        "c16_capture": [112, 4028.9, 7598.5, 8148.7, 497.4, 4038, 3.4, 2, 0.48],
+        "bytes": [0, 90810]
+      },
+      {
+        "variant": "timeline_buckets_week",
+        "route": "/api/v1/workspaces/{workspaceId}/timeline/buckets",
+        "seq": [79, 3381.2, 3711, 3746.6, 3.3, 3406.4, 0.8, 2, 0],
+        "c4": [80, 2784.5, 5453.8, 9404.6, 256.4, 2915.5, 0.6, 2, 0.5],
+        "c16": [112, 3907.4, 7584.3, 9865.2, 310.9, 4150, 0.7, 2, 0.5],
+        "c16_capture": [112, 3048, 6473.5, 7065.4, 372.3, 3071.5, 0.6, 2, 0.54],
+        "bytes": [0, 14080]
+      },
+      {
+        "variant": "timeline_buckets_all_time",
+        "route": "/api/v1/workspaces/{workspaceId}/timeline/buckets",
+        "seq": [79, 3371, 3634.7, 3727.2, 4.1, 3396.1, 0.7, 3, 0],
+        "c4": [80, 2805.6, 5492.4, 6213, 489, 2926.3, 0.6, 3, 0.51],
+        "c16": [112, 4111.4, 8856.4, 12180.1, 894.1, 3991.8, 0.7, 3, 0.61],
+        "c16_capture": [112, 3058.3, 6462.1, 7242.5, 550.8, 3034.1, 0.6, 3, 0.56],
+        "bytes": [0, 14087]
+      },
+      {
+        "variant": "discovery_continue",
+        "route": "/api/v1/observations/discovery",
+        "seq": [79, 522.8, 563.7, 579.5, 0.9, 522.5, 2.3, 3, 0.02],
+        "c4": [80, 445.9, 808.9, 877.9, 36.6, 456.5, 2, 3, 0.37],
+        "c16": [112, 667.1, 4132.8, 6639.7, 487.3, 639.8, 3.9, 3, 0.9],
+        "c16_capture": [112, 487.4, 3494.5, 6429.7, 554.3, 469.3, 2.1, 3, 0.91],
+        "bytes": [147, 79956]
+      },
+      {
+        "variant": "discovery_content",
+        "route": "/api/v1/observations/discovery",
+        "seq": [79, 526.5, 557.3, 581.4, 0.1, 524.7, 2.4, 3, 0],
+        "c4": [80, 434.7, 566.6, 933.3, 1.4, 453.6, 2, 3, 0.01],
+        "c16": [112, 617.3, 4110.7, 5960.7, 407.6, 657.5, 3.8, 3, 0.86],
+        "c16_capture": [112, 477.1, 857.5, 3394.2, 121.4, 467.9, 2.2, 3, 0.83],
+        "bytes": [189, 81343]
+      },
+      {
+        "variant": "discovery_subject_tree",
+        "route": "/api/v1/observations/discovery",
+        "seq": [79, 8.1, 327.7, 345.2, 2.6, 66.2, 0.3, 3, 0],
+        "c4": [80, 7.6, 2455.9, 3455.5, 299, 56.6, 0.3, 3, 0.98],
+        "c16": [112, 102.8, 4547.5, 6097.4, 717.1, 128.1, 0.5, 3, 0.97],
+        "c16_capture": [112, 17.7, 3407.5, 3802.9, 471.6, 87.9, 0.3, 3, 0.98],
+        "bytes": [193, 561]
+      },
+      {
+        "variant": "task_update_fields",
+        "route": "/api/v1/tasks/{taskId}",
+        "seq": [79, 54.5, 140.2, 149.2, 8.4, 53.1, 0.3, 9.38, 0.66],
+        "c4": [80, 47.6, 2863, 3841.1, 306.6, 48.5, 0.3, 10.05, 0.99],
+        "c16": [112, 105.1, 4399.6, 6394, 673.6, 78.2, 0.5, 10.179, 0.99],
+        "c16_capture": [112, 61.1, 3527.1, 4502.2, 538.6, 52.7, 0.3, 10.179, 0.99],
+        "bytes": [43, 770]
+      },
+      {
+        "variant": "nav_batch",
+        "route": "/api/v1/workspaces/{workspaceId}/navigation/batch",
+        "seq": [79, 54.2, 66.3, 97.5, 3.1, 51.6, 0.7, 28.342, 0.33],
+        "c4": [80, 42.3, 107.6, 3232.8, 53.8, 41, 0.6, 28.413, 0.95],
+        "c16": [112, 143.5, 4866.9, 9877.1, 804.5, 89.9, 1.6, 28.268, 0.99],
+        "c16_capture": [112, 59, 3655.4, 12267, 595.9, 49, 0.8, 28.268, 0.99],
+        "bytes": [410, 13604]
+      },
+      {
+        "variant": "task_update_status",
+        "route": "/api/v1/tasks/{taskId}",
+        "seq": [79, 55, 65.4, 128.6, 2.3, 53.3, 0.3, 9, 0.26],
+        "c4": [80, 50.5, 101.2, 124.8, 6.5, 52, 0.3, 9, 0.34],
+        "c16": [112, 82, 3416.8, 5826.3, 315.1, 76.8, 0.5, 9, 0.98],
+        "c16_capture": [112, 61.3, 3069.5, 3537.2, 284.3, 53.7, 0.3, 9, 0.99],
+        "bytes": [20, 1884]
+      },
+      {
+        "variant": "observation_subject_tree",
+        "route": "/api/v1/observations/subject-tree",
+        "seq": [79, 10.5, 59.3, 64.6, 0.2, 24.6, 0.3, 3, 0],
+        "c4": [80, 36.2, 66.9, 3092.3, 44.2, 32.9, 0.2, 3, 0.93],
+        "c16": [112, 48.6, 129.9, 1063.3, 56.4, 47.1, 0.4, 3, 0.92],
+        "c16_capture": [112, 38.7, 483.3, 2997.8, 126.1, 26.8, 0.2, 3, 0.99],
+        "bytes": [0, 1946]
+      },
+      {
+        "variant": "nav_root",
+        "route": "/api/v1/workspaces/{workspaceId}/navigation",
+        "seq": [79, 47.7, 58.5, 119, 2.7, 44.2, 2.6, 8, 0.47],
+        "c4": [80, 43, 112.7, 4282.4, 133.4, 39.3, 2.2, 8, 0.98],
+        "c16": [112, 104, 5540.3, 7545.2, 1041.5, 62.5, 3.8, 8, 0.99],
+        "c16_capture": [112, 56.2, 4121, 5992.6, 821.3, 42.6, 2.1, 8, 0.99],
+        "bytes": [0, 61733]
+      },
+      {
+        "variant": "task_get",
+        "route": "/api/v1/tasks/{taskId}",
+        "seq": [79, 4.1, 41.5, 66, 3, 3.9, 0.2, 3, 0.92],
+        "c4": [80, 2.8, 31.4, 3475.9, 80.1, 2.8, 0.1, 3, 1],
+        "c16": [112, 5.2, 1641.7, 5735.6, 216.5, 5.8, 0.3, 3, 1],
+        "c16_capture": [112, 4.2, 3181.6, 6980.8, 341.2, 3.6, 0.2, 3, 1],
+        "bytes": [0, 758]
+      },
+      {
+        "variant": "timeline_events",
+        "route": "/api/v1/workspaces/{workspaceId}/timeline",
+        "seq": [79, 8.9, 34.6, 46.9, 2.5, 8, 0.8, 2, 0.77],
+        "c4": [80, 8.3, 1933.4, 2327.5, 243.1, 7.5, 0.8, 2, 1],
+        "c16": [112, 13.7, 3731.3, 4882.7, 564.7, 13.3, 0.9, 2, 1],
+        "c16_capture": [112, 11.9, 3142.8, 5542.6, 465.9, 10.8, 0.7, 2, 1],
+        "bytes": [0, 37343]
+      },
+      {
+        "variant": "observation_list_query",
+        "route": "/api/v1/observations",
+        "seq": [79, 14.5, 27, 29.9, 0.3, 13.2, 2.3, 3, 0.08],
+        "c4": [80, 12.3, 26.6, 47.6, 1.8, 11.3, 2.2, 3, 0.45],
+        "c16": [112, 20.3, 64.2, 1116.4, 59.5, 17.6, 3.2, 3, 0.97],
+        "c16_capture": [112, 15, 351.5, 3201.1, 97.4, 12.3, 1.9, 3, 0.99],
+        "bytes": [0, 81000]
+      },
+      {
+        "variant": "search_unified",
+        "route": "/api/v1/search",
+        "seq": [79, 14.6, 26.6, 38.9, 0.9, 22.4, 0, 6, 0.05],
+        "c4": [80, 20.5, 2934.9, 3957.2, 622.7, 17.6, 0, 6, 1.05],
+        "c16": [112, 3085.1, 6972.7, 8444.1, 5220.8, 28.9, 0, 6, 1.5],
+        "c16_capture": [112, 2221.5, 4783, 6633.8, 3421.8, 18.9, 0, 6, 1.23],
+        "bytes": [83, 22705]
+      },
+      {
+        "variant": "nav_project",
+        "route": "/api/v1/workspaces/{workspaceId}/navigation",
+        "seq": [79, 14.5, 21, 48.1, 0.7, 14.1, 0.4, 7.848, 0.31],
+        "c4": [80, 12.9, 2629.4, 4780.8, 255.9, 11.7, 0.3, 7.925, 1],
+        "c16": [112, 35.5, 3692.2, 9483.2, 887.7, 21.7, 0.5, 7.875, 1],
+        "c16_capture": [112, 17.6, 3914.8, 5862.4, 780.3, 13.9, 0.3, 7.875, 1],
+        "bytes": [0, 3298]
+      },
+      {
+        "variant": "nav_focus",
+        "route": "/api/v1/workspaces/{workspaceId}/navigation/focus/{entityType}/{entityId}",
+        "seq": [79, 17.2, 20.1, 23.8, 0.4, 16.5, 0.4, 13, 0.03],
+        "c4": [80, 13.8, 34.3, 2770.8, 43.7, 13.2, 0.3, 13, 0.98],
+        "c16": [112, 35.3, 4167.6, 5609.6, 416.6, 29.4, 0.5, 13, 0.99],
+        "c16_capture": [112, 18.8, 320, 4003.3, 132.6, 16.4, 0.4, 13, 0.99],
+        "bytes": [0, 2541]
+      },
+      {
+        "variant": "project_overview",
+        "route": "/api/v1/projects/{projectId}/overview",
+        "seq": [79, 13.5, 16.2, 29, 0.5, 12.9, 0.4, 5.987, 0.18],
+        "c4": [80, 10.3, 15.5, 49, 1, 10.2, 0.3, 6, 0.34],
+        "c16": [112, 18.6, 412.4, 3113.2, 119, 17.9, 0.6, 6, 0.99],
+        "c16_capture": [112, 13.3, 529.3, 4090.2, 186.3, 11.9, 0.4, 6, 1],
+        "bytes": [0, 5046]
+      },
+      {
+        "variant": "task_list_query",
+        "route": "/api/v1/tasks",
+        "seq": [79, 8.3, 11.3, 20.1, 0.5, 7.5, 0.9, 3, 0.33],
+        "c4": [80, 7.2, 31.9, 62.6, 3.3, 6.2, 0.7, 3, 0.85],
+        "c16": [112, 12.4, 301.5, 3859.2, 192.5, 10.3, 1.1, 3, 1],
+        "c16_capture": [112, 8.7, 507, 3818, 177.5, 7.2, 0.8, 3, 1],
+        "bytes": [0, 45114]
+      },
+      {
+        "variant": "planning_counts",
+        "route": "/api/v1/workspaces/{workspaceId}/planning-counts",
+        "seq": [79, 4.1, 5.2, 7.2, 0.1, 3.9, 0.2, 2, 0.28],
+        "c4": [80, 3.3, 28.6, 438.9, 11.8, 3.2, 0.1, 2, 0.98],
+        "c16": [112, 5.3, 73.6, 4034.6, 121.6, 5.7, 0.2, 2, 1],
+        "c16_capture": [112, 4.4, 475.6, 2990.5, 108, 3.8, 0.2, 2, 1],
+        "bytes": [0, 39]
+      },
+      {
+        "variant": "health",
+        "route": "/api/v1/health",
+        "seq": [79, 0.4, 0.6, 1.1, 0, 0, 0.4, 0, 0],
+        "c4": [80, 0.3, 0.4, 0.6, 0, 0, 0.3, 0, 0],
+        "c16": [112, 0.3, 0.6, 0.9, 0, 0, 0.3, 0, 0],
+        "c16_capture": [112, 0.2, 0.5, 0.6, 0, 0, 0.2, 0, 0],
+        "bytes": [0, 604]
+      },
+      {
+        "variant": "session_append",
+        "route": "/api/v1/workspaces/{workspaceId}/sessions/{sessionId}/append",
+        "c16_capture": [1023, 12.6, 3076.1, 4238.6, 364.8, 11.1, 0.8, 6, 1],
+        "bytes": [27296, 701]
+      }
+    ],
+    "matchedPlans": [
+      {
+        "statement": "Timeline buckets (WITH bounds), day buckets over 92 days, 87,068 workspace audit rows",
+        "evidence": "4,656 ms: a sequential scan of all 413,368 audit_log rows keeps 85,676 and removes 327,692 by filter (326,300 from other workspaces, 1,392 of the workspace's other entity types);the inventory_state_values sort spills 123,544 kB to disk; the per-bucket nested loop emits 4,000,752 rows and removes 3,966,932 by join filter over 93 buckets; 106,216 shared blocks read and 70,758 temp blocks written per call. All-time week buckets: 3,015 ms with the same shape."
+      },
+      {
+        "statement": "Change-stream replay (HMem.DB.ChangeStream listOutboxAfterStatement)",
+        "evidence": "workspace_id IS NOT DISTINCT FROM $2 is not an index condition. The custom plan scans idx_change_stream_outbox_replay on scope and cursor only and filters 6,797 rows (7,225 buffers, 5.0 ms); the generic plan scans the whole outbox (78,854 rows, 12,645 buffers, 13.0 ms). Called about 6.2 times/s as background work during the sequential profile."
+      }
+    ],
+    "observations": ["Timeline buckets are the dominant tail and pool holder at this history size: 3,371 to 4,383 ms sequential p50 (n=79) against 139 to 247 ms with 5,789 audit rows. The statement was 885 s of 1,246 s pooled hold time sequentially (71%) and 84 to 85% under concurrency, writing about 430 MB of temporary files per call.", "Pool wait follows the bucket holds. With 4 clients, timeline events, project navigation, the discovery subject tree, task field updates and unified search reached 1.9 to 2.9 s p95, while task status updates stayed at 101 ms; with 16 clients and capture, pool wait was 98 to 100% of the tail for every database variant except timeline buckets (48 to 56%), discovery content (83%), discovery continuation (91%) and unified search (123%, three concurrent branches). Capacity waits occurred in every profile: 1,603 sequential, 1,960 with 4 clients, 124 and 180 with 16 clients (lower bounds).", "Background work is most pool traffic: unattributed checkouts were 97,933 of 107,503 sequentially (about 96/s) and 23 to 51% under load. Sequentially, background checkouts waited about 575 s in total against 3 s for requests, with 153 waits over 1 s.", "Session capture appends make 6 checkouts each; under 16 clients they had 12.6 ms p50 but 3,076 ms p95, 4,239 ms p99 and 8,781 ms max (n=1,023), with 100% pool wait in the tail.", "Discovery is unchanged from the isolated baseline at 523 to 527 ms p50 with over 99% hold; its subject tree remains bimodal (8 ms p50, 328 ms p95).", "Timeline events took 8.9 ms p50 and 46.9 ms p99 sequentially (hold 8 ms), so the isolated generic-plan tail (234 ms p50 on PostgreSQL 18.2) did not reproduce on PostgreSQL 17.11 at this scale.", "Locks: lock waits in at most 54 of 6,533 samples (advisory and transaction-id), at most 2 ungranted locks, no deadlocks. Application residual at most 7.2 ms. Connection setup 5.5 ms.", "A discarded first capture profile returned 17 429 discovery_capacity responses because the runner started new discovery search sessions per profile, leaving 32 live contexts from the previous profile under the server limit of 64. The runner now reuses one search session per client and view; the rerun had no errors."],
+    "limitations": ["Not production: one Docker Desktop VM with PostgreSQL 17.11 and default memory settings, 5.5 ms connections instead of the native host's 47.9 ms, and synthetic data. Production request mix, concurrency, PostgreSQL version and settings remain unknown.", "Scale differs per family (fixture.*.scale): archive sidecars 0.45 and outbox 0.14; production appends are probably smaller (its ledger is 8.5 times larger). Audit history is 26 copies of API task-update rows spread uniformly over 90 days; the measured workspace may hold more or less history than the busiest production workspace.", "Shared buffers (128 MB) are smaller than the audit table, so bucket calls read from the VM page cache (61 million blocks read sequentially); first-touch disk reads were not measured.", "Sample sizes: n=79 sequential and 80 with 4 clients (p99 is the maximum) and n=112 with 16 clients (p99 is the second-largest); tail compositions are 4 to 6 samples, 52 for appends.", "No one-stripe probe in the container: the pool stripe count is not configurable without a code change.", "Active sessions grew during the capture profiles after the manifest (about 2,000 appends)."]
+  },
   "dispositions": [
     {
       "priority": 1,
-      "area": "pool striping",
-      "evidence": "c4 profile and one-stripe probe; the probe is mixed (lower total time and most p95, but higher p50 and higher p95 for planning_counts, task_list_query and task_update_status)",
-      "candidate": "Pool configuration: one stripe, or stripes holding several connections each, instead of min(pool size, capabilities) one-connection stripes.",
-      "condition": "Out of scope here; one stripe is not a clear win. Propose only with an authorized passive sample showing capacity waits or tail pool wait in production and a matched rerun showing lower c4 and c16 p95/p99 without an unacceptable light-load p50 change."
+      "area": "timeline buckets",
+      "evidence": "container sample: 3.4 to 4.4 s sequential p50 at 86,438 to 87,068 workspace audit rows, 71 to 85% of pooled hold time, whole-table audit scan, about 430 MB temp per call and 4 million per-bucket join rows; isolated plan showed the same per-bucket rescan at 16 MB",
+      "candidate": "Bucket the inventory without scanning all audit history and accumulate it per bucket instead of rescanning deltas per bucket; statement-local memory only if the spill still matters.",
+      "condition": "Out of scope here. Identical bucket output, a matched plan and a container rerun at this history size."
     },
     {
       "priority": 2,
+      "area": "pool striping",
+      "evidence": "isolated c4 profile and mixed one-stripe probe; container capacity waits in every profile and 98 to 100% pool wait in short-route tails behind multi-second holds",
+      "candidate": "Pool configuration: one stripe, or stripes holding several connections each, instead of min(pool size, capabilities) one-connection stripes.",
+      "condition": "Out of scope here; one stripe is not a clear win. After priority 1, a container rerun must lower c4 and c16 p95/p99 and capacity waits without an unacceptable light-load p50 change."
+    },
+    {
+      "priority": 3,
       "area": "Observation discovery SQL",
-      "evidence": "matched plans: join filters over CTE scans grow with eligible rows times ranked rows",
+      "evidence": "matched plans: join filters over CTE scans grow with eligible rows times ranked rows; unchanged in the container",
       "candidate": "Rank FTS and semantic candidates without the joins over CTE scans (for example window ranks in eligible), or make the joins hashable.",
       "condition": "Out of scope here. Requires identical discovery results (ObservationDiscoverySpec), a matched plan and a matched rerun."
     },
     {
-      "priority": 3,
-      "area": "timeline events plan",
-      "evidence": "plan-mode probe and matched plans",
-      "candidate": "Avoid the generic plan for this statement only (unprepared execution, or predicates without nullable parameters).",
-      "condition": "Out of scope here. Matched rerun of executions after the fifth on one connection."
-    },
-    {
       "priority": 4,
-      "area": "timeline buckets",
-      "evidence": "per-bucket nested loop and temp spill",
-      "candidate": "Cumulative inventory per bucket instead of rescanning deltas per bucket; statement-local memory only if the spill is shown to matter.",
-      "condition": "Out of scope here. Matched rerun with identical bucket output."
+      "area": "change-stream replay",
+      "evidence": "container plan: workspace_id IS NOT DISTINCT FROM $2 prevents an index condition; the generic plan scans the whole outbox about 6 times/s as background work, at one seventh of the production outbox",
+      "candidate": "Index-compatible predicates for workspace and global scopes (for example separate statements).",
+      "condition": "Out of scope here. Identical replay results and a matched plan at production outbox size."
     },
     {
       "priority": 5,
       "area": "checkouts per request",
-      "evidence": "9 to 28 checkouts per write or navigation request",
+      "evidence": "9 to 28 checkouts per write or navigation request and 6 per session append; container append tails are pool wait",
       "candidate": "Fewer transactions per request where semantics allow.",
-      "condition": "Revisit after priority 1, only with matched contention evidence."
+      "condition": "Revisit after priority 2, only with matched contention evidence."
     },
     {
       "priority": 6,
+      "area": "timeline events plan",
+      "evidence": "isolated plan-mode probe and matched plans on PostgreSQL 18.2; not reproduced in the container on PostgreSQL 17.11 (8.9 ms p50)",
+      "candidate": "Avoid the generic plan for this statement only (unprepared execution, or predicates without nullable parameters).",
+      "condition": "Out of scope here. Reproduce on the production PostgreSQL major version, then a matched rerun of executions after the fifth on one connection."
+    },
+    {
+      "priority": 7,
       "area": "no change",
       "evidence": "locks, connection setup, application residual, provider",
       "candidate": "None. Keep 127.0.0.1 DSNs on Windows hosts.",
-      "condition": "Recheck with the passive sample."
+      "condition": "Recheck with any later production sample."
     }
   ],
   "limitations": [
-    "Passive native sample not collected: live stack/DB access not authorized in this run, 2026-11-16. Production stripes, request mix, concurrency and data sizes are therefore unmeasured. The request-log phase fields and the health pool.checkout counters added here are the instruments for that sample.",
+    "No passive native sample was collected. By the user decision of 2026-11-16 the isolated Docker container sample (containerSample) replaces it; it is synthetic and not production, and its own limits are listed there. Production stripes, request mix, concurrency and planning sizes remain unmeasured.",
     "One host, loopback HTTP and one 2,000-Observation workspace with warm shared buffers (no heap reads). The host has 24 capabilities, so the pool had 10 one-connection stripes; the production capability count decides its stripes.",
     "Sample sizes: n=199 per sequential variant (p99 is the second-largest sample) and 100 (c4) or 128 (c16) per concurrent variant; tail compositions average 6 to 10 samples.",
     "Run-to-run variance is material on this shared host: an earlier matched run had 2 to 6 times higher sequential p99 for discovery and timeline routes. Only this run is recorded; two earlier runs had a navigation fixture defect or no pg_stat_statements and were discarded.",

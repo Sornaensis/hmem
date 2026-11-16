@@ -117,7 +117,7 @@ Concurrent profiles with disjoint write targets (n=100 for 4 clients, 128 for
 One stripe was mixed: against the first 16-client run, p95 ranged from 4.3
 times higher (planning counts) to 7.3 times lower (navigation root).
 
-## Findings
+## Isolated findings
 
 1. **Pool stripes.** With 4 clients and at most 3 active backends, 2,652 of
    11,716 checkouts were capacity waits and checkout wait totalled 111 s in a
@@ -145,26 +145,157 @@ times higher (planning counts) to 7.3 times lower (navigation root).
    94 of 1,099 samples, at most 3 ungranted locks, no deadlocks), connection setup (47.9 ms on 127.0.0.1,
    66.5 ms on `localhost`) or application work (at most 3.4 ms).
 
+## Container sample
+
+The receipt's `containerSample` records a second, passive sample: the server's
+own request-log phase fields and `pool.checkout` counters, from an isolated
+Docker container on synthetic data at the stated per-family scale. It is **not
+a production sample**. The live system was not contacted.
+
+The image is `master` 8d5101d0, built with the `hmem-core/cbits` copy that
+`Dockerfile` now includes. PostgreSQL is the 17.11 official image with default
+128 MB shared buffers and `pg_stat_statements`; Docker Desktop has 24 CPUs, so
+the pool has 10 one-connection stripes. Data was created through the HTTP API
+in six workspaces of the perf shape above. Sessions were uploaded, terminated
+and archived by the server's worker. API task updates were then replicated in
+SQL to reach the audit volume, and history was spread over 90 days:
+
+| Family | 2 Nov production | Container | Scale |
+| --- | --- | --- | --- |
+| Database | 6.25 GB | 5.05 GB | 0.81 |
+| Terminated sessions, raw / gzip | 562, 3.27 / 1.34 GB | 562, 3.27 / 1.34 GB | 1.00 |
+| Active sessions | 12, 347 MB | 12, 348 MB | 1.00 |
+| `session_chunks` | 2.83 GB | 2.41 GB (33,825 chunks) | 0.85 |
+| `session_archive_parts` | 1.45 GB | 1.44 GB | 0.99 |
+| Archive checkpoints and ledger | 0.17 GB | 0.08 GB | 0.45 |
+| `change_stream_outbox` | 0.91 GB | 0.13 GB (77,220 rows) | 0.14 |
+| `audit_log` | 0.80 GB | 0.85 GB (412,738 rows) | 1.07 |
+
+Production planning counts are unknown. The container has 1,500 projects,
+9,153 tasks and 12,000 Observations. The measured workspace has 250 projects,
+1,559 tasks, 719 dependencies, 2,000 Observations and 86,438 audit rows before
+load (87,068 at the matched plans).
+
+`tools/perftest/compose.yaml` defines the environment and
+`tools/perftest/perftest.mjs` seeds and drives it. Put random hex values for
+`POSTGRES_PASSWORD`, `HMEM_API_KEY` and `HMEM_AUTH_LOCAL_USER_TOKEN` in the
+gitignored `.tmp/perftest/secrets.env`, one `KEY=value` per line (for example
+from `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`),
+then build and start it. The runner requires the `hmem.perftest.revision`
+label; set `PERFTEST_IMAGE` for a tag other than `hmem-perftest:8d5101d0`.
+
+```sh
+docker build -f Dockerfile --target runtime --label hmem.perftest.revision=$(git rev-parse HEAD) -t hmem-perftest:$(git rev-parse --short=8 HEAD) .
+docker compose -p hmem-perftest -f tools/perftest/compose.yaml --env-file .tmp/perftest/secrets.env up -d
+```
+
+The receipt's `containerSample.commands` lists the recorded commands in order.
+Each profile runs the isolated route mix after one warm-up round, joining
+client samples to log entries by `X-Request-Id`. Profiles: sequential (n=79
+per variant), 4 clients (n=80), 16 clients (n=112), and 16 clients plus four
+session capture appenders (n=112, 1,023 appends). Times are milliseconds; hold
+is the sequential mean. The tail share is pool wait in the slowest 5% of the
+capture profile.
+
+| Variant | Seq p50 | Seq p95 | Seq p99 | Hold | 4 p95 | 16 p95 | 16+capture p95 | 16+capture p99 | Tail wait |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| timeline day buckets | 4,383 | 4,648 | 4,817 | 4,398 | 5,599 | 11,187 | 7,599 | 8,149 | 48% |
+| timeline week buckets | 3,381 | 3,711 | 3,747 | 3,406 | 5,454 | 7,584 | 6,474 | 7,065 | 54% |
+| timeline all-time buckets | 3,371 | 3,635 | 3,727 | 3,396 | 5,492 | 8,856 | 6,462 | 7,243 | 56% |
+| discovery content | 527 | 557 | 581 | 525 | 567 | 4,111 | 858 | 3,394 | 83% |
+| discovery continuation | 523 | 564 | 580 | 522 | 809 | 4,133 | 3,495 | 6,430 | 91% |
+| discovery subject tree | 8.1 | 328 | 345 | 66 | 2,456 | 4,547 | 3,407 | 3,803 | 98% |
+| task field update | 55 | 140 | 149 | 53 | 2,863 | 4,400 | 3,527 | 4,502 | 99% |
+| task status update | 55 | 65 | 129 | 53 | 101 | 3,417 | 3,069 | 3,537 | 99% |
+| navigation batch | 54 | 66 | 98 | 52 | 108 | 4,867 | 3,655 | 12,267 | 99% |
+| navigation root | 48 | 59 | 119 | 44 | 113 | 5,540 | 4,121 | 5,993 | 99% |
+| navigation project | 15 | 21 | 48 | 14 | 2,629 | 3,692 | 3,915 | 5,862 | 100% |
+| navigation focus | 17 | 20 | 24 | 16 | 34 | 4,168 | 320 | 4,003 | 99% |
+| unified search | 15 | 27 | 39 | 22 | 2,935 | 6,973 | 4,783 | 6,634 | 123% |
+| timeline events | 8.9 | 35 | 47 | 8.0 | 1,933 | 3,731 | 3,143 | 5,543 | 100% |
+| task read | 4.1 | 42 | 66 | 3.9 | 31 | 1,642 | 3,182 | 6,981 | 100% |
+| session append | | | | | | | 3,076 | 4,239 | 100% |
+
+Other variants stayed below 60 ms sequential p95 and below 530 ms p95 with
+capture. All requests completed, apart from a runner defect, since fixed, that
+caused 17 `429 discovery_capacity` responses in a discarded first capture
+profile. Unified search waits for three concurrent branches, so its tail wait
+exceeds its duration.
+
+| Profile | Duration | Checkouts | Unattributed | Capacity waits | Wait total | Waits over 1 s |
+| --- | --- | --- | --- | --- | --- | --- |
+| sequential | 1,019 s | 107,503 | 97,933 | 1,603 | 578 s | 153 |
+| 4 clients | 283 s | 19,764 | 10,133 | 1,960 | 713 s | 214 |
+| 16 clients | 211 s | 17,895 | 4,419 | 124 | 2,165 s | 535 |
+| 16 clients + capture | 163 s | 25,534 | 5,912 | 180 | 1,962 s | 608 |
+
+## Container findings
+
+1. **Timeline buckets dominate at production-scale history.** With about 87,000
+   audit rows in the workspace, buckets take 3.4 to 4.4 s sequentially, against
+   140 to 250 ms with the isolated baseline's 5,789. The matched plan reads the
+   whole 0.85 GB audit table, removes 327,692 rows by filter (about 326,300 from
+   other workspaces) and writes 0.4 to 0.6 GB of temporary files. For 93 day
+   buckets its per-bucket loop then evaluates 8.0 million joined rows and keeps
+   half. The statement was 71% of all pooled hold time sequentially and 84 to
+   85% under concurrency.
+2. **Pool waits follow those holds.** A bucket request holds one stripe's only
+   connection for 3 to 5 s. Requests and background checkouts on that stripe
+   wait meanwhile, even when the pool has idle connections elsewhere.
+   With 4 clients, timeline events, project navigation, the discovery subject
+   tree, task field updates and unified search reached 1.9 to 2.9 s p95; task
+   status updates stayed at 101 ms. With capture, pool wait was 98 to 100% of
+   the tail for every database variant except timeline buckets (48 to 56%),
+   discovery content (83%), discovery continuation (91%) and unified search
+   (123%). Session capture
+   appends had a 13 ms median but a 3.1 s p95 under 16 clients. Even the
+   sequential profile had 1,603 capacity waits and 575 s of background wait.
+3. **Background checkouts are most checkouts.** Unattributed checkouts were
+   91% sequentially (about 96/s) and 23 to 51% under load. One source is the
+   change-stream replay statement (`HMem.DB.ChangeStream`, about six polls/s).
+   Its `workspace_id IS NOT DISTINCT FROM $2` predicate is not an index
+   condition: the custom plan uses `idx_change_stream_outbox_replay` on scope
+   and cursor only and filters `workspace_id`, and the generic plan scans the
+   whole outbox: 12,645 buffers, 13 ms, at one seventh of the production outbox.
+4. **Discovery is unchanged** at 523 to 527 ms p50, over 99% hold, with the same
+   2,000 Observations per workspace.
+5. **The timeline events generic-plan tail did not reproduce**: 8.9 ms p50 and
+   47 ms p99 on PostgreSQL 17.11, against 234 ms in the native PostgreSQL 18.2
+   run.
+6. **No change needed** for locks (lock waits in at most 54 of 6,533 samples,
+   advisory or transaction-id; at most 2 ungranted; no deadlocks), connection
+   setup (5.5 ms in the container) or application work (at most 7.2 ms).
+
 ## Disposition
 
-These are candidates, not changes. Each needs the passive sample below and a
-matched rerun before implementation.
+These are candidates, not changes. Each needs a matched rerun, in the
+container or a later production sample, before implementation.
 
 | Priority | Candidate | Condition |
 | --- | --- | --- |
-| 1 | Configure the pool with one stripe, or stripes holding several connections each. | One stripe is not a clear win (finding 1). Production `capacity_waits` or tail pool wait, and a matched rerun with lower 4- and 16-client tails without an unacceptable light-load median. |
-| 2 | Rank discovery candidates without joins over CTE scans. | Identical discovery results and a matched plan. |
-| 3 | Avoid the generic plan for the timeline events statement only. | Matched executions after the fifth on one connection. |
-| 4 | Accumulate timeline inventory per bucket instead of rescanning. | Identical bucket output. |
-| 5 | Fewer transactions per request where semantics allow. | After priority 1, with contention evidence. |
+| 1 | Bucket timeline inventory without a whole-table audit scan and per-bucket rescans; accumulate per bucket. | Identical bucket output; matched plan and container rerun at this history size. |
+| 2 | Configure the pool with one stripe, or stripes holding several connections each. | After priority 1. The isolated one-stripe probe was mixed. A container rerun must lower 4- and 16-client tails and capacity waits without an unacceptable light-load median. |
+| 3 | Rank discovery candidates without joins over CTE scans. | Identical discovery results and a matched plan. |
+| 4 | Make the change-stream replay predicate index-compatible. | Identical replay results; matched plan at production outbox size. |
+| 5 | Fewer transactions per request where semantics allow, including session appends (6 checkouts). | After priority 2, with contention evidence. |
+| 6 | Avoid the generic plan for the timeline events statement only. | Reproduce it on the production PostgreSQL major version first. |
 
 ## Sample limits
 
-The passive native sample was not collected: live stack/DB access not
-authorized in this run, 2026-11-16. Production stripes, request mix,
-concurrency and data sizes are therefore unknown; request-log phase fields and
-the health counters are the instruments for that sample. The isolated run is
-one host and one workspace with warm buffers. Results vary between runs on
-this shared host: an earlier matched run had 2 to 6 times higher sequential p99
-for discovery and timeline routes. Hybrid discovery and provider time were not
-measured.
+No passive native sample was collected. On 16 November 2026 the user chose
+the isolated container instead of the live system. Production request mix,
+concurrency, PostgreSQL version and settings, chunk sizes and planning
+history therefore remain unknown. The container's Linux VM, PostgreSQL 17
+and 5.5 ms connections differ from the native Windows host's 47.9 ms
+connections. Container data is synthetic. Production's archive ledger is 8.5
+times larger, suggesting smaller appends. The outbox is a seventh of
+production's, and audit history was replicated from API updates and spread
+uniformly. The measured workspace may hold more or less history than the
+busiest production workspace. Sample sizes: n=79 sequential and 80 with
+4 clients, so p99 is the maximum; n=112 with 16 clients, so p99 is the
+second-largest sample. Shared buffers (128 MB) hold less than the audit table,
+so bucket calls read it from the VM page cache. The isolated run was one
+host and one workspace with warm buffers. Results vary between runs on the
+shared host: an earlier matched isolated run had 2 to 6 times higher
+sequential p99 for discovery and timeline routes. Hybrid discovery and
+provider time were not measured.

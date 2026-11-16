@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M7J54P8HM26RN3100CSYYBRZ"
+relation = "amends"
+from_record = "R01M7J54P8H35M7K2GSKER74ZBB"
+subject_adr = "A01M39RTNXZ8BWZ54DXPN50GCCM"
+to_records = ["R01M74YJ2SF7CTHQHQH2E2HCVDQ"]
++++
+
+Scope unfinished delivery cleanup to its connection so a stuck catch-up cannot close admission or stop dispatch.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjbGF1ZGUtY29kZSIsImsiOiJsbG0iLCJtIjoiY2xhdWRlLW9wdXMtNS01In0sImIiOiIyMGMyZTQ1OGE4OTNlYTJlNzRiZjZjZDZhZTVkNTA0Yjk3YTBiNGRlIiwiaSI6InNoYTI1NjpCaTVsQnpjY3RXeDF3bkU4MXZWT0R3aHdySkhPODN3aldVY2pVMUZwejFZIiwiayI6ImNvbm5lY3Rpb24uYW1lbmRzIiwibyI6IkMwMU03SjU0UDhITTI2Uk4zMTAwQ1NZWUJSWiIsIm9wIjoiTzAxTTdKNTRQOEgzNU03SzJHU0tFUjc0WkJCIiwicCI6WyJSMDFNNzRZSjJTRjdDVEhRSFFIMkUySENWRFEiXSwiciI6Im1hc3RlciIsInMiOiJzaGEyNTY6VkxRWjc1NG1rS1laNklQNHNJWi1KdWZkODZtd1VRZm5meFhuS0p2dWd0MCIsInQiOjE3OTQ4MzE5NjQ0MzMsInYiOjEsIngiOiJhZHJhaS8xLjAuMCJ9 -->

@@ -1,0 +1,241 @@
+{
+  "format_version": 1,
+  "task": "436011f3-fcb9-42a5-a8cc-444afa10bdf1",
+  "project": "5b1593f5-8081-45da-9c42-bc7a6be8149a",
+  "date": "2026-11-16",
+  "evidence_class": "CONTAINER EVIDENCE, NOT PRODUCTION. User decision of 2026-11-16: run the read-only footprint and reclamation-readiness checks against a throwaway Docker deployment instead of the live native database.",
+  "owner": "Task 436011f3 developer through review, then repository maintainers",
+  "retention": "Bounded release evidence until a dated production readiness receipt or feature retirement supersedes it. No raw logs, transcripts, query output or fixture copies are retained.",
+  "inputs": {
+    "revision": "8d5101d06c1c1ad839b3449f9292d7fb11141eef",
+    "worktree": "Clean for all measured sources; unrelated uncommitted docs/reference/request-performance.md and tools/request-latency.qualification.json belonged to another task.",
+    "head_at_handoff": "e1465d6b4262eb746dad29fc84618ce3e65493c0; its two new commits change only Dockerfile, docs/reference/request-performance.md, tools/perftest/compose.yaml, tools/perftest/perftest.mjs and tools/request-latency.qualification.json, none of them a measured input.",
+    "sha256": {
+      "output/database-sizing-20261102.json": "41b053900aa2888286be614e03fbf300c4bb4e9af8deaff68c2b51adaf895340",
+      "tools/sanitized-session-archive.qualification.json": "fb2da883cdcc1691a9890f2e55ca539b629609192146bfe6fd6ea5457147c268",
+      "tools/session-archive.integration-qualification.json": "6fa86333545e1add77b8ff30d53abc20633c79d047fafb36b4b14b48e8b48cf5",
+      "docs/reference/sealed-session-archives.md (before this change; HEAD and 8d5101d0 blob, LF)": "b2239a1654ad441e0e48ecda5870daabb6ee145dc1f6f546e4271f45c860198f",
+      "hmem-server/migrations/V051__session_archive_maintenance.sql": "bcf46e892e7de2ece61b9a63a0b53985cdabd040b424ae8f23896d63f7ab914f",
+      "hmem-server/migrations/V062__sanitized_session_archives.sql": "2204cd12287bb2346a02ebf3cdfd1071e292dbfc91dd970c9cdbc6b186393b2f",
+      "hmem-server/migrations/V063__sanitized_archive_reclamation.sql": "16ca1523014ad0a367a8ad17caa6b89c08de181bb0753b1c13385cef08ac4d61",
+      "hmem-core/src/HMem/DB/SessionArchive/Maintenance.hs": "c2bf5671b842ff959d19c1b89d59a775daac6dd9d03dde878755bf554cf6fb15",
+      "hmem-core/src/HMem/DB/SessionArchive/Reader.hs": "6bd88d449ee7c807214433c28be00d1d83d3b6dd9d21c86b9e2714b923bba812",
+      "hmem-server/src/HMem/Server/Archive/HTTP.hs": "04d522fe98270a0d94011f0d4d363ec2aeaed08f664c20a913089cf460ec3abe",
+      "hmem-server/test/HMem/Server/Archive/MaintenanceQualificationSpec.hs": "24c4814a0eeac7223d3755aea5ea0d08a2b1e0f833b87d8d0117e60b7e59dd78",
+      "tools/perftest/archive-readiness.sql (used for the 22:29Z figures)": "74b85c810193291624db1090f7dc68ecef5e39f1d080932e45f7656c23ed84f7",
+      "tools/perftest/archive-readback.mjs (used for the 22:31Z sample)": "988963582ed9006eba68d00ba321097fd864c07fc21ed764bcf1a4122a014bc7",
+      "tools/perftest/archive-readiness.sql (review fix)": "47aa26088e592a4340781360d7796a6acfd0a36ea5b249411fd4fd50487c19ae",
+      "tools/perftest/archive-readback.mjs (review fix)": "f0a8733a57a3c0af4e3bf81c5afd1f81aa2567fba8de9ba96153a3aa66569f2b",
+      "tools/perftest/archive-readiness.sql (second review fix, current)": "59a49401169913b7f3427cb6c75c2eff07aeb21ec5781c1d11105ee6073b2675",
+      "tools/perftest/archive-readback.mjs (second review fix, current)": "55db1a961473f51fba7d694b06a6e04f5a469cd95030ebe2c05b556b3b31fff1",
+      "adrai show A01M39QPB23CYS9QHCWQSATSJE9": "7044079691a8e5c4da6e829796ef59e3a5b82d8a6579d5f32c7097dda70eca5f",
+      "adrai show A01M51RECA7P68J92X84FGFEQPN": "c6fc1f1ced94560a9406cef812ed730de9c83120d256fe7fe7bf5a5b0aea49c4",
+      "container seed manifest (.tmp/perftest/manifest.json, coordinator scratch)": "f329dbeb67b914113320509a597c6a8607886108864b614ca21240e0356d13da"
+    }
+  },
+  "environment": {
+    "container": {
+      "compose_project": "hmem-perftest (coordinator-owned throwaway, reused and left running)",
+      "server_image": "hmem-perftest:8d5101d0 sha256:4ba33992fd0635a24df4ba41ad3f62ee005e3ac7d0e5357b7e7b972987018222",
+      "postgres": "17.11 (Debian 17.11-1.pgdg12+2), postgres:17-bookworm sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0, schema V063",
+      "runtime_login": "hmem: bootstrap superuser, also the server and hmem-ctl login",
+      "seed": "574 synthetic claude-code-jsonl sessions sized to the 2026-11-02 production receipt; synthetic replicated audit rows; concurrent read-only use by another reviewer and steady active-session growth during capture",
+      "codec_implementation": "zlib-1.2.13"
+    },
+    "fixtures": "Windows 11 Pro 10.0.26200, Docker 29.6.1, GHC 9.10.2, Stack 3.11.1, ephemeral PostgreSQL 18.2, zlib-1.3.1, default-optimisation test builds (no -O0 override)",
+    "executables_sha256": {
+      "hmem-core-test.exe": "036f9011162ff44ac463074996e367e4557d7892a273df0e4aafa7f280c7d251",
+      "hmem-server-test.exe": "793595a1da375d64c02aef3c049b9024c8444c64d423c9f3db3733a1944b0fcd"
+    }
+  },
+  "method": {
+    "read_only": "One REPEATABLE READ READ ONLY transaction with 120 s statement and 1 s lock timeouts, ending in ROLLBACK; status via the single-SELECT hmem-ctl path; authorized GETs for stored gzip content and original evidence ranges. No payload scans: octet_length and pg_column_size read TOAST pointers only.",
+    "throwaway_mutations": [
+      "CREATE EXTENSION pgstattuple for one pgstattuple_approx capture, then DROP EXTENSION (throwaway database only; verified absent afterwards)",
+      "Authenticated GETs update access_tokens.last_used_at (authentication bookkeeping)"
+    ],
+    "not_used": "GET .../archive manifest: Reader.ensureArchive inserts a session_archive_requests row and may enqueue a job, so it is not a read-only check. session_archive_requests stayed at 0 rows.",
+    "estimates": "Reusable and post-compaction sizes are allocation-proportional: session_chunks total allocation times the sealed share of stored raw values. They are not measured physical reclaimability."
+  },
+  "commands": [
+    {"command": "docker exec hmem-perftest-server hmem-ctl archives status --json", "outcome": "exit 0"},
+    {"command": "docker exec -i hmem-perftest-postgres psql -U hmem -d hmem -X -v ON_ERROR_STOP=1 -At -f - < tools/perftest/archive-readiness.sql", "outcome": "exit 0 twice (22:29:34Z, and 22:29:47Z with pgstattuple present)"},
+    {"command": "node tools/perftest/archive-readback.mjs --base http://127.0.0.1:18429 --targets <5 percentile rows from session_archives>", "outcome": "5/5 passed at 22:31:44Z"},
+    {"command": "Review fix, revised SQL: docker exec -i hmem-perftest-postgres psql -U hmem -d hmem -X -v ON_ERROR_STOP=1 -At -f - < tools/perftest/archive-readiness.sql", "outcome": "exit 0 at 23:00:40Z; empty stderr; stdout parsed as exactly one JSON document; not_readable []"},
+    {"command": "Review fix, privilege guards (47aa2608 SQL): scratch copies with SET LOCAL ROLE pg_read_all_data, and with all four privilege tests replaced by false", "outcome": "both exit 0; not_readable named pg_ls_waldir and hmem_audit_status for the role, and all four items for the forced copy, with those values null. Neither run exercised a login without USAGE on some schema (pg_read_all_data has USAGE on every schema). Re-review then reproduced that SQL's privilege statement failing under SET LOCAL ROLE hmem_archive_maintenance_owner with permission denied for schema pg_toast: the pgstattuple probe called to_regprocedure for every schema."},
+    {"command": "Second review fix, privilege statement only: scratch copy of the current SQL with SET LOCAL ROLE hmem_archive_maintenance_owner, piped to docker exec -i hmem-perftest-postgres psql -U hmem -d hmem -X -v ON_ERROR_STOP=1 -At -q -f -", "outcome": "exit 0, empty stderr; all six privilege flags false (pgstattuple absent). The statement now tests catalog OIDs only (pg_proc/pg_class/pg_extension joins with has_schema_privilege and has_*_privilege by OID), so no name lookup can raise."},
+    {"command": "Second review fix, full script as hmem_archive_maintenance_owner (same scratch copy and psql flags)", "outcome": "exit 3: ERROR permission denied for table session_archive_parts. That NOLOGIN role lacks SELECT on the required core tables session_archive_parts, session_archive_checkpoints, session_archive_requests and schema_migrations, so it cannot run the snapshot; this is the intended required-privilege failure. The script header now lists what a runtime login needs: USAGE on public, SELECT on the 13 core tables, and EXECUTE on the two runtime-safe fence functions."},
+    {"command": "Second review fix, split copy: privilege statement and optional reads as hmem_archive_maintenance_owner, RESET ROLE before the snapshot query", "outcome": "exit 0 at 23:10:33Z, empty stderr; stdout parsed as exactly one JSON document; not_readable named pg_ls_waldir, replacement policies, hmem_audit_status and audit_maintenance_control, with those values null"},
+    {"command": "Second review fix, full script with SET LOCAL ROLE pg_read_all_data", "outcome": "exit 0, empty stderr, one JSON document; not_readable named pg_ls_waldir and hmem_audit_status"},
+    {"command": "Second review fix, normal path: docker exec -i hmem-perftest-postgres psql -U hmem -d hmem -X -v ON_ERROR_STOP=1 -At -q -f - < tools/perftest/archive-readiness.sql", "outcome": "exit 0 at 23:10:32Z, empty stderr, one JSON document, not_readable []"},
+    {"command": "Review fix, pgstattuple branch: scratch copy forcing can_pgstattuple with a stand-in for pgstattuple_approx", "outcome": "exit 0; one JSON document with pgstattuple_approx embedded. The real function was not rerun because the extension was dropped."},
+    {"command": "Review fix, revised readback: node tools/perftest/archive-readback.mjs --base http://127.0.0.1:18429 --targets <smallest published generation> --timeout-ms 60000", "outcome": "1/1 passed at 23:01:47Z with 3/3 ranges; --timeout-ms 1 aborted with TimeoutError; non-loopback http refused; non-loopback https without HMEM_API_KEY or --secrets refused before any request"},
+    {"command": "Second review fix, readback: node --check tools/perftest/archive-readback.mjs; then HMEM_API_KEY=<invalid> node tools/perftest/archive-readback.mjs --base http://127.0.0.1:18429 --targets <smallest published generation> --secrets .tmp/perftest/secrets.env --timeout-ms 60000", "outcome": "check exit 0; 1/1 passed at 23:11:19Z with 3/3 ranges, so the explicit --secrets token took precedence over the invalid environment token; the same run without --secrets got HTTP 401. Unknown, repeated, valueless and --prefixed-value flags and a positional argument each exit 1 with usage; a --secrets file without HMEM_API_KEY is an error; a loopback stub answering 302 made fetch fail (redirect error) after one request; non-loopback http refusal and --timeout-ms 1 TimeoutError unchanged"},
+    {"command": "stack test hmem-core:test:hmem-core-test --ta '--match SessionArchive'", "outcome": "44 examples: 39 passed, 4 pending (RTS-gated), 1 failed (archived-replay row-lock case)"},
+    {"command": "stack test hmem-core:test:hmem-core-test --ta '--match \"keeps archived replay outside row locks\"'", "outcome": "1 example, 0 failures"},
+    {"command": "stack test hmem-core:test:hmem-core-test --ta '--match SessionArchive +RTS -T -RTS'", "outcome": "44 examples, 1 failure (same case); 135.99 s"},
+    {"command": "stack test hmem-core:test:hmem-core-test --ta '--match \"/HMem.DB.SessionArchive.Reader/Compatible archive reader/\" --seed 1593888904 +RTS -T -RTS'", "outcome": "13 examples, 1 failure (same case); reproduces within the reader group"},
+    {"command": "stack test hmem-server:test:hmem-server-test --ta '--match \"Archive worker\" --match \"Archive maintenance worker\" --match \"Archive maintenance CLI\" --match \"Archive HTTP\" --match \"Source-absent archive compatibility HTTP\" --match \"Archive maintenance rollback\"'", "outcome": "54 examples, 0 failures, 1 pending; 76.40 s"},
+    {"command": "stack test hmem-server:test:hmem-server-test --ta '--match \"Archive maintenance qualification\"'", "outcome": "4 examples, 0 failures; 285.57 s standalone"}
+  ],
+  "figures": {
+    "unit": "bytes; GiB = 2^30 bytes",
+    "captured_at": "2026-11-16T22:29:47Z",
+    "comparison": [
+      {"item": "database", "container": 5082035891, "production_20261102": 6246069951, "container_gib": 4.733, "production_gib": 5.817},
+      {"item": "session_chunks total", "container": 2442158080, "production_20261102": 2834448384, "container_gib": 2.274, "production_gib": 2.640},
+      {"item": "session_archive_parts total", "container": 1435557888, "production_20261102": 1445576704, "container_gib": 1.337, "production_gib": 1.346},
+      {"item": "checkpoints + ledger", "container": 78921728, "production_20261102": 174350336, "container_gib": 0.074, "production_gib": 0.162},
+      {"item": "archive family (all session_archive_* relations)", "container": 1515732992, "production_20261102": null, "container_gib": 1.412, "production_gib": 1.509},
+      {"item": "retained WAL", "container": 989855744, "production_20261102": 301989888, "container_gib": 0.922, "production_gib": 0.281},
+      {"item": "change_stream_outbox", "container": 132259840, "production_20261102": null, "container_gib": 0.123, "production_gib": 0.848},
+      {"item": "audit_log", "container": 854491136, "production_20261102": null, "container_gib": 0.796, "production_gib": 0.742}
+    ],
+    "relations": {
+      "session_chunks": {"heap": 3727360, "toast": 2433957888, "index": 4472832},
+      "session_archive_parts": {"heap": 12451840, "toast": 1417093120, "index": 6012928},
+      "session_archive_checkpoints": {"heap": 901120, "toast": 65953792, "index": 425984},
+      "session_archive_ledger": {"heap": 7864320, "toast": 8192, "index": 3768320},
+      "session_archive_generations": {"total": 638976},
+      "session_archive_jobs": {"total": 532480}
+    },
+    "evidence": {
+      "active": {"sessions": 12, "chunk_rows": 5264, "logical_bytes": 388411979, "stored_value_bytes": 248496395},
+      "sealed_with_ready_exact_archive": {"sessions": 562, "chunk_rows": 30588, "logical_bytes": 3271093120, "stored_value_bytes": 2079108453},
+      "archives": {"generations": 562, "raw_bytes": 3271093120, "gzip_bytes": 1337017175, "logical_reduction_percent": 59.13, "parts": 48337, "checkpoints": 3401, "dictionary_logical_bytes": 93028352, "dictionary_stored_bytes": 61370085, "ledger_rows": 30588, "largest_raw_bytes": 210953836, "largest_gzip_bytes": 86387623},
+      "gzip_vs_toast_stored_sealed_raw": 0.643
+    },
+    "reusable_space_now": {
+      "dead_tuples": "0 in every measured relation except session_occurrences (109)",
+      "pgstattuple_approx_free_bytes": {"session_chunks_toast": 17583476, "session_archive_parts_toast": 27943552, "session_archive_checkpoints_toast": 2111584, "audit_log_heap": 61108668, "change_stream_outbox_heap": 6762948},
+      "all_visible": "Every heap and TOAST page of the archive relations, session_chunks, outbox and audit_log was all-visible."
+    },
+    "estimates_after_full_exact_reclamation": {
+      "sealed_share_of_stored_raw": 0.893,
+      "reusable_inside_session_chunks_after_vacuum": 2181431918,
+      "reusable_gib": 2.03,
+      "database_file_size_after_vacuum": "About unchanged (4.7 GiB); VACUUM returns only empty trailing pages while active rows stay interleaved",
+      "database_after_operator_compaction_gib": 2.70,
+      "net_saving_vs_raw_only_gib": 0.62,
+      "deletion_wal": "About 3% of deleted stored raw bytes in the 100 MiB fixture (3,034,856 for 104,857,600), suggesting tens of MiB for the 1.94 GiB of sealed stored raw values; vacuum and compaction WAL are not estimated",
+      "production_projection_from_20261102": "2.64 GiB x about 0.90 sealed share gives about 2.4 GiB reusable and about 3.7 GiB PGDATA after compaction; a projection, not a current figure"
+    }
+  },
+  "settings_and_progress": {
+    "control": {"paused": false, "qualified": false, "backfill_enabled": false, "reclaim_enabled": false, "sanitized_qualified": false, "sanitized_reclaim_enabled": false, "staging_budget": 8589934592, "wal_budget": 34359738368, "staged_bytes": 0, "reserved_bytes": 0, "blocked_reason": null, "permit": "none held", "state": "running", "cutover_at": "2026-11-16T21:05:09Z"},
+    "production_20261102_difference": "Production reported historical_backfill_enabled=true and qualified=true; the container has both false because every seeded session was sealed after its cutover.",
+    "jobs": {"ready": 562, "other_states": 0, "live_leases": 0, "error_codes": 0},
+    "discovery": "The keyset cursor advanced and restarted between captures, as designed for an exhausted sweep.",
+    "reclamation_rows": 0,
+    "verified": 0,
+    "reclaimed_bytes": 0,
+    "sanitized_cleanup": {"pending": 0, "in_progress": 0, "complete": 0}
+  },
+  "eligibility": {
+    "terminated_sessions": 562,
+    "exact_discoverable": 562,
+    "exact_ready": 562,
+    "not_discoverable_without_backfill_or_request": 0,
+    "format_labels": {"claude-code-jsonl": 562},
+    "replacement_policies_installed": 0,
+    "frozen_sanitized_jobs": 0,
+    "sanitized_generations": 0,
+    "disposition": "Every sealed session is exact-only. No session is sanitized-eligible, because no replacement policy is installed and existing jobs keep their frozen exact representation."
+  },
+  "publication_and_readback": {
+    "structural": "0 receipt, part count/bytes, checkpoint count, ledger count or policy-binding mismatches; 0 unpublished generations; 0 ready jobs without a published generation (metadata only, not digest readback).",
+    "independent_pre_delete_verification": "None recorded: session_archive_reclamation has 0 rows because reclamation is disabled.",
+    "get_sample": {
+      "selection": "Percentiles 0/25/50/75/100 of raw_bytes from session_archives",
+      "raw_bytes": [72354, 1087378, 2528415, 5846243, 210953836],
+      "gzip_bytes": [32006, 449706, 1037986, 2408935, 86387623],
+      "content_ms": [63, 245, 542, 1266, 39922],
+      "checks": "Binding headers, compressed count and SHA-256, locally decompressed original count and SHA-256, and three 64 KiB original /evidence ranges each (start, middle, end)",
+      "outcome": "5/5 passed",
+      "limit": "Node gunzip accepts concatenated members, so single-member termination relies on the server's and worker's own verification."
+    }
+  },
+  "fences_and_permissions": {
+    "runtime_safe": false,
+    "sanitized_runtime_safe": false,
+    "reason": "The only login, hmem, is a superuser with CREATEROLE and owns the evidence relations and guard functions.",
+    "capability_owner": "hmem_archive_maintenance_owner: NOLOGIN, NOINHERIT, no superuser or CREATEROLE, no memberships; owns hmem_archive_reclaim",
+    "reclaim_execute_grantees": ["hmem_archive_maintenance_owner"],
+    "guard_triggers": "24 user triggers on the evidence and archive relations, all enabled",
+    "production_20261102": "raw_reclaim_runtime_safe=false"
+  },
+  "maintenance_and_restore_prerequisites": {
+    "archive_backups": "The schema has no archive backup or restore attestation; operators must supply a verified pre-cleanup backup and a restore check before enabling reclamation.",
+    "audit_maintenance": "runtime_safe=false (PostgreSQL 17 and superuser login), backup_receipt null, no maintenance login; production 2026-11-02 reported separate_maintenance_credentials_required",
+    "restore_fixture": "The 2 MiB and 100 MiB fixtures passed backup after cleanup, restore into an empty database and archive-only reads; the sanitized restore case passed."
+  },
+  "qualification": {
+    "decision": "The recorded integration evidence predates V062/V063 and commit 54c96396 (archive publication path), and the sanitized record is at 9f7ab1e6. The isolated specs were therefore rerun at 8d5101d0.",
+    "server_functional": {"examples": {"Archive worker": 18, "Archive maintenance worker": 18, "Archive maintenance CLI": 2, "Archive HTTP": 13, "Source-absent archive compatibility HTTP": 1, "Archive maintenance rollback": 2}, "outcome": "53 passed, 1 pending: rollback-derivative probe needs the reviewed prior-backend executable"},
+    "maintenance_qualification": {
+      "gating_note": "This spec is not environment-gated; HMEM_SANITIZED_ARCHIVE_QUALIFICATION=1 only selects its receipt directory and labels. The default directory was used; this run's three generated receipts were reduced into this record and deleted. Their base_revision field is a fixed constant in the spec, not the measured revision.",
+      "cases": [
+        {"case": "2 MiB entropy", "seconds": 9.40, "gzip_bytes": 1573422, "coverage": "full HTTP: archive-only ranges, proofs, replay, ZIP, content; backup, empty restore, vacuum, refill", "receipt_sha256": "3bcc1d35591b324820adb199d873e2dd20e4decfaa705d054de12a13f7854322"},
+        {"case": "sanitized restore after guarded reclamation", "outcome": "passed", "receipt": "none emitted"},
+        {"case": "1 GiB compressible", "seconds": 94.04, "gzip_bytes": 5511606, "checkpoints": 1024, "coverage": "stored verification, partial-cleanup bounded HTTP ranges and exact replay, backup, empty restore, whole-receipt verification after restore, vacuum", "wal": {"raw": 20617680, "archive": 9974112, "delete": 748464}, "receipt_sha256": "4fd3136243f5ca970e8c9b5114b41d1fcc9b1bf5208ebed4466fa061e0619c42"},
+        {"case": "100 MiB entropy", "seconds": 131.00, "gzip_bytes": 78573483, "coverage": "full HTTP compatibility as for 2 MiB", "wal": {"raw": 112568048, "archive": 90079896, "delete": 3034856}, "database_bytes": {"ready_plus_raw": 208271039, "after_delete": 208287423, "after_vacuum": 100791999}, "session_chunks_bytes": {"after_delete": 109043712, "after_vacuum": 1286144}, "receipt_sha256": "b39d565b438125a2fc123bb0c0f9c7ef27ff861677ec0240289d7199dbf2fe76"}
+      ],
+      "guard": "Each case passed within its unchanged 250 s guard when run standalone; the earlier 100 MiB guard failure occurred under full-suite load."
+    },
+    "core": {
+      "outcome": "43 of 44 passed with +RTS -T, including the 1/100/1024 MiB seek and 64 MiB hashing memory gates",
+      "failure": "HMem.DB.SessionArchive.Reader / Compatible archive reader / keeps archived replay outside row locks and cancels source and decoder part reads: the 2 s wait for the blocked archive query returned Nothing (ReaderSpec.hs:211). It fails after the other reader examples (seed 1593888904) and passes alone. This task changed no product or test source. The task 9bb3fedd developer's earlier full hmem-core run reported the same lock-wait failure identically on base df8e7af4, before that task's HMem.DB.Pool change in 8d5101d0, so it is pre-existing and order-dependent, not attributable to the Pool change. It needs separate diagnosis."
+    },
+    "sanitized_rollout": "Not requalified. The GiB browser memory and reclaim/view gates in tools/sanitized-session-archive.qualification.json remain failed."
+  },
+  "gates": [
+    {"gate": "Deployment-specific current figures", "outcome": "EVIDENCE GAP: container only"},
+    {"gate": "Exact policy branch and original read/replay/proof in isolated fixtures", "outcome": "passed except the order-dependent reader row-lock case"},
+    {"gate": "Sanitized policy branch in isolated fixtures", "outcome": "passed (functional); rollout GiB resource gates still failed"},
+    {"gate": "Publication and readback verification", "outcome": "container: structural checks clean and 5/5 GET readback; production: gap"},
+    {"gate": "Runtime fence for reclamation", "outcome": "not met in container or production 2026-11-02"},
+    {"gate": "Backup and restore prerequisite", "outcome": "not recorded for any deployment"}
+  ],
+  "disposition": {
+    "exact_reclamation": "NOT READY. Keep disabled.",
+    "sanitized_reclamation_and_replacement_policy": "Keep disabled until the resource and backup gates pass.",
+    "compaction": "Not authorized and never automatic.",
+    "operator_decisions": [
+      "Provision a separate migration administrator and a restricted runtime login, grant that login EXECUTE on public.hmem_archive_reclaim(uuid,uuid,uuid,text,uuid), and confirm runtime_safe=true",
+      "Take a verified pre-cleanup backup and prove restore before reclamation; repeat after reclamation",
+      "Then decide on hmem-ctl archives reclaim-enable --qualified",
+      "Decide separately whether to compact session_chunks after reclamation (exclusive lock or online rebuild tool)",
+      "Provision separate audit maintenance credentials (outside archive scope)"
+    ]
+  },
+  "production_procedure": {
+    "read_only_steps": [
+      "As the runtime login: hmem-ctl archives status --json",
+      "As the runtime login: psql -X -q -v ON_ERROR_STOP=1 -At -d hmem -f tools/perftest/archive-readiness.sql (stdout is one JSON document; the login needs the core privileges listed in the script header; optional items it cannot read are null and listed in not_readable)",
+      "Optional: select percentile rows from session_archives, then node tools/perftest/archive-readback.mjs --base https://HOST --targets FILE with a read-capable HMEM_API_KEY or --secrets FILE (an explicit --secrets takes precedence; redirects are refused; the throwaway secrets default applies only to loopback; plain http to other hosts needs --allow-http; per-request --timeout-ms, default 120000)",
+      "On the host: PGDATA and pg_wal sizes, free disk on the volume, and current backup sizes"
+    ],
+    "avoid": [
+      "GET .../archive manifest routes (they record an archive request)",
+      "Installing pgstattuple or any extension",
+      "Any hmem-ctl archives command other than status"
+    ],
+    "record": "A dated production receipt with the same figures, labelled production"
+  },
+  "container_cannot_satisfy": [
+    "Deployment-specific current figures: the container holds synthetic seeded data, not the live native database.",
+    "Production login grants and runtime_safe: the container uses one bootstrap superuser.",
+    "Production backup, restore and disk free space: none exist for the container.",
+    "Production transcript format mix and sanitized eligibility: the seed has only claude-code-jsonl, and the documented policy example targets codex_jsonl.",
+    "Production PostgreSQL 18 behaviour: the container runs 17.11 with zlib-1.2.13, and audit maintenance runtime safety requires 18.",
+    "Production WAL, backfill and qualification settings: production had backfill and qualification enabled on 2026-11-02."
+  ],
+  "limitations": [
+    "Single capture of a live throwaway database; active sessions grew during capture.",
+    "Estimates are allocation-proportional, not measured physical reclaimability.",
+    "Host load from the container and another reviewer was uncontrolled during fixture timings.",
+    "Fixtures use synthetic valid JSONL and a 250 s guard; no browser run.",
+    "The current OID-based pgstattuple_approx lookup ran only with the extension absent (flag false); the same pg_proc/oidvector pattern returned true for pg_table_size(regclass) under hmem_archive_maintenance_owner."
+  ],
+  "scratch_disposition": "No task scratch directory was needed. Snapshot and log output stayed in the agent session scratchpad. This run's three receipts in the preexisting .tmp/sealed-archives-8ff1e216 were identified by before/after listing and deleted after reduction; other files there were preserved. The coordinator owns the container environment."
+}

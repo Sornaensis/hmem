@@ -914,6 +914,73 @@ relation stayed at 409,600 bytes and the allocated database grew by 16,384 bytes
 between ready publication and completed cleanup. These selected measurements do
 not estimate archive savings for other data.
 
+### Readiness disposition (container evidence, 2026-11-16)
+
+This is container evidence, not a production measurement. The
+[readiness receipt](../../tools/archive-readiness.qualification.json) records a
+read-only snapshot of a throwaway Docker deployment built from `8d5101d0`
+(PostgreSQL 17.11), seeded to the 2 November production sizing, and isolated
+fixture runs at the same revision.
+
+| Allocation | Container | Production 2026-11-02 |
+| --- | ---: | ---: |
+| Database | 4.73 GiB | 5.82 GiB |
+| Raw `session_chunks` | 2.27 GiB | 2.64 GiB |
+| Archive parts | 1.34 GiB | 1.35 GiB |
+| Checkpoints and ledger | 0.07 GiB | 0.16 GiB |
+| Retained WAL | 0.92 GiB | 0.28 GiB |
+
+All 562 sealed sessions have published exact archives: 3.05 GiB original, 1.25
+GiB gzip. The 12 active sessions are raw only. Sealed rows hold 89% of stored raw
+values. Full exact reclamation plus ordinary VACUUM would therefore make about
+2.0 GiB reusable inside `session_chunks`. VACUUM returns only empty trailing
+pages to the OS, so most of that space stays allocated while active rows remain
+interleaved. A separate operator compaction would leave about 2.7 GiB. The
+archive family adds 1.41 GiB, so the net saving over raw-only storage is about
+0.6 GiB. These figures are allocation-proportional estimates. A GET-only sample
+of five archives, smallest to largest, matched every binding header, compressed
+and original receipt, and three original evidence ranges each.
+
+Isolated fixtures at `8d5101d0` exercised both policy branches. All 54 server
+archive examples passed except the pending rollback-derivative probe. The four maintenance
+qualification cases (2 MiB, sanitized restore, 1 GiB and 100 MiB) passed in a
+standalone run, each within its 250-second guard. They cover stored verification,
+guarded reclamation, backup after cleanup, restore into an empty database,
+archive-only ranges and exact replay, plus proofs and ZIP up to 100 MiB. Core
+archive examples passed 43 of 44 with RTS memory gates. The archived-replay
+row-lock case failed after the other reader examples and passed alone; it needs
+separate diagnosis. These runs do not repeat the GiB browser gates that sanitized
+rollout still fails.
+
+Keep exact reclamation, sanitized reclamation and replacement policy installation
+disabled in production. Exact reclamation needs a restricted runtime login with
+the `hmem_archive_reclaim` EXECUTE grant that reports `runtime_safe`, a verified
+pre-cleanup backup and restore, and then `reclaim-enable --qualified`. Both the
+container and the 2 November runtime reported `runtime_safe=false`, and no login
+holds that grant in the container. Sanitized cleanup also needs the GiB resource
+gates above. Compaction is a separate operator decision.
+
+For deployment-specific figures, run these read-only commands as the runtime
+login, and record PGDATA, `pg_wal`, free disk and backup sizes from the host:
+
+```text
+hmem-ctl archives status --json
+psql -X -q -v ON_ERROR_STOP=1 -At -d hmem -f tools/perftest/archive-readiness.sql
+node tools/perftest/archive-readback.mjs --base URL --targets targets.json
+```
+
+The SQL prints one JSON document. Optional items the login cannot read (WAL
+directory, replacement policies, audit status and backup receipt, pgstattuple)
+are null and named in `not_readable`. The readback helper needs a read-capable
+`HMEM_API_KEY` or `--secrets FILE`, and target rows selected from
+`session_archives`. It refuses plain http to a non-loopback host unless given
+`--allow-http`. Do not install `pgstattuple` in production for this check. Do
+not use the archive manifest GET: it records an archive request. A container
+cannot supply current production sizes, the production login's grants and
+runtime safety, production backup and restore evidence, its transcript format
+mix, its WAL, backfill and qualification settings, or PostgreSQL 18
+audit-maintenance state. Those remain an explicit evidence gap.
+
 ## Reproducible codec baseline
 
 Run the standalone C probe in a verified task-owned scratch directory with a

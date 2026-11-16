@@ -41,8 +41,9 @@ marks an active agent session directly associated with that task, including a
 quiet session. If activity cannot be checked, the light clears; use **Retry agent
 activity** to check again.
 
-**Show Done** and **Show Cancelled** start enabled. Turn either off to hide those
-cards and their incident arrows. A visible subtask whose parent is hidden appears
+**Show Done** and **Show Cancelled** start disabled. Enable either to include those
+cards and their incident arrows. Explicit URL choices override these defaults.
+A visible subtask whose parent is hidden appears
 on its own. Each filter change fits the remaining diagram; live updates keep your
 camera. Filter choices and the camera survive task details and graph history.
 

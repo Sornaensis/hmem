@@ -78,14 +78,14 @@ originKey =
 
 filters : Url.Url -> Graph.Filters
 filters url =
-    { showDone = one "graph-done" url /= Just "0", showCancelled = one "graph-cancelled" url /= Just "0" }
+    { showDone = one "graph-done" url == Just "1", showCancelled = one "graph-cancelled" url == Just "1" }
 
 
 withFilters : Graph.Filters -> Url.Url -> String
 withFilters value url =
     let
         retained = pairs url |> List.filter (\(key,_) -> not (List.member key ["graph-done","graph-cancelled"]))
-        flags = (if value.showDone then [] else [("graph-done","0")]) ++ (if value.showCancelled then [] else [("graph-cancelled","0")])
+        flags = [("graph-done",if value.showDone then "1" else "0"),("graph-cancelled",if value.showCancelled then "1" else "0")]
         fragment = retained ++ flags |> List.map (\(key,content) -> Url.percentEncode key ++ "=" ++ Url.percentEncode content) |> String.join "&"
     in Url.toString {url|fragment=Just fragment}
 

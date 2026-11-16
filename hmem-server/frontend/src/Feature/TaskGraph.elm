@@ -68,7 +68,7 @@ type alias Filters =
 
 defaultFilters : Filters
 defaultFilters =
-    { showDone = True, showCancelled = True }
+    { showDone = False, showCancelled = False }
 
 
 {-| Presentation only: the canonical graph stays complete. External membership

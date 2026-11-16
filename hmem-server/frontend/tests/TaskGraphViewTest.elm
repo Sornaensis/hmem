@@ -68,7 +68,7 @@ suite = describe "graph detail and snapshot authority"
         let
             nextUrl=History.withFilters {showDone=False,showCancelled=False} base.url |> Url.fromString |> Maybe.withDefault base.url
             next=Navigation.reconcile base ({base|url=nextUrl},Cmd.none) |> View.reconcile (UrlChanged nextUrl) base |> Tuple.first
-            toggled=View.update (TaskGraphSetFilter "done" False) base |> Tuple.first
+            toggled=View.update (TaskGraphSetFilter "done" True) base |> Tuple.first
         in Expect.all [\_ -> Expect.equal base.taskGraph.data next.taskGraph.data,\_ -> Expect.equal base.taskGraph.canvasKey next.taskGraph.canvasKey
             ,\_ -> Expect.equal base.taskGraphNavigation.metadataGeneration next.taskGraphNavigation.metadataGeneration
             ,\_ -> Expect.equal {showDone=False,showCancelled=False} next.taskGraph.filters,\_ -> Expect.equal 0 next.taskGraph.fitRevision

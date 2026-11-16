@@ -40,6 +40,47 @@ const transform = async h => {
 }
 const world = h => h.page.locator('[data-graph-world]').evaluate(n => [...n.querySelectorAll('foreignObject')].map(v => [v.getAttribute('x'), v.getAttribute('y'), v.getAttribute('width'), v.getAttribute('height')]))
 
+// Existing topology/style fixtures intentionally include terminal endpoints.
+// Opt in through native controls; the default-specific case below stays bare.
+async function openProjectGraph(h) {
+  await h.page.locator('#task-graph-open-root-project').click()
+  await h.page.locator('[data-graph-live="true"]').waitFor()
+  await h.page.getByRole('checkbox', { name: 'Show Done', exact: true }).check()
+  await h.page.getByRole('checkbox', { name: 'Show Cancelled', exact: true }).check()
+  await h.page.waitForURL(url => url.hash.includes('graph-done=1') && url.hash.includes('graph-cancelled=1'))
+}
+
+test('terminal statuses start hidden and independent explicit choices survive details and history', { timeout: 30000 }, async () => {
+  const f = fixture(); f.tasks.push({ ...f.tasks[0], id: 'cancelled', title: 'Cancelled task', status: 'cancelled' })
+  const h = await openGraph(f)
+  try {
+    await h.start(); await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    const done = h.page.getByRole('checkbox', { name: 'Show Done', exact: true }), cancelled = h.page.getByRole('checkbox', { name: 'Show Cancelled', exact: true })
+    assert.equal(await done.isChecked(), false); assert.equal(await cancelled.isChecked(), false)
+    for (const id of ['child-a', 'external-task', 'cancelled']) assert.equal(await h.page.locator(`[data-graph-task="${id}"]`).count(), 0)
+    const length = await h.page.evaluate(() => history.length)
+    await done.check(); await h.page.locator('[data-graph-task="child-a"]').waitFor()
+    assert.equal(await cancelled.isChecked(), false); assert.equal(await h.page.locator('[data-graph-task="cancelled"]').count(), 0)
+    await cancelled.check(); await h.page.locator('[data-graph-task="cancelled"]').waitFor()
+    await done.uncheck(); await h.page.locator('[data-graph-task="child-a"]').waitFor({ state: 'detached' })
+    await h.page.waitForURL(url => url.hash.includes('graph-done=0') && url.hash.includes('graph-cancelled=1'))
+    await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click()
+    const graphUrl = h.page.url(), camera = await transform(h)
+    assert.equal(h.snapshots(), 1)
+    await h.page.locator('[data-graph-task="child-b"]').click(); await h.page.waitForURL(/focus=task%3Achild-b/)
+    await h.page.getByRole('button', { name: 'Back to graph', exact: true }).click(); await h.page.waitForURL(graphUrl)
+    await h.page.waitForFunction(() => document.activeElement?.dataset.graphTask === 'child-b')
+    assert.deepEqual(await transform(h), camera)
+    assert.equal(await done.isChecked(), false); assert.equal(await cancelled.isChecked(), true)
+    assert.equal(await h.page.evaluate(() => history.length), length)
+    await h.page.getByRole('button', { name: 'Back', exact: true }).click(); await h.page.locator('#hierarchy-viewport').waitFor()
+    await h.page.goForward(); await h.page.waitForURL(graphUrl); await h.page.locator('[data-graph-task="child-b"]').waitFor()
+    assert.equal(await done.isChecked(), false); assert.equal(await cancelled.isChecked(), true)
+    assert.deepEqual(await transform(h), camera)
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.unhandled, [])
+  } finally { await h.close() }
+})
+
 const sessionRow = (workspace, changes = {}) => ({ id: 'active-agent', workspace_id: workspace, state: 'active', format_label: 'codex', created_at: '2026-01-01T00:00:00Z', last_seen_at: '2020-01-01T00:00:00Z', committed_bytes: 0, committed_records: 0, revision: 0, ends_with_newline: true, ...changes })
 const statusStyle = element => { const s = getComputedStyle(element); return Object.fromEntries(['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'textTransform', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft', 'borderRadius', 'backgroundColor', 'color', 'borderTopWidth', 'borderTopStyle', 'borderTopColor'].map(key => [key, s[key]])) }
 
@@ -65,7 +106,7 @@ test('all five graph statuses match computed hierarchy display and direct quiet-
       }
     }
     await h.page.goto(h.origin + '/workspace/' + f.workspace.id + '#tab=projects&focus=project%3Aroot-project'); await h.idle()
-    await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    await openProjectGraph(h); await h.page.locator('[data-graph-live="true"]').waitFor()
     await h.page.locator('[data-graph-task="status-in_progress"] .session-activity-light').waitFor()
     for (const status of statuses) {
       const card = h.page.locator(`[data-graph-task="status-${status}"]`)
@@ -108,7 +149,7 @@ test('graph agent lifecycle is direct, coalesced and independent of snapshots wi
     await h.page.evaluate(value => window.pushHierarchyRawFrames([value]), frame)
   }
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.start(); await openProjectGraph(h); await h.page.locator('[data-graph-live="true"]').waitFor()
     const light = h.page.locator('[data-graph-task="child-b"] .session-activity-light')
     await light.waitFor()
     assert.equal(await h.page.locator('[data-graph-task="parent"] .session-activity-light').count(), 0)
@@ -156,7 +197,7 @@ test('finite graph read failure and Retry restore direct activity without any la
     return route.fulfill({ json: { items: id === 'child-b' ? [sessionRow(f.workspace.id)] : [], next_cursor: null } })
   })
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.start(); await openProjectGraph(h); await h.page.locator('[data-graph-live="true"]').waitFor()
     const light = h.page.locator('[data-graph-task="child-b"] .session-activity-light'); await light.waitFor(); await h.idle()
     await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click(); const camera = await transform(h)
     failure = true
@@ -220,7 +261,7 @@ test('nested project forest follows retained external ancestry and filters/live 
     assertSafeSegments(geometry)
   }
   try {
-    await h.start('tab=projects&focus=project%3Aroot-project'); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start('tab=projects&focus=project%3Aroot-project'); await openProjectGraph(h)
     await h.page.locator('[data-graph-live="true"]').waitFor(); await h.idle()
     const initial = await diagramGeometry(h)
     nesting(initial)
@@ -322,7 +363,7 @@ test('status filters are independent local presentation, prune external orphans 
   f.dependencies.push({ task_id: 'cancelled-parent', depends_on_id: 'orphan' })
   const h = await openGraph(f)
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start(); await openProjectGraph(h)
     await h.page.locator('[data-graph-live="true"]').waitFor(); await h.idle()
     const requests = [], request = value => {
       const url = new URL(value.url())
@@ -369,7 +410,7 @@ test('an explicit empty filter cannot refit a later ordinary live repopulation',
   const f = fixture(); f.tasks = [{ ...f.tasks[0], status: 'done' }]; f.dependencies = []
   const h = await openGraph(f)
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.start(); await openProjectGraph(h); await h.page.locator('[data-graph-live="true"]').waitFor()
     await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click()
     const camera = await transform(h)
     await h.page.getByRole('checkbox', { name: 'Show Done', exact: true }).uncheck()
@@ -390,7 +431,7 @@ for (const focused of [false, true]) test(`filtered graph details preserve flags
   const h = await openGraph()
   try {
     await h.start('tab=projects' + (focused ? '&focus=project%3Aroot-project' : '')); await h.idle()
-    await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    await openProjectGraph(h); await h.page.locator('[data-graph-live="true"]').waitFor()
     await h.page.getByRole('checkbox', { name: 'Show Cancelled', exact: true }).uncheck()
     await h.page.waitForURL(/graph-cancelled=0/); await h.idle()
     await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click()
@@ -419,7 +460,7 @@ for (const empty of [false, true]) test(`a live-hidden detail target retires foc
   f.tasks.forEach(t => { t.parent_id = null; t.status = 'todo' })
   const h = await openGraph(f)
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    await h.start(); await openProjectGraph(h); await h.page.locator('[data-graph-live="true"]').waitFor()
     await h.page.locator('[data-graph-task="parent"]').evaluate(node => { window.queuedFilteredCard = node })
     await h.page.getByRole('checkbox', { name: 'Show Done', exact: true }).uncheck(); await h.page.waitForURL(/graph-done=0/)
     await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click()
@@ -456,7 +497,7 @@ for (const focused of [false, true]) test(`graph→existing task→graph→origi
     const query = h.page.locator('.hierarchy-search-input')
     await query.fill('Graph'); await h.idle()
     const originTop = await h.page.locator('#entity-root-project').evaluate(n => n.getBoundingClientRect().top)
-    await h.page.locator('#task-graph-open-root-project').click()
+    await openProjectGraph(h)
     await h.page.locator('[data-graph-task="child-b"]').waitFor()
     assert.equal(h.snapshots(), 1)
     const graphUrl = h.page.url(), length = await h.page.evaluate(() => history.length)
@@ -503,7 +544,7 @@ for (const focused of [false, true]) test(`graph→existing task→graph→origi
 test('canvas wheel zoom preserves world geometry and settles measurements', { timeout: 30000 }, async () => {
   const h = await openGraph()
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start(); await openProjectGraph(h)
     await h.page.locator('[data-graph-task="child-b"]').waitFor(); await h.idle()
     if (process.env.HMEM_TASK_GRAPH_SCREENSHOT === '1') {
       await mkdir('../../output/task-graph-renderer', { recursive: true })
@@ -577,7 +618,7 @@ for (const focused of [false, true]) test(`deleted original project is not reviv
   const f = fixture(), h = await openGraph(f)
   try {
     await h.start('tab=projects' + (focused ? '&focus=project%3Aroot-project' : '')); await h.idle()
-    await h.page.locator('#task-graph-open-root-project').click()
+    await openProjectGraph(h)
     await h.page.locator('[data-graph-live="true"]').waitFor()
     await h.page.route(/\/api\/v1\/projects\/root-project(?:\/(?:overview|next-tasks|next-task-page))?(?:\?|$)/, route =>
       f.projects.some(row => row.id === 'root-project') ? route.fallback() : route.fulfill({ status: 404, json: { error: 'Project not found' } }))
@@ -604,7 +645,7 @@ for (const change of ['rename', 'status', 'reparent']) for (const focused of [fa
     await h.start('tab=projects' + (focused ? '&focus=project%3Aroot-project' : '')); await h.idle()
     await h.page.getByRole('button', { name: 'Collapse All', exact: true }).click()
     await h.page.locator('.hierarchy-search-input').fill('Graph'); await h.idle()
-    await h.page.locator('#task-graph-open-root-project').click()
+    await openProjectGraph(h)
     await h.page.locator('[data-graph-live="true"]').waitFor()
     const refreshed = h.page.waitForResponse(response => new URL(response.url()).pathname === '/api/v1/change-stream/resync' && response.request().postDataJSON().snapshot_profile === 'full_v1', { timeout: 5000 })
     if (change === 'rename') f.projects[0].name = 'Renamed current project'
@@ -639,7 +680,7 @@ test('tab-away cancels an old return before reentry beyond its deadline', { time
   const f = fixture(), h = await openGraph(f)
   try {
     await h.start(); await h.page.locator('.hierarchy-search-input').fill('Graph'); await h.idle()
-    await h.page.locator('#task-graph-open-root-project').click(); await h.page.locator('[data-graph-live="true"]').waitFor()
+    await openProjectGraph(h); await h.page.locator('[data-graph-live="true"]').waitFor()
     f.projects[0].name = 'Renamed outside saved search'
     await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f,'tab-return-rename','project','root-project'))
     await h.page.locator('[data-graph-project-label="root-project"]').filter({hasText:'Renamed outside saved search'}).waitFor()
@@ -668,7 +709,7 @@ test('live snapshots update cards, ownership and incident edges without replacin
   const h = await openGraph(f)
   const push = frame => h.page.evaluate(value => window.pushHierarchyFrames([value]), frame)
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start(); await openProjectGraph(h)
     await h.page.locator('[data-graph-live="true"]').waitFor()
     assert.equal(await h.page.locator('[data-graph-task="remote"]').count(), 0)
     await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click()
@@ -724,7 +765,7 @@ test('live snapshots update cards, ownership and incident edges without replacin
 test('semantic snapshot rejection stays stale through a checkpoint until valid retry acceptance', { timeout: 30000 }, async () => {
   const f = fixture(), h = await openGraph(f)
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start(); await openProjectGraph(h)
     await h.page.locator('[data-graph-live="true"]').waitFor()
     f.dependencies.push({ task_id: 'parent', depends_on_id: 'missing-task' })
     await h.page.evaluate(frame => window.pushHierarchyFrames([frame]), graphEvent(f, 'bad-reference', 'task_dependency', 'missing-link'))
@@ -748,7 +789,7 @@ test('Retry during reseed wait publishes one manager-owned seed through real Elm
   const held = new Promise(resolve => { release = resolve }), seedStarted = new Promise(resolve => { arrived = resolve })
   const h = await openGraph(f, { wait: count => { if (count === 2) { arrived(); return held } } })
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start(); await openProjectGraph(h)
     await h.page.locator('[data-graph-live="true"]').waitFor()
     await h.page.evaluate(() => window.pushHierarchyRawFrames([{ schema_version: 1, type: 'resync_required' }]))
     await h.page.getByRole('button', { name: 'Retry', exact: true }).click()
@@ -776,7 +817,7 @@ test('queued Retry retires an in-flight manager seed before real Elm accepts its
     if (count === 3) { newStarted(); return newGate }
   } })
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start(); await openProjectGraph(h)
     await h.page.locator('[data-graph-live="true"]').waitFor()
     await h.page.evaluate(() => window.pushHierarchyRawFrames([{ schema_version: 1, type: 'resync_required' }]))
     await h.page.getByRole('button', { name: 'Retry', exact: true }).evaluate(button => { window.queuedGraphRetry = button })
@@ -806,7 +847,7 @@ test('live refresh failure keeps stale cards and viewport until explicit Retry',
   const f = fixture(); let failing = false
   const h = await openGraph(f, { failure: () => failing })
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start(); await openProjectGraph(h)
     await h.page.locator('[data-graph-live="true"]').waitFor()
     await h.page.getByRole('button', { name: 'Zoom in', exact: true }).click()
     const viewport = await transform(h)
@@ -847,7 +888,7 @@ test('long labels fit intrinsic boxes and zoom cannot trigger layout feedback', 
   const f = fixture(); f.tasks[2].title = 'A long unbroken title ' + 'abcdefghijklmnopqrstuv'.repeat(70)
   const h = await openGraph(f)
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start(); await openProjectGraph(h)
     await h.page.locator('[data-graph-task="child-b"]').waitFor(); await transform(h)
     const paints = () => h.page.evaluate(() => new Promise(resolve => { let count = 0; const next = () => ++count >= 12 ? resolve() : requestAnimationFrame(next); requestAnimationFrame(next) }))
     await paints()
@@ -908,7 +949,7 @@ test('native touch pinch keeps the midpoint world anchor', { timeout: 30000 }, a
   const h = await openGraph()
   let session
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start(); await openProjectGraph(h)
     await h.page.locator('[data-graph-task="parent"]').waitFor(); await h.idle(); const before = await transform(h)
     const box = await h.page.locator('#task-graph-canvas').boundingBox()
     await h.page.locator('#task-graph-canvas').evaluate(n => { n.pointerReceipt = []; for (const kind of ['pointerdown', 'pointermove']) n.addEventListener(kind, e => n.pointerReceipt.push({ kind, id: e.pointerId, x: e.clientX - n.getBoundingClientRect().left, y: e.clientY - n.getBoundingClientRect().top })) })
@@ -991,7 +1032,7 @@ test('real credential reset cancels a held old graph request before replacement 
 test('hierarchy Back then Forward keeps native focus receipts fresh for the same graph entry', { timeout: 30000 }, async () => {
   const h = await openGraph()
   try {
-    await h.start(); await h.page.locator('#task-graph-open-root-project').click()
+    await h.start(); await openProjectGraph(h)
     await h.page.locator('[data-graph-task="child-a"]').waitFor(); await h.idle()
     const graphUrl = h.page.url()
     await h.page.locator('[data-graph-task="child-a"]').click()

@@ -36,14 +36,17 @@ suite = describe "graph presentation filters"
     , test "empty external circles disappear while empty in-scope circles remain" <| \_ ->
         let graph=Graph.visibleGraph {showDone=False,showCancelled=False} {raw|tasks=Dict.filter (\id _ -> id=="done" || id=="shared") raw.tasks,inScopeTaskIds=Set.singleton "done",edges=[edge "shared" "done"]}
         in Expect.equal ([],["p"],[]) (Dict.keys graph.tasks,Dict.keys graph.projects,graph.edges)
-    , test "URL flags default on, preserve graph identity and unrelated fragment parameters" <| \_ ->
+    , test "URL flags default off and preserve every explicit independent choice and graph identity" <| \_ ->
         let
             url=Url.fromString "https://app.test/workspace/w?keep=1#tab=projects&task-graph=p&graph-entry=e&other=hello%20world" |> Maybe.withDefault fallback
-            changed=History.withFilters {showDone=False,showCancelled=False} url |> Url.fromString |> Maybe.withDefault fallback
+            changed=History.withFilters {showDone=True,showCancelled=False} url |> Url.fromString |> Maybe.withDefault fallback
             restored=History.withFilters Graph.defaultFilters changed |> Url.fromString |> Maybe.withDefault fallback
-        in Expect.all [\_ -> Expect.equal Graph.defaultFilters (History.filters url),\_ -> Expect.equal {showDone=False,showCancelled=False} (History.filters changed)
+            choices=[{showDone=False,showCancelled=False},{showDone=True,showCancelled=False},{showDone=False,showCancelled=True},{showDone=True,showCancelled=True}]
+            roundtrip flags=History.withFilters flags url |> Url.fromString |> Maybe.map History.filters
+        in Expect.all [\_ -> Expect.equal {showDone=False,showCancelled=False} Graph.defaultFilters,\_ -> Expect.equal Graph.defaultFilters (History.filters url),\_ -> Expect.equal {showDone=True,showCancelled=False} (History.filters changed)
             ,\_ -> Expect.equal (History.parse url) (History.parse changed),\_ -> Expect.equal (Just "keep=1") changed.query
-            ,\_ -> Expect.equal url restored] ()
+            ,\_ -> Expect.equal Graph.defaultFilters (History.filters restored),\_ -> Expect.equal True (restored.fragment |> Maybe.map (String.contains "other=hello%20world") |> Maybe.withDefault False)
+            ,\_ -> Expect.equal (List.map Just choices) (List.map roundtrip choices)] ()
     ]
 
 

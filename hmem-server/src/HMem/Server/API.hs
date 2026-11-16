@@ -53,6 +53,7 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TE
 import Data.Time (NominalDiffTime, UTCTime(..), diffUTCTime, addUTCTime, addDays, addGregorianMonthsClip, toGregorian, fromGregorian, dayOfWeek, DayOfWeek(..))
+import Data.Word (Word64)
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Hasql.Connection qualified as Hasql
@@ -74,6 +75,7 @@ import HMem.DB.Observation qualified as Observation
 import HMem.DB.Embedding qualified as Embedding
 import HMem.DB.Overview qualified as Overview
 import HMem.DB.Pool (DBException(..), PoolMetrics(..), getPoolMetrics, runSession)
+import HMem.DB.RequestTiming (PoolCheckoutMetrics(..), checkoutWaitBoundsNs, getPoolCheckoutMetrics)
 import HMem.DB.Project qualified as Project
 import HMem.DB.RequestContext (Principal(..), EffectiveActor(..), PrincipalAuthority(..), actorTypeToText, currentPrincipal, currentEffectiveActor, currentRequestContext, isBotRequest, withWorkspaceIdContext)
 import HMem.DB.Schema
@@ -1026,9 +1028,25 @@ health pool tracker = do
   database <- liftIO $ tryWithResource pool (\connection -> Session.run (Session.sql "SELECT 1") connection)
   buffered <- liftIO $ bufferSize tracker
   metrics <- liftIO getPoolMetrics
+  checkout <- liftIO getPoolCheckoutMetrics
   pure $ object [ "status" .= (case database of Just (Right _) -> ("ok" :: Text); _ -> "degraded")
                 , "access_tracker" .= object ["buffered_count" .= buffered]
-                , "pool" .= object ["active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections] ]
+                , "pool" .= object ["active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections
+                                   , "checkout" .= poolCheckoutJson checkout] ]
+
+-- | Cumulative process-wide counters with fixed bucket labels; see
+-- docs/reference/request-performance.md.
+poolCheckoutJson :: PoolCheckoutMetrics -> Value
+poolCheckoutJson m = object
+  [ "checkouts" .= m.checkouts, "unattributed" .= m.unattributedCheckouts
+  , "connects" .= m.connects, "capacity_waits" .= m.capacityWaits
+  , "wait_total_ms" .= nsMs m.waitTotalNs, "wait_max_ms" .= nsMs m.waitMaxNs
+  , "connect_total_ms" .= nsMs m.connectTotalNs, "hold_total_ms" .= nsMs m.holdTotalNs
+  , "wait_buckets" .= zipWith (\bound count -> object ["le_ms" .= fmap nsMs bound, "count" .= count])
+      (map Just checkoutWaitBoundsNs ++ [Nothing]) m.waitBuckets ]
+  where
+    nsMs :: Word64 -> Double
+    nsMs ns = fromIntegral ns / 1e6
 
 -- | Demand guards both database selection and summary decoration. A skipped
 -- page has no membership authority for clients that did not request it.

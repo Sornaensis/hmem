@@ -1,0 +1,848 @@
+{
+  "schema": 1,
+  "task": "9bb3fedd-6066-4b4c-a826-91ceb7bf38b1",
+  "candidate": {
+    "base": "df8e7af41bd7c4e6fc38490cd60f9d3d5420c50b",
+    "state": "uncommitted working tree on base; measured source hashes below. RequestLatencyMeasurementSpec.hs later gained the RequestPlanModes example and a spreadHistory helper extracted unchanged from the measured path; its hash is the final file.",
+    "inputs": {
+      "hmem-core/src/HMem/DB/RequestTiming.hs": "beee43e8cdc555c03605f6635c42f3afb57c69b943da97a6b0545533d4a58981",
+      "hmem-core/src/HMem/DB/Pool.hs": "5d0104903ec68f604edd1435bd12714b10a36f1638dfad1f79055e194018afad",
+      "hmem-core/src/HMem/DB/Search.hs": "98baf52799561fd2995d9cf6d217cf68fb99ea95a75b9b7198519fc03091c8e7",
+      "hmem-core/src/HMem/DB/TestHarness.hs": "da7f30e0b39c02fd5f8e29b218c7f83e3ab39468f50751dbed7a0376267ed301",
+      "hmem-server/src/HMem/Server/Logging.hs": "cb1094b88f70429f3afcc54be063904fce5597064667fcdcc753098dcfe70a5e",
+      "hmem-server/src/HMem/Server/API.hs": "f409a3c59a9ac7efc9eee2786fefe57f80a8c592a26695deb52db290b6f58720",
+      "hmem-server/src/HMem/Server/ObservationDiscovery.hs": "0921d78a0a3ad86d4959e395e8baf46064e8a023d2f32d91abd3a5cb23aaefbd",
+      "hmem-server/test/HMem/Server/RequestLatencyMeasurementSpec.hs": "5121cf3c8b5b2429a14623629a2defb23eb97d240325f69373bd8ce7b1b11efe"
+    }
+  },
+  "owner": "repository maintainers",
+  "retention": "Retain this compact receipt until a matched rerun, an authorized passive native sample or a qualified pool, discovery or timeline change supersedes it. Generated logs, plan logs, sandbox databases and raw summaries were task scratch and were removed after the run.",
+  "method": "Opt-in hspec measurement in hmem-server RequestLatencyMeasurementSpec. The real application (local auth, production middleware order including the metadata-only request logger and its phase fields) runs on Warp over loopback with a production-default pool (10 connections, 60 s idle, 30 s statement timeout, 127.0.0.1 DSN) against an isolated native PostgreSQL test cluster. A fixed-seed (0x9bb3fedd, SplitMix64) workspace of the large perf fixture shape is created through HTTP; audit history is spread over 90 days and VACUUM ANALYZE refreshes statistics. Twenty route variants run in a pool-cold sequential pass (200 rounds; the first sample per variant is reported as cold) and in concurrent profiles of 4 and 16 clients with disjoint write targets; the 16-client profile is repeated against a one-stripe pool and then against the production pool again. Each phase records request-log phases joined by X-Request-Id, process checkout counters, pg_stat_activity and pg_locks samples every 25 ms, pg_stat_database deltas and pg_stat_statements. Matched plans come from auto_explain (analyze) on fresh connections for the six slowest sequential variants; a separate RequestPlanModes probe runs nine variants eight times on one connection under plan_cache_mode auto and force_custom_plan. Times are monotonic; app is complete minus wait, hold and provider time.",
+  "commands": [
+    "HMEM_REQUEST_LATENCY_MEASUREMENT=1 HMEM_TEST_SESSION_DIAGNOSTICS=1 HMEM_REQUEST_LATENCY_OUTPUT=<task scratch> stack test hmem-server:test:hmem-server-test --ta \"--match RequestLatencyMeasurement\"",
+    "HMEM_REQUEST_PLAN_MODES=1 HMEM_REQUEST_LATENCY_OUTPUT=<task scratch> stack test hmem-server:test:hmem-server-test --ta \"--match RequestPlanModes\""
+  ],
+  "runtime": {"os": "Windows 11 Pro 10.0.26200", "ghc": "9.10.2", "postgresql": "18.2", "capabilities": 24, "poolStripes": 10, "pgStatStatements": true},
+  "outcome": {"measurement": "1 example, 0 failures in 857.1 s", "planModes": "1 example, 0 failures"},
+  "fixture": {
+    "audit_rows": 5789,
+    "audit_span_days": 90,
+    "database_bytes": 70366911,
+    "dependencies": 722,
+    "observations": 2000,
+    "projects": 250,
+    "seed_ms": 85202.96,
+    "tasks": 1500
+  },
+  "connectProbeMs": {"127.0.0.1": {"max_ms": 49.981, "mean_ms": 47.883, "n": 10}, "localhost": {"max_ms": 225.523, "mean_ms": 66.535, "n": 10}},
+  "fields": {
+    "sequential.completeMs": "[p50, p95, p99, max], nearest rank, warm samples",
+    "concurrent": "per phase [n, p50, p95, p99, mean wait ms, wait share of the mean tail (samples at or above p95)]",
+    "bytes": "[request, response] mean bytes",
+    "planModesCompleteMs": "complete_ms of eight consecutive executions per variant on one connection"
+  },
+  "sequential": [
+    {
+      "variant": "discovery_continue",
+      "route": "/api/v1/observations/discovery",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [538.386, 582.145, 807.435, 1198.556],
+      "meanMs": {"wait": 0.006, "connect": 0, "hold": 546.314, "app": 1.435},
+      "checkouts": 3,
+      "tailMeanMs": {"n": 10, "complete": 691.237, "wait": 0.007, "hold": 689.612, "app": 1.618},
+      "bytes": [147, 83030.186],
+      "coldMs": {"complete": 517.549, "connect": 0}
+    },
+    {
+      "variant": "discovery_content",
+      "route": "/api/v1/observations/discovery",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [538.463, 578.483, 652.99, 671.998],
+      "meanMs": {"wait": 0.005, "connect": 0, "hold": 541.706, "app": 1.608},
+      "checkouts": 3,
+      "tailMeanMs": {"n": 10, "complete": 603.995, "wait": 0.006, "hold": 602.302, "app": 1.687},
+      "bytes": [191, 84432.402],
+      "coldMs": {"complete": 523.484, "connect": 0}
+    },
+    {
+      "variant": "discovery_subject_tree",
+      "route": "/api/v1/observations/discovery",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [6.289, 346.08, 354.177, 356.912],
+      "meanMs": {"wait": 0.005, "connect": 0, "hold": 70.842, "app": 0.478},
+      "checkouts": 3,
+      "tailMeanMs": {"n": 10, "complete": 350.907, "wait": 0.005, "hold": 350.424, "app": 0.478},
+      "bytes": [195, 565.116],
+      "coldMs": {"complete": 326.25, "connect": 0}
+    },
+    {
+      "variant": "timeline_buckets_day",
+      "route": "/api/v1/workspaces/{workspaceId}/timeline/buckets",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [247.068, 259.221, 276.634, 343.112],
+      "meanMs": {"wait": 0.004, "connect": 0, "hold": 245.567, "app": 2.78},
+      "checkouts": 2,
+      "tailMeanMs": {"n": 10, "complete": 272.899, "wait": 0.005, "hold": 269.66, "app": 3.234},
+      "bytes": [0, 89940.688],
+      "coldMs": {"complete": 217.357, "connect": 0}
+    },
+    {
+      "variant": "timeline_events",
+      "route": "/api/v1/workspaces/{workspaceId}/timeline",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [233.931, 240.3, 259.276, 276.025],
+      "meanMs": {"wait": 0.004, "connect": 0, "hold": 229.673, "app": 0.967},
+      "checkouts": 2,
+      "tailMeanMs": {"n": 10, "complete": 247.809, "wait": 0.004, "hold": 244.412, "app": 3.393},
+      "bytes": [0, 39481.206],
+      "coldMs": {"complete": 26.849, "connect": 0}
+    },
+    {
+      "variant": "timeline_buckets_week",
+      "route": "/api/v1/workspaces/{workspaceId}/timeline/buckets",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [139.627, 149.401, 203.992, 228.663],
+      "meanMs": {"wait": 0.004, "connect": 0, "hold": 140.673, "app": 0.635},
+      "checkouts": 2,
+      "tailMeanMs": {"n": 10, "complete": 166.866, "wait": 0.004, "hold": 166.018, "app": 0.843},
+      "bytes": [0, 13850.688],
+      "coldMs": {"complete": 137.271, "connect": 0}
+    },
+    {
+      "variant": "timeline_buckets_all_time",
+      "route": "/api/v1/workspaces/{workspaceId}/timeline/buckets",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [139.359, 147.206, 152.675, 191.772],
+      "meanMs": {"wait": 0.006, "connect": 0, "hold": 139.547, "app": 0.639},
+      "checkouts": 3,
+      "tailMeanMs": {"n": 10, "complete": 154.205, "wait": 0.007, "hold": 153.508, "app": 0.689},
+      "bytes": [0, 13857.879],
+      "coldMs": {"complete": 129.318, "connect": 0}
+    },
+    {
+      "variant": "search_unified",
+      "route": "/api/v1/search",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [9.61, 19.244, 87.612, 499.847],
+      "meanMs": {"wait": 4.161, "connect": 4.151, "hold": 15.772, "app": 0},
+      "checkouts": 6,
+      "tailMeanMs": {"n": 10, "complete": 89.316, "wait": 82.621, "hold": 44.059, "app": 0},
+      "bytes": [83, 19827.824],
+      "coldMs": {"complete": 85.28, "connect": 125.371}
+    },
+    {
+      "variant": "nav_batch",
+      "route": "/api/v1/workspaces/{workspaceId}/navigation/batch",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [40.144, 51.479, 63.455, 64.674],
+      "meanMs": {"wait": 0.05, "connect": 0, "hold": 40.559, "app": 0.731},
+      "checkouts": 28.307,
+      "tailMeanMs": {"n": 10, "complete": 56.326, "wait": 0.073, "hold": 55.257, "app": 0.996},
+      "bytes": [410, 13977.603],
+      "coldMs": {"complete": 61.499, "connect": 0}
+    },
+    {
+      "variant": "task_update_status",
+      "route": "/api/v1/tasks/{taskId}",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [36.522, 41.648, 45.937, 48.787],
+      "meanMs": {"wait": 0.014, "connect": 0, "hold": 36.223, "app": 0.266},
+      "checkouts": 9,
+      "tailMeanMs": {"n": 10, "complete": 43.956, "wait": 0.018, "hold": 43.671, "app": 0.267},
+      "bytes": [20.482, 1399.236],
+      "coldMs": {"complete": 46.022, "connect": 0}
+    },
+    {
+      "variant": "task_update_fields",
+      "route": "/api/v1/tasks/{taskId}",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [36.372, 42.388, 45.777, 48.135],
+      "meanMs": {"wait": 0.015, "connect": 0, "hold": 36.153, "app": 0.232},
+      "checkouts": 9.799,
+      "tailMeanMs": {"n": 10, "complete": 44.095, "wait": 0.019, "hold": 43.827, "app": 0.25},
+      "bytes": [43.558, 557.678],
+      "coldMs": {"complete": 124.785, "connect": 0}
+    },
+    {
+      "variant": "nav_root",
+      "route": "/api/v1/workspaces/{workspaceId}/navigation",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [24.298, 26.002, 27.374, 28.474],
+      "meanMs": {"wait": 0.013, "connect": 0, "hold": 23.407, "app": 0.957},
+      "checkouts": 5,
+      "tailMeanMs": {"n": 10, "complete": 26.742, "wait": 0.014, "hold": 25.624, "app": 1.104},
+      "bytes": [0, 29577],
+      "coldMs": {"complete": 30.05, "connect": 0}
+    },
+    {
+      "variant": "observation_list_query",
+      "route": "/api/v1/observations",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [10.636, 17.861, 19.357, 20.312],
+      "meanMs": {"wait": 0.005, "connect": 0, "hold": 10.481, "app": 1.193},
+      "checkouts": 3,
+      "tailMeanMs": {"n": 10, "complete": 18.869, "wait": 0.005, "hold": 17.605, "app": 1.259},
+      "bytes": [0, 84129.523],
+      "coldMs": {"complete": 17.039, "connect": 0}
+    },
+    {
+      "variant": "nav_project",
+      "route": "/api/v1/workspaces/{workspaceId}/navigation",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [11.179, 14.883, 18.867, 18.984],
+      "meanMs": {"wait": 0.013, "connect": 0, "hold": 10.992, "app": 0.313},
+      "checkouts": 7.829,
+      "tailMeanMs": {"n": 10, "complete": 16.291, "wait": 0.02, "hold": 15.856, "app": 0.415},
+      "bytes": [0, 3362.236],
+      "coldMs": {"complete": 20.408, "connect": 0}
+    },
+    {
+      "variant": "nav_focus",
+      "route": "/api/v1/workspaces/{workspaceId}/navigation/focus/{entityType}/{entityId}",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [11.674, 13.961, 16.305, 17.316],
+      "meanMs": {"wait": 0.017, "connect": 0, "hold": 11.482, "app": 0.314},
+      "checkouts": 13,
+      "tailMeanMs": {"n": 10, "complete": 15.182, "wait": 0.021, "hold": 14.841, "app": 0.32},
+      "bytes": [0, 2636.045],
+      "coldMs": {"complete": 15.456, "connect": 0}
+    },
+    {
+      "variant": "project_overview",
+      "route": "/api/v1/projects/{projectId}/overview",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [10.306, 11.92, 14.073, 28.236],
+      "meanMs": {"wait": 0.009, "connect": 0, "hold": 10.005, "app": 0.475},
+      "checkouts": 5.985,
+      "tailMeanMs": {"n": 10, "complete": 14.162, "wait": 0.012, "hold": 11.951, "app": 2.198},
+      "bytes": [0, 4014.206],
+      "coldMs": {"complete": 15.439, "connect": 0}
+    },
+    {
+      "variant": "observation_subject_tree",
+      "route": "/api/v1/observations/subject-tree",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [10.928, 11.97, 13.191, 13.316],
+      "meanMs": {"wait": 0.005, "connect": 0, "hold": 10.734, "app": 0.229},
+      "checkouts": 3,
+      "tailMeanMs": {"n": 10, "complete": 12.467, "wait": 0.006, "hold": 12.124, "app": 0.336},
+      "bytes": [0, 1946],
+      "coldMs": {"complete": 10.351, "connect": 0}
+    },
+    {
+      "variant": "task_list_query",
+      "route": "/api/v1/tasks",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [5.588, 6.668, 7.15, 8.163],
+      "meanMs": {"wait": 0.005, "connect": 0, "hold": 4.957, "app": 0.684},
+      "checkouts": 3,
+      "tailMeanMs": {"n": 10, "complete": 7.011, "wait": 0.006, "hold": 6.135, "app": 0.87},
+      "bytes": [0, 27400.538],
+      "coldMs": {"complete": 8.929, "connect": 0}
+    },
+    {
+      "variant": "task_get",
+      "route": "/api/v1/tasks/{taskId}",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [2.674, 3.867, 4.602, 5.533],
+      "meanMs": {"wait": 0.005, "connect": 0, "hold": 2.635, "app": 0.148},
+      "checkouts": 3,
+      "tailMeanMs": {"n": 10, "complete": 4.378, "wait": 0.007, "hold": 4.146, "app": 0.225},
+      "bytes": [0, 531.874],
+      "coldMs": {"complete": 19.556, "connect": 0}
+    },
+    {
+      "variant": "planning_counts",
+      "route": "/api/v1/workspaces/{workspaceId}/planning-counts",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [2.253, 3.028, 3.232, 3.483],
+      "meanMs": {"wait": 0.003, "connect": 0, "hold": 2.184, "app": 0.138},
+      "checkouts": 2,
+      "tailMeanMs": {"n": 10, "complete": 3.134, "wait": 0.004, "hold": 2.981, "app": 0.149},
+      "bytes": [0, 39],
+      "coldMs": {"complete": 4.007, "connect": 0}
+    },
+    {
+      "variant": "health",
+      "route": "/api/v1/health",
+      "n": 199,
+      "status": {"2xx": 200},
+      "completeMs": [0.292, 0.39, 0.597, 0.809],
+      "meanMs": {"wait": 0, "connect": 0, "hold": 0, "app": 0.304},
+      "checkouts": 0,
+      "tailMeanMs": {"n": 10, "complete": 0.501, "wait": 0, "hold": 0, "app": 0.501},
+      "bytes": [0, 552.628],
+      "coldMs": {"complete": 220.185, "connect": 218.85}
+    }
+  ],
+  "concurrent": [
+    {
+      "variant": "discovery_continue",
+      "c4": [100, 558.851, 609.729, 650.695, 3.602, 0.02],
+      "c16": [128, 660.318, 1537.974, 2278.831, 104.687, 0.23],
+      "c16_one_stripe": [128, 682.535, 796.29, 865.695, 51.079, 0.23],
+      "c16_repeat": [128, 592.766, 1124.663, 1218.184, 60.814, 0.5]
+    },
+    {
+      "variant": "discovery_content",
+      "c4": [100, 562.096, 599.393, 632.36, 2.645, 0.0],
+      "c16": [128, 637.653, 1362.694, 1784.605, 84.067, 0.36],
+      "c16_one_stripe": [128, 684.707, 784.442, 845.526, 40.739, 0.17],
+      "c16_repeat": [128, 579.57, 887.134, 1208.579, 34.067, 0.46]
+    },
+    {
+      "variant": "discovery_subject_tree",
+      "c4": [100, 9.291, 359.578, 370.303, 2.158, 0.01],
+      "c16": [128, 26.264, 988.578, 1399.261, 116.753, 0.65],
+      "c16_one_stripe": [128, 61.194, 493.48, 554.436, 54.496, 0.26],
+      "c16_repeat": [128, 13.304, 564.312, 1024.411, 44.209, 0.64]
+    },
+    {
+      "variant": "timeline_buckets_day",
+      "c4": [100, 264.643, 278.505, 300.026, 1.525, 0.01],
+      "c16": [128, 303.324, 719.703, 977.37, 50.611, 0.45],
+      "c16_one_stripe": [128, 325.835, 438.821, 464.361, 33.749, 0.33],
+      "c16_repeat": [128, 291.594, 319.418, 697.488, 15.784, 0.43]
+    },
+    {
+      "variant": "timeline_events",
+      "c4": [100, 239.536, 251.623, 284.473, 1.515, 0.01],
+      "c16": [128, 254.041, 632.577, 1087.792, 57.151, 0.59],
+      "c16_one_stripe": [128, 257.195, 340.768, 408.387, 28.568, 0.32],
+      "c16_repeat": [128, 240.21, 319.193, 617.601, 21.571, 0.73]
+    },
+    {
+      "variant": "timeline_buckets_week",
+      "c4": [100, 149.624, 159.909, 166.033, 1.52, 0.02],
+      "c16": [128, 177.245, 843.391, 1361.507, 85.729, 0.67],
+      "c16_one_stripe": [128, 195.687, 264.995, 306.887, 31.833, 0.38],
+      "c16_repeat": [128, 166.395, 350.585, 760.857, 27.322, 0.7]
+    },
+    {
+      "variant": "timeline_buckets_all_time",
+      "c4": [100, 150.811, 162.75, 200.808, 2.201, 0.01],
+      "c16": [128, 186.375, 799.963, 1090.445, 100.625, 0.78],
+      "c16_one_stripe": [128, 201.674, 331.8, 431.778, 48.876, 0.55],
+      "c16_repeat": [128, 165.883, 623.279, 766.302, 41.803, 0.76]
+    },
+    {
+      "variant": "search_unified",
+      "c4": [100, 13.56, 284.176, 454.258, 50.747, 0.99],
+      "c16": [128, 348.388, 859.772, 1808.358, 528.373, 1.0],
+      "c16_one_stripe": [128, 38.136, 146.101, 231.461, 73.967, 1.0],
+      "c16_repeat": [128, 256.396, 622.585, 867.358, 400.302, 1.0]
+    },
+    {
+      "variant": "nav_batch",
+      "c4": [100, 54.802, 1967.91, 2091.353, 595.365, 0.97],
+      "c16": [128, 131.316, 2714.475, 5233.382, 547.438, 0.98],
+      "c16_one_stripe": [128, 281.964, 920.548, 1466.945, 325.02, 0.94],
+      "c16_repeat": [128, 365.13, 1746.869, 2340.784, 436.297, 0.98]
+    },
+    {
+      "variant": "task_update_status",
+      "c4": [100, 45.778, 69.468, 169.415, 11.557, 0.6],
+      "c16": [128, 79.186, 380.871, 1281.816, 58.692, 0.78],
+      "c16_one_stripe": [128, 146.653, 407.531, 537.904, 111.342, 0.89],
+      "c16_repeat": [128, 59.181, 618.48, 1268.432, 79.253, 0.94]
+    },
+    {
+      "variant": "task_update_fields",
+      "c4": [100, 47.889, 64.798, 267.497, 9.829, 0.32],
+      "c16": [128, 91.786, 755.892, 1350.452, 115.04, 0.92],
+      "c16_one_stripe": [128, 164.764, 403.853, 479.426, 128.701, 0.87],
+      "c16_repeat": [128, 60.772, 804.774, 1217.593, 87.967, 0.95]
+    },
+    {
+      "variant": "nav_root",
+      "c4": [100, 26.711, 944.106, 1078.13, 96.052, 0.97],
+      "c16": [128, 70.524, 1445.176, 2738.81, 456.635, 0.98],
+      "c16_one_stripe": [128, 61.021, 198.12, 301.575, 54.918, 0.88],
+      "c16_repeat": [128, 59.186, 1124.863, 1214.374, 396.651, 0.98]
+    },
+    {
+      "variant": "observation_list_query",
+      "c4": [100, 13.385, 33.243, 36.361, 3.775, 0.6],
+      "c16": [128, 17.773, 368.756, 611.806, 40.761, 0.97],
+      "c16_one_stripe": [128, 39.696, 119.087, 218.393, 38.65, 0.91],
+      "c16_repeat": [128, 13.448, 191.794, 617.446, 32.298, 0.97]
+    },
+    {
+      "variant": "nav_project",
+      "c4": [100, 17.535, 1136.973, 1158.723, 277.303, 0.99],
+      "c16": [128, 38.664, 1868.512, 2837.476, 432.578, 0.99],
+      "c16_one_stripe": [128, 72.08, 306.935, 489.863, 87.02, 0.95],
+      "c16_repeat": [128, 412.267, 1097.592, 1441.117, 317.255, 0.99]
+    },
+    {
+      "variant": "nav_focus",
+      "c4": [100, 14.442, 94.961, 397.217, 34.75, 0.96],
+      "c16": [128, 24.088, 673.814, 1102.344, 75.888, 0.98],
+      "c16_one_stripe": [128, 127.502, 507.127, 621.306, 170.393, 0.97],
+      "c16_repeat": [128, 20.998, 631.154, 1298.81, 92.671, 0.99]
+    },
+    {
+      "variant": "project_overview",
+      "c4": [100, 11.633, 34.668, 45.614, 4.749, 0.74],
+      "c16": [128, 16.644, 617.957, 1203.357, 68.287, 0.99],
+      "c16_one_stripe": [128, 69.831, 255.499, 340.877, 80.033, 0.95],
+      "c16_repeat": [128, 13.843, 410.108, 640.053, 41.443, 0.98]
+    },
+    {
+      "variant": "observation_subject_tree",
+      "c4": [100, 11.85, 27.263, 30.201, 2.496, 0.61],
+      "c16": [128, 14.45, 617.837, 875.581, 69.992, 0.97],
+      "c16_one_stripe": [128, 35.644, 127.953, 253.533, 39.854, 0.93],
+      "c16_repeat": [128, 11.85, 176.235, 645.735, 29.255, 0.98]
+    },
+    {
+      "variant": "task_list_query",
+      "c4": [100, 6.832, 12.801, 19.399, 6.974, 0.94],
+      "c16": [128, 10.24, 64.129, 551.678, 17.493, 0.97],
+      "c16_one_stripe": [128, 28.233, 105.114, 154.325, 33.793, 0.95],
+      "c16_repeat": [128, 8.997, 121.716, 441.541, 20.426, 0.98]
+    },
+    {
+      "variant": "task_get",
+      "c4": [100, 4.115, 9.743, 13.089, 2.196, 0.7],
+      "c16": [128, 9.038, 440.564, 1007.123, 67.101, 0.99],
+      "c16_one_stripe": [128, 32.298, 124.017, 258.832, 41.541, 0.97],
+      "c16_repeat": [128, 7.877, 241.591, 555.48, 36.324, 0.99]
+    },
+    {
+      "variant": "planning_counts",
+      "c4": [100, 2.666, 6.444, 31.308, 1.268, 0.83],
+      "c16": [128, 4.029, 24.134, 652.399, 23.361, 0.99],
+      "c16_one_stripe": [128, 18.076, 104.247, 157.773, 25.505, 0.96],
+      "c16_repeat": [128, 3.259, 65.325, 283.595, 12.061, 0.98]
+    },
+    {
+      "variant": "health",
+      "c4": [100, 0.207, 0.392, 1.079, 0, 0.0],
+      "c16": [128, 0.16, 0.398, 0.569, 0, 0.0],
+      "c16_one_stripe": [128, 0.148, 0.218, 0.556, 0, 0.0],
+      "c16_repeat": [128, 0.149, 0.396, 1.318, 0, 0.0]
+    }
+  ],
+  "phases": [
+    {
+      "phase": "seq",
+      "elapsedMs": 430068.743,
+      "pool": {
+        "checkouts": 23389,
+        "unattributed": 0,
+        "connects": 10,
+        "capacity_waits": 0,
+        "wait_total_ms": 991.247,
+        "connect_total_ms": 1170.309,
+        "hold_total_ms": 426144.233
+      },
+      "waitBuckets": {
+        "le_0.1ms": 23379,
+        "le_0.5ms": 1,
+        "le_1.0ms": 0,
+        "le_10.0ms": 0,
+        "le_100.0ms": 8,
+        "le_1000.0ms": 0,
+        "le_5.0ms": 0,
+        "le_50.0ms": 0,
+        "le_500.0ms": 1,
+        "overflow": 0
+      },
+      "activity": {
+        "samples": 13986,
+        "maxActiveBackends": 3,
+        "samplesWithLockWait": 0,
+        "maxUngrantedLocks": 0,
+        "activeWaitEvents": {"CPU:-": 12544, "Client:ClientRead": 41, "IO:BuffileRead": 57, "IO:BuffileWrite": 298, "IO:WalWrite": 1}
+      },
+      "database": {"blks_hit": 23802241, "blks_read": 0, "deadlocks": 0, "temp_bytes": 8235546048, "temp_files": 1194, "xact_commit": 37634, "xact_rollback": 0},
+      "topStatements": [
+        {
+          "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space), matching",
+          "calls": 600,
+          "meanMs": 382.619,
+          "maxMs": 1191.262,
+          "totalMs": 229571.606
+        },
+        {
+          "query": "WITH bounds AS ( SELECT date_trunc($1, $2 AT TIME ZONE $3) AS series_start, date_trunc($4,",
+          "calls": 600,
+          "meanMs": 148.919,
+          "maxMs": 311.014,
+          "totalMs": 89351.542
+        },
+        {
+          "query": "WITH candidates AS ( SELECT a.id AS audit_id, ($1 || a.id::text) AS event_id, a.workspace_",
+          "calls": 200,
+          "meanMs": 225.672,
+          "maxMs": 270.927,
+          "totalMs": 45134.408
+        }
+      ]
+    },
+    {
+      "phase": "c4",
+      "elapsedMs": 111857.099,
+      "pool": {
+        "checkouts": 11716,
+        "unattributed": 0,
+        "connects": 0,
+        "capacity_waits": 2652,
+        "wait_total_ms": 111222.747,
+        "connect_total_ms": 0,
+        "hold_total_ms": 222004.083
+      },
+      "waitBuckets": {
+        "le_0.1ms": 6601,
+        "le_0.5ms": 365,
+        "le_1.0ms": 2099,
+        "le_10.0ms": 91,
+        "le_100.0ms": 5,
+        "le_1000.0ms": 91,
+        "le_5.0ms": 2065,
+        "le_50.0ms": 167,
+        "le_500.0ms": 232,
+        "overflow": 0
+      },
+      "activity": {
+        "samples": 3636,
+        "maxActiveBackends": 3,
+        "samplesWithLockWait": 13,
+        "maxUngrantedLocks": 2,
+        "activeWaitEvents": {"CPU:-": 6564, "Client:ClientRead": 27, "IO:BuffileRead": 31, "IO:BuffileWrite": 184, "IO:WalWrite": 2, "Lock:advisory": 18}
+      },
+      "database": {"blks_hit": 11905030, "blks_read": 0, "deadlocks": 0, "temp_bytes": 4440142620, "temp_files": 606, "xact_commit": 15424, "xact_rollback": 0},
+      "topStatements": [
+        {
+          "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space), matching",
+          "calls": 300,
+          "meanMs": 398.209,
+          "maxMs": 756.233,
+          "totalMs": 119462.614
+        },
+        {
+          "query": "WITH bounds AS ( SELECT date_trunc($1, $2 AT TIME ZONE $3) AS series_start, date_trunc($4,",
+          "calls": 300,
+          "meanMs": 160.421,
+          "maxMs": 365.414,
+          "totalMs": 48126.444
+        },
+        {
+          "query": "WITH candidates AS ( SELECT a.id AS audit_id, ($1 || a.id::text) AS event_id, a.workspace_",
+          "calls": 100,
+          "meanMs": 216.605,
+          "maxMs": 386.229,
+          "totalMs": 21660.532
+        }
+      ]
+    },
+    {
+      "phase": "c16",
+      "elapsedMs": 55171.276,
+      "pool": {
+        "checkouts": 15042,
+        "unattributed": 0,
+        "connects": 0,
+        "capacity_waits": 206,
+        "wait_total_ms": 396961.596,
+        "connect_total_ms": 0,
+        "hold_total_ms": 361878.197
+      },
+      "waitBuckets": {
+        "le_0.1ms": 6440,
+        "le_0.5ms": 193,
+        "le_1.0ms": 1203,
+        "le_10.0ms": 701,
+        "le_100.0ms": 91,
+        "le_1000.0ms": 249,
+        "le_5.0ms": 5019,
+        "le_50.0ms": 458,
+        "le_500.0ms": 666,
+        "overflow": 22
+      },
+      "activity": {
+        "samples": 1730,
+        "maxActiveBackends": 8,
+        "samplesWithLockWait": 71,
+        "maxUngrantedLocks": 2,
+        "activeWaitEvents": {"CPU:-": 10098, "Client:ClientRead": 54, "IO:BuffileRead": 73, "IO:BuffileWrite": 304, "IO:WalWrite": 1, "Lock:advisory": 74}
+      },
+      "database": {"blks_hit": 14818264, "blks_read": 0, "deadlocks": 0, "temp_bytes": 5809171204, "temp_files": 760, "xact_commit": 16700, "xact_rollback": 0},
+      "topStatements": [
+        {
+          "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space), matching",
+          "calls": 384,
+          "meanMs": 503.554,
+          "maxMs": 2256.962,
+          "totalMs": 193364.797
+        },
+        {
+          "query": "WITH bounds AS ( SELECT date_trunc($1, $2 AT TIME ZONE $3) AS series_start, date_trunc($4,",
+          "calls": 384,
+          "meanMs": 204.85,
+          "maxMs": 670.852,
+          "totalMs": 78662.359
+        },
+        {
+          "query": "WITH candidates AS ( SELECT a.id AS audit_id, ($1 || a.id::text) AS event_id, a.workspace_",
+          "calls": 128,
+          "meanMs": 225.774,
+          "maxMs": 771.506,
+          "totalMs": 28899.044
+        }
+      ]
+    },
+    {
+      "phase": "c16_one_stripe",
+      "elapsedMs": 33743.725,
+      "pool": {
+        "checkouts": 15042,
+        "unattributed": 0,
+        "connects": 9,
+        "capacity_waits": 1,
+        "wait_total_ms": 192009.912,
+        "connect_total_ms": 984.38,
+        "hold_total_ms": 324198.335
+      },
+      "waitBuckets": {
+        "le_0.1ms": 226,
+        "le_0.5ms": 31,
+        "le_1.0ms": 51,
+        "le_10.0ms": 5631,
+        "le_100.0ms": 506,
+        "le_1000.0ms": 0,
+        "le_5.0ms": 4696,
+        "le_50.0ms": 3715,
+        "le_500.0ms": 186,
+        "overflow": 0
+      },
+      "activity": {
+        "samples": 1099,
+        "maxActiveBackends": 10,
+        "samplesWithLockWait": 94,
+        "maxUngrantedLocks": 3,
+        "activeWaitEvents": {"CPU:-": 9308, "Client:ClientRead": 54, "IO:BuffileRead": 55, "IO:BuffileWrite": 291, "IO:WalWrite": 2, "Lock:advisory": 126}
+      },
+      "database": {"blks_hit": 13958218, "blks_read": 0, "deadlocks": 0, "temp_bytes": 5979140592, "temp_files": 756, "xact_commit": 15870, "xact_rollback": 0},
+      "topStatements": [
+        {
+          "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space), matching",
+          "calls": 384,
+          "meanMs": 456.324,
+          "maxMs": 735.402,
+          "totalMs": 175228.472
+        },
+        {
+          "query": "WITH bounds AS ( SELECT date_trunc($1, $2 AT TIME ZONE $3) AS series_start, date_trunc($4,",
+          "calls": 384,
+          "meanMs": 182.97,
+          "maxMs": 334.847,
+          "totalMs": 70260.594
+        },
+        {
+          "query": "WITH candidates AS ( SELECT a.id AS audit_id, ($1 || a.id::text) AS event_id, a.workspace_",
+          "calls": 128,
+          "meanMs": 164.027,
+          "maxMs": 291.926,
+          "totalMs": 20995.437
+        }
+      ]
+    },
+    {
+      "phase": "c16_repeat",
+      "elapsedMs": 48207.036,
+      "pool": {
+        "checkouts": 15042,
+        "unattributed": 0,
+        "connects": 10,
+        "capacity_waits": 548,
+        "wait_total_ms": 285154.949,
+        "connect_total_ms": 1117.016,
+        "hold_total_ms": 295537.73
+      },
+      "waitBuckets": {
+        "le_0.1ms": 5872,
+        "le_0.5ms": 382,
+        "le_1.0ms": 2323,
+        "le_10.0ms": 308,
+        "le_100.0ms": 91,
+        "le_1000.0ms": 204,
+        "le_5.0ms": 4843,
+        "le_50.0ms": 424,
+        "le_500.0ms": 595,
+        "overflow": 0
+      },
+      "activity": {
+        "samples": 1571,
+        "maxActiveBackends": 10,
+        "samplesWithLockWait": 64,
+        "maxUngrantedLocks": 3,
+        "activeWaitEvents": {"CPU:-": 8661, "Client:ClientRead": 65, "IO:BuffileRead": 47, "IO:BuffileWrite": 251, "IO:WalWrite": 2, "Lock:advisory": 82}
+      },
+      "database": {"blks_hit": 14483283, "blks_read": 0, "deadlocks": 0, "temp_bytes": 6216585330, "temp_files": 768, "xact_commit": 16679, "xact_rollback": 0},
+      "topStatements": [
+        {
+          "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space), matching",
+          "calls": 384,
+          "meanMs": 412.162,
+          "maxMs": 717.006,
+          "totalMs": 158270.368
+        },
+        {
+          "query": "WITH bounds AS ( SELECT date_trunc($1, $2 AT TIME ZONE $3) AS series_start, date_trunc($4,",
+          "calls": 384,
+          "meanMs": 176.66,
+          "maxMs": 293.217,
+          "totalMs": 67837.62
+        },
+        {
+          "query": "WITH candidates AS ( SELECT a.id AS audit_id, ($1 || a.id::text) AS event_id, a.workspace_",
+          "calls": 128,
+          "meanMs": 163.353,
+          "maxMs": 266.671,
+          "totalMs": 20909.142
+        }
+      ]
+    }
+  ],
+  "seedWrites": [
+    {"variant": "dependency_link", "n": 1200, "status": {"2xx": 1200}, "completeMs": [20.334, 40.931, 51.954]},
+    {"variant": "observation_create", "n": 2000, "status": {"2xx": 2000}, "completeMs": [6.889, 8.796, 9.918]},
+    {"variant": "project_create", "n": 250, "status": {"2xx": 250}, "completeMs": [6.649, 8.056, 9.573]},
+    {"variant": "subtask_create", "n": 500, "status": {"2xx": 500}, "completeMs": [28.145, 35.96, 58.579]},
+    {"variant": "task_create", "n": 1000, "status": {"2xx": 1000}, "completeMs": [10, 12.706, 13.855]},
+    {"variant": "task_status_seed", "n": 389, "status": {"2xx": 366, "4xx": 23}, "completeMs": [45.58, 85.778, 104.016]},
+    {"variant": "workspace_create", "n": 1, "status": {"2xx": 1}, "completeMs": [92.897, 92.897, 92.897]}
+  ],
+  "planModesCompleteMs": {
+    "plan_auto": {
+      "discovery_content": [580.855, 621.765, 562.686, 570.965, 657.335, 570.285, 592.992, 577.18],
+      "discovery_continue": [570.772, 617.918, 560.737, 567.679, 664.554, 571.635, 586.39, 670.45],
+      "discovery_subject_tree": [415.391, 458.415, 10.236, 10.702, 10.391, 9.576, 11.719, 11.563],
+      "observation_list_query": [33.557, 23.005, 28.623, 18.911, 28.886, 44.242, 34.714, 24.498],
+      "search_unified": [131.816, 104.219, 267.201, 256.008, 78.518, 9.053, 10.071, 14.423],
+      "task_update_fields": [67.473, 46.816, 48.129, 42.162, 44.8, 42.476, 61.905, 135.198],
+      "timeline_buckets_all_time": [147.246, 146.354, 148.218, 146.048, 148.07, 150.08, 151.471, 148.953],
+      "timeline_buckets_day": [260.112, 253.952, 251.056, 253.135, 272.04, 274.115, 268.6, 268.951],
+      "timeline_buckets_week": [148.155, 135.854, 137.012, 142.765, 134.769, 141.262, 134.012, 134.988],
+      "timeline_events": [107.924, 27.808, 27.246, 27.803, 26.647, 230.811, 224.824, 222.362]
+    },
+    "plan_custom": {
+      "discovery_content": [591.336, 607.857, 572.726, 593.467, 671.722, 571.415, 594.315, 565.301],
+      "discovery_continue": [576.742, 606.383, 563.043, 591.506, 665.116, 576.868, 597.761, 563.034],
+      "discovery_subject_tree": [408.821, 433.824, 10.234, 9.844, 9.744, 9.656, 9.341, 9.804],
+      "observation_list_query": [19.38, 11.625, 13.795, 10.044, 12.554, 17.802, 11.807, 13.86],
+      "search_unified": [171.005, 116.466, 109.544, 90.175, 78.726, 8.747, 9.901, 14.852],
+      "task_update_fields": [80.793, 80.169, 81.91, 73.436, 72.634, 63.792, 61.678, 76.468],
+      "timeline_buckets_all_time": [151.97, 153.918, 148.917, 153.184, 154.373, 152.728, 147.039, 148.067],
+      "timeline_buckets_day": [345.033, 334.937, 340.886, 360.403, 386.02, 285.233, 294.941, 275.223],
+      "timeline_buckets_week": [191.656, 168.866, 199.812, 181.11, 178.434, 175.376, 184.796, 169.836],
+      "timeline_events": [193.119, 40.172, 44.055, 33.106, 39.779, 36.328, 43.9, 37.45]
+    }
+  },
+  "matchedPlans": [
+    {
+      "statement": "Observation discovery, FTS mode (HMem.DB.Observation discoveryStatement)",
+      "evidence": "Nested loop left joins between MATERIALIZED CTE scans estimated at one row remove 1,043,478 to 1,937,031 rows by join filter (2,000 eligible Observations against 522 to 969 FTS-ranked rows), about 95% of 557 to 642 ms. No temp files; shared buffer hits only."
+    },
+    {
+      "statement": "Observation discovery, subject-tree view",
+      "evidence": "The same join pattern removes 2,738,220 to 2,876,636 rows (1,411 to 1,448 eligible rows, 415 to 423 ms) when half of the Observations match; 10 ms when none match."
+    },
+    {
+      "statement": "Workspace timeline events (WITH candidates)",
+      "evidence": "Custom plans (executions 2 to 5 on a connection) use hash joins in 21 ms. From the sixth execution the generic plan estimates one row for the ($4 IS NULL OR ...) range predicates and uses nested loops with a sequential projects scan per row (475,625 and 275,882 rows removed by join filter), 218 to 225 ms."
+    },
+    {
+      "statement": "Timeline buckets (WITH bounds), day buckets over 92 days",
+      "evidence": "309 ms: a per-bucket nested loop over 6,218 inventory deltas (93 loops, 240,427 rows removed) and inventory CTE materialization that spills about 2,014 temp blocks (16 MB) per call."
+    }
+  ],
+  "observations": [
+    "Sequential tails are database execution: mean hold is at least 96% of mean request time for every variant above 20 ms, mean pool wait is at most 0.05 ms except while connections are created, and the application residual is at most 3.4 ms.",
+    "Observation discovery is the slowest interactive route (538 ms p50, 653 to 807 ms p99, n=199); its subject-tree view is bimodal (6 ms p50, 346 ms p95).",
+    "Timeline events take 234 ms p50 sequentially but 21 to 44 ms with custom plans; the prepared generic plan is the whole difference. Forcing custom plans everywhere slowed day buckets (about 255 to 340 ms) and task updates, so the effect is statement-specific.",
+    "Timeline buckets take 140 ms (week, all time) and 247 ms (day). The sequential phase wrote 1,194 temp files (8.2 GB), consistent with about 14 MB spilled per bucket call.",
+    "With only 4 clients (at most 3 active backends) 2,652 of 11,716 checkouts were capacity waits behind a full one-connection stripe, and checkout wait totalled 111 s in a 112 s phase. Batch, root and project navigation p95 rose from 15 to 51 ms to 0.94 to 1.97 s with at least 97% of tail time spent waiting for a connection (navigation focus 14 to 95 ms, 96%).",
+    "The same 16-client profile finished in 33.7 s with one stripe against 55.2 s and 48.2 s with production striping, and capacity waits fell from 206 and 548 to 1, but latency was mixed. Against the first 16-client run, p95 ranged from 4.3 times higher (planning_counts 24 to 104 ms) to 7.3 times lower (nav_root 1,445 to 198 ms): task_list_query (64 to 105 ms) and task_update_status (381 to 408 ms) also got worse, nav_focus improved only 1.3 times (674 to 507 ms), and against the repeat run timeline_buckets_day and timeline_events were also slower. p50 rose for every database route except search_unified and nav_root (task_get 9 to 32 ms). One stripe is not a clear win.",
+    "Requests make many checkouts: 9 to 10 per task update, 28 per navigation batch, 5 per navigation root and 6 per unified search including three concurrent branches. Waits multiply with checkouts under contention.",
+    "Each task update (36 ms p50) executes hmem_projects_have_paused_ancestry about 69 times (27,609 calls for 400 updates).",
+    "Lock activity is minor: lock waits, all advisory, in at most 94 of 1,099 activity samples (126 advisory wait events), at most 3 ungranted locks, no deadlocks and no heap reads (blks_read 0).",
+    "The run opened 34 connections. A direct connect averaged 47.9 ms on 127.0.0.1 and 66.5 ms (max 226 ms) on localhost; the first sequential request of a variant paid up to 219 ms of connection time."
+  ],
+  "dispositions": [
+    {
+      "priority": 1,
+      "area": "pool striping",
+      "evidence": "c4 profile and one-stripe probe; the probe is mixed (lower total time and most p95, but higher p50 and higher p95 for planning_counts, task_list_query and task_update_status)",
+      "candidate": "Pool configuration: one stripe, or stripes holding several connections each, instead of min(pool size, capabilities) one-connection stripes.",
+      "condition": "Out of scope here; one stripe is not a clear win. Propose only with an authorized passive sample showing capacity waits or tail pool wait in production and a matched rerun showing lower c4 and c16 p95/p99 without an unacceptable light-load p50 change."
+    },
+    {
+      "priority": 2,
+      "area": "Observation discovery SQL",
+      "evidence": "matched plans: join filters over CTE scans grow with eligible rows times ranked rows",
+      "candidate": "Rank FTS and semantic candidates without the joins over CTE scans (for example window ranks in eligible), or make the joins hashable.",
+      "condition": "Out of scope here. Requires identical discovery results (ObservationDiscoverySpec), a matched plan and a matched rerun."
+    },
+    {
+      "priority": 3,
+      "area": "timeline events plan",
+      "evidence": "plan-mode probe and matched plans",
+      "candidate": "Avoid the generic plan for this statement only (unprepared execution, or predicates without nullable parameters).",
+      "condition": "Out of scope here. Matched rerun of executions after the fifth on one connection."
+    },
+    {
+      "priority": 4,
+      "area": "timeline buckets",
+      "evidence": "per-bucket nested loop and temp spill",
+      "candidate": "Cumulative inventory per bucket instead of rescanning deltas per bucket; statement-local memory only if the spill is shown to matter.",
+      "condition": "Out of scope here. Matched rerun with identical bucket output."
+    },
+    {
+      "priority": 5,
+      "area": "checkouts per request",
+      "evidence": "9 to 28 checkouts per write or navigation request",
+      "candidate": "Fewer transactions per request where semantics allow.",
+      "condition": "Revisit after priority 1, only with matched contention evidence."
+    },
+    {
+      "priority": 6,
+      "area": "no change",
+      "evidence": "locks, connection setup, application residual, provider",
+      "candidate": "None. Keep 127.0.0.1 DSNs on Windows hosts.",
+      "condition": "Recheck with the passive sample."
+    }
+  ],
+  "limitations": [
+    "Passive native sample not collected: live stack/DB access not authorized in this run, 2026-11-16. Production stripes, request mix, concurrency and data sizes are therefore unmeasured. The request-log phase fields and the health pool.checkout counters added here are the instruments for that sample.",
+    "One host, loopback HTTP and one 2,000-Observation workspace with warm shared buffers (no heap reads). The host has 24 capabilities, so the pool had 10 one-connection stripes; the production capability count decides its stripes.",
+    "Sample sizes: n=199 per sequential variant (p99 is the second-largest sample) and 100 (c4) or 128 (c16) per concurrent variant; tail compositions average 6 to 10 samples.",
+    "Run-to-run variance is material on this shared host: an earlier matched run had 2 to 6 times higher sequential p99 for discovery and timeline routes. Only this run is recorded; two earlier runs had a navigation fixture defect or no pg_stat_statements and were discarded.",
+    "The embedding provider was disabled, so discovery ran FTS-only and provider_ms was never set. Hybrid discovery and provider latency are unmeasured.",
+    "pg_stat_statements with track=all and track_io_timing add overhead; auto_explain analyze inflates plan-probe times; 25 ms pg_stat_activity samples undercount short lock waits.",
+    "capacity_waits is a process-wide lower bound. Work forked without the request timer is unattributed (none in this run).",
+    "The health check's non-blocking probe is not a checkout, but a connection it opens counts in connects, connect_total_ms and that request's db_connect_ms with zero db_checkouts and db_wait_ms (health coldMs: 220.2 ms complete, 218.9 ms connect)."
+  ]
+}

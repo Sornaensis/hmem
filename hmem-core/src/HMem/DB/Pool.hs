@@ -12,13 +12,15 @@ module HMem.DB.Pool
   , runSessionWithRollbackForTest
   ) where
 
-import Control.Exception (Exception, SomeAsyncException, SomeException, bracket_, fromException, throwIO, try)
+import Control.Exception (Exception, SomeAsyncException, SomeException, bracket_, finally, fromException, mask, throwIO, try)
 import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Pool (Pool, newPool, defaultPoolConfig, setNumStripes, withResource)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Conc (getNumCapabilities)
 import Hasql.Connection qualified as Hasql
 import Hasql.Connection.Setting qualified as Setting
@@ -31,6 +33,7 @@ import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
 
 import HMem.DB.RequestContext (EffectiveActor(..), RequestContext(..), actorTypeToText, changeCauseToText, currentRequestContext, resolveEffectiveActor)
+import HMem.DB.RequestTiming (connectCount, currentRequestTimer, recordCheckout, recordConnect, recordHold, timerConnectNs)
 import Data.Aeson (encode)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text.Encoding qualified as TE
@@ -49,6 +52,11 @@ data PoolMetrics = PoolMetrics
 {-# NOINLINE activeConnectionsRef #-}
 activeConnectionsRef :: IORef Int
 activeConnectionsRef = unsafePerformIO (newIORef 0)
+
+-- | Process-wide count of checkouts waiting for a connection.
+{-# NOINLINE pendingCheckoutsRef #-}
+pendingCheckoutsRef :: IORef Int
+pendingCheckoutsRef = unsafePerformIO (newIORef 0)
 
 -- | Configured maximum number of connections (set once in 'createPool').
 {-# NOINLINE maxConnectionsRef #-}
@@ -160,7 +168,10 @@ createPool connStr maxConns idleTimeout stmtTimeoutMs = do
     idleTimeout
     maxConns
   where
+    -- resource-pool creates connections on the requesting thread, so the
+    -- connection time is attributed to that thread's request.
     acquire = do
+      started <- getMonotonicTimeNSec
       result <- Hasql.acquire [Setting.connection (ConnSetting.string connStr)]
       case result of
         Left err   -> fail $ "Failed to connect to PostgreSQL: " <> show err
@@ -171,25 +182,62 @@ createPool connStr maxConns idleTimeout stmtTimeoutMs = do
             Left _  -> do
               Hasql.release conn
               fail "Failed to set statement timeout"
-            Right _ -> pure conn
+            Right _ -> do
+              finished <- getMonotonicTimeNSec
+              recordConnect (elapsedNs started finished)
+              pure conn
 
 -- | Run an action with a connection from the pool.
 -- The pool already validates connections on checkout (via the
 -- @SET statement_timeout@ in 'acquire'); stale connections throw
 -- on first use and are automatically discarded by resource-pool.
 -- Active-connection metrics are updated atomically on checkout/return.
+-- Checkout wait (request to hand-over) and hold (hand-over to return) are
+-- recorded process-wide and for the calling thread's request timer.
 withConn :: Pool Hasql.Connection -> (Hasql.Connection -> IO a) -> IO a
-withConn pool action = withResource pool $ \conn ->
-  bracket_
-    (do active <- atomicModifyIORef' activeConnectionsRef $ \n ->
-                    let n' = n + 1 in (n', n')
-        maxC <- readIORef maxConnectionsRef
-        when (maxC > 1 && active * 100 >= maxC * 80) $
-          hPutStrLn stderr $ "Warning: pool utilisation at "
-            <> show (active * 100 `div` maxC) <> "% ("
-            <> show active <> "/" <> show maxC <> ")")
-    (atomicModifyIORef' activeConnectionsRef $ \n -> (max 0 (n - 1), ()))
-    (action conn)
+withConn pool action = do
+  timer <- currentRequestTimer
+  maxAtRequest <- readIORef maxConnectionsRef
+  connectsBefore <- connectCount
+  connectNsBefore <- timerConnectNs timer
+  -- Earlier waiters, including one being handed a released connection, count
+  -- as demand so that only a full stripe makes a capacity wait.
+  queued <- newIORef True
+  let leaveQueue = do
+        waiting <- atomicModifyIORef' queued (\q -> (False, q))
+        when waiting $ atomicModifyIORef' pendingCheckoutsRef (\n -> (max 0 (n - 1), ()))
+  mask $ \restore -> do
+    pendingAtRequest <- atomicModifyIORef' pendingCheckoutsRef (\n -> (n + 1, n))
+    activeAtRequest <- readIORef activeConnectionsRef
+    requested <- getMonotonicTimeNSec
+    flip finally leaveQueue $ restore $ withResource pool $ \conn -> do
+      acquired <- getMonotonicTimeNSec
+      connectsAfter <- connectCount
+      connectNsAfter <- timerConnectNs timer
+      recordCheckout timer (elapsedNs requested acquired) (connectNsAfter - connectNsBefore)
+        (activeAtRequest + pendingAtRequest < maxAtRequest && connectsAfter == connectsBefore)
+      checkedOut timer leaveQueue acquired conn
+  where
+    -- The checkout becomes active before it stops waiting, so it is always
+    -- counted as demand by concurrent requests.
+    checkedOut timer leaveQueue acquired conn = bracket_
+      (do active <- atomicModifyIORef' activeConnectionsRef $ \n ->
+                      let n' = n + 1 in (n', n')
+          leaveQueue
+          maxC <- readIORef maxConnectionsRef
+          when (maxC > 1 && active * 100 >= maxC * 80) $
+            hPutStrLn stderr $ "Warning: pool utilisation at "
+              <> show (active * 100 `div` maxC) <> "% ("
+              <> show active <> "/" <> show maxC <> ")")
+      (do atomicModifyIORef' activeConnectionsRef $ \n -> (max 0 (n - 1), ())
+          released <- getMonotonicTimeNSec
+          recordHold timer (elapsedNs acquired released))
+      (action conn)
+
+elapsedNs :: Word64 -> Word64 -> Word64
+elapsedNs start end
+  | end <= start = 0
+  | otherwise = end - start
 
 -- | Run a Hasql Session via a connection pool, throwing a structured
 -- 'DBException' on error.

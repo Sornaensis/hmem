@@ -43,6 +43,7 @@ library
       HMem.DB.Pool
       HMem.DB.Project
       HMem.DB.RequestContext
+      HMem.DB.RequestTiming
       HMem.DB.SavedView
       HMem.DB.Schema
       HMem.DB.Search
@@ -144,6 +145,7 @@ test-suite hmem-core-test
       HMem.DB.ObservationVersionSpec
       HMem.DB.OverviewSpec
       HMem.DB.ProjectSpec
+      HMem.DB.RequestTimingSpec
       HMem.DB.SearchSpec
       HMem.DB.SessionArchive.MaintenanceSpec
       HMem.DB.SessionArchive.ReaderSpec

@@ -573,6 +573,7 @@ test-suite hmem-server-test
       HMem.Server.ObservationDiscoverySpec
       HMem.Server.OidcCallbackSpec
       HMem.Server.PgvectorEmbeddingWorkflowSpec
+      HMem.Server.RequestLatencyMeasurementSpec
       HMem.Server.SessionArchiveReaderSpec
       HMem.Server.SessionPrefixSpec
       HMem.Server.SessionReaperSpec

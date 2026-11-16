@@ -19,8 +19,15 @@ it.
 | `outcome` | See below. |
 | `prepare_ms` | Admission to response preparation, or `null`. |
 | `complete_ms` | Admission to completion or failure. |
+| `db_checkouts` | Connection pool checkouts attributed to the request. |
+| `db_wait_ms` | Total checkout wait, from requesting a connection to receiving it, including new connections. |
+| `db_connect_ms` | Part of `db_wait_ms` spent establishing new connections. Exception: a connection opened by the health check's probe is counted here with no checkout or wait. |
+| `db_hold_ms` | Total time connections were held: statements, transaction control and work done while holding. |
+| `provider_ms` | Optional embedding provider time for Observation discovery, or `null` without a provider call. |
 
 Paths, identifiers, query strings, headers and bodies are not logged.
+[Request performance](request-performance.md) defines the phase fields and
+their attribution limits.
 [Session traffic telemetry](session-traffic-telemetry.md) adds fixed outcomes
 for session capture routes, including why a prefix proof was unknown.
 

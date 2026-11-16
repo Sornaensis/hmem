@@ -18,6 +18,7 @@ import Hasql.Connection qualified as Hasql
 import HMem.DB.Observation qualified as Observation
 import HMem.DB.Pool (DBException(..))
 import HMem.DB.Project qualified as Proj
+import HMem.DB.RequestTiming (currentRequestTimer, withInheritedRequestTimer)
 import HMem.DB.Task qualified as Task
 import HMem.Types
 
@@ -69,13 +70,15 @@ searchAll pool queryValue = do
         , limit = Just limitValue
         , offset = Just offsetValue
         }
+  -- The concurrent branches keep the request's pool timing attribution.
+  timer <- currentRequestTimer
   ((observations, projects), tasks) <- concurrently
     (concurrently
-      (case queryValue.workspaceId of
+      (withInheritedRequestTimer timer $ case queryValue.workspaceId of
           Just workspace | wantsObservations -> Observation.listObservationsSearchOverfetch pool (observationQuery workspace)
           _ -> pure [])
-      (if Set.member SearchProject wanted then Proj.listProjectsForSearch pool projectQuery else pure []))
-    (if Set.member SearchTask wanted then Task.listTasksForSearch pool taskQuery else pure [])
+      (withInheritedRequestTimer timer $ if Set.member SearchProject wanted then Proj.listProjectsForSearch pool projectQuery else pure []))
+    (withInheritedRequestTimer timer $ if Set.member SearchTask wanted then Task.listTasksForSearch pool taskQuery else pure [])
   let page :: Text -> Bool -> [a] -> Maybe (Text, Bool, Int)
       page key requested rows =
         if requested then Just (key, length rows > limitValue, min limitValue (length rows)) else Nothing

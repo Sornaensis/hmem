@@ -38,6 +38,7 @@ import Network.Wai qualified as Wai
 import Network.Wai.Internal (Response(..))
 import System.Log.FastLogger (toLogStr, FastLogger)
 
+import HMem.DB.RequestTiming (RequestTiming(..), readRequestTimer, withRequestTimer)
 import HMem.Server.OpenAPI (openApiSpec)
 
 ------------------------------------------------------------------------
@@ -145,9 +146,10 @@ outcomeSucceeded = \case
 -- downstream application hands a response to @respond@. @complete_ms@ ends
 -- when that @respond@ call returns or throws (the transport has written the
 -- response, finished the stream, or closed the raw upgrade), or when the
--- application fails without responding.
+-- application fails without responding. Database pool and provider phases
+-- accumulate on this thread's request timer until emission.
 jsonRequestLoggerWith :: IO Word64 -> FastLogger -> Middleware
-jsonRequestLoggerWith clock logAction app req respond = do
+jsonRequestLoggerWith clock logAction app req respond = withRequestTimer $ \timer -> do
   admitted <- clock
   let !method = methodLabel (Wai.requestMethod req)
       !route = requestRouteLabel (Wai.pathInfo req)
@@ -158,6 +160,7 @@ jsonRequestLoggerWith clock logAction app req respond = do
         first <- atomicModifyIORef' emittedRef (\done -> (True, not done))
         when first $ do
           ts <- isoTimestamp
+          phases <- readRequestTimer timer
           let level = if outcomeSucceeded outcome then "info" else "warn" :: Text
               line = Aeson.object $
                 [ "timestamp"   .= ts
@@ -169,6 +172,11 @@ jsonRequestLoggerWith clock logAction app req respond = do
                 , "outcome"     .= outcomeLabel outcome
                 , "prepare_ms"  .= fmap (elapsedMs admitted) prepared
                 , "complete_ms" .= elapsedMs admitted finished
+                , "db_checkouts" .= phases.dbCheckouts
+                , "db_wait_ms" .= nsToMs phases.dbWaitNs
+                , "db_connect_ms" .= nsToMs phases.dbConnectNs
+                , "db_hold_ms" .= nsToMs phases.dbHoldNs
+                , "provider_ms" .= (if phases.providerCalls == 0 then Nothing else Just (nsToMs phases.providerNs))
                 ] ++ [ "request_id" .= rid | Just rid <- [requestId] ]
           logAction (toLogStr (Aeson.encode line) <> "\n")
       loggedRespond response = mask $ \restore -> do
@@ -271,7 +279,10 @@ shapeLabel = \case
 elapsedMs :: Word64 -> Word64 -> Double
 elapsedMs start end
   | end <= start = 0
-  | otherwise = fromIntegral (end - start) / 1e6
+  | otherwise = nsToMs (end - start)
+
+nsToMs :: Word64 -> Double
+nsToMs ns = fromIntegral ns / 1e6
 
 methodLabel :: BS.ByteString -> Text
 methodLabel = \case

@@ -35,6 +35,7 @@ import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
 import System.Timeout (timeout)
 
+import HMem.DB.RequestTiming (timeProviderCall)
 import HMem.Server.Embedding.GteQwen2
 import HMem.Server.Embedding.Provider
 import HMem.Types (ObservationDiscoveryFilter)
@@ -164,7 +165,8 @@ withAvailable (ObservationDiscovery enabled state _ _) storage action
           result <- storage >>= \case
             Nothing -> pure (DiscoveryFts DiscoveryStorageUnavailable)
             Just False -> pure (DiscoveryFts DiscoveryNoCompatibleVectors)
-            Just True -> current.availability >>= \case
+            -- Provider availability and embedding time; the storage probe is database time.
+            Just True -> timeProviderCall $ current.availability >>= \case
               EmbeddingDisabled -> pure (DiscoveryFts DiscoveryDisabled)
               EmbeddingUnavailable failure -> pure (DiscoveryFts (failureReason failure))
               EmbeddingAvailable -> action current

@@ -1534,8 +1534,10 @@ startEphemeralPgInSandboxWith lifetime sandbox = do
     let libraryCandidates = case postgres of
           Nothing -> []
           Just executable ->
-            [ takeDirectory executable </> ".." </> "lib" </> filename
-            | filename <- ["pg_stat_statements.dll", "pg_stat_statements.so"]
+            -- MSYS2 and Linux packages use lib/postgresql as the package library directory.
+            [ takeDirectory executable </> ".." </> "lib" </> subdirectory </> filename
+            | subdirectory <- ["", "postgresql"]
+            , filename <- ["pg_stat_statements.dll", "pg_stat_statements.so"]
             ]
     libraries <- mapM doesFileExist libraryCandidates
     appendFile (dataDir </> "postgresql.conf") $ unlines $

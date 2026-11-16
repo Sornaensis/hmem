@@ -1,8 +1,9 @@
 module HMem.Server.LoggingSpec (spec) where
 
 import Control.Concurrent (threadDelay, yield)
-import Control.Concurrent.Async (concurrently_, forConcurrently_)
-import Control.Exception (ErrorCall(..), AsyncException(ThreadKilled), SomeException, evaluate, throwIO, try)
+import Control.Concurrent.Async (concurrently_, forConcurrently_, wait, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (ErrorCall(..), AsyncException(ThreadKilled), SomeException, bracket, evaluate, throwIO, try)
 import Control.Monad (forM_, forever, unless, void, when)
 import Data.Aeson (Value(..), decodeStrict)
 import Data.Aeson.KeyMap qualified as KM
@@ -37,7 +38,11 @@ import Test.Hspec
 
 import HMem.AgentSession.Transport (maxSessionRequestBytes)
 import HMem.DB.Auth qualified as Auth
-import HMem.DB.TestHarness (TestEnv(..), createTestWorkspace)
+import Data.Pool (destroyAllResources)
+import Hasql.Session qualified as Session
+import HMem.DB.Pool (createPool, withConn)
+import HMem.DB.RequestTiming (timeProviderCall)
+import HMem.DB.TestHarness (TestDb(..), TestEnv(..), createTestWorkspace, withTestEnv)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.Logging (jsonRequestLogger, jsonRequestLoggerWith, requestRouteLabel)
 import HMem.Server.TestHarness
@@ -71,6 +76,37 @@ spec = describe "metadata-only JSON request logger" $ do
     raw <- rawOutput entriesOf
     forM_ ["QUERY-SECRET", "RESPONSE-SECRET", TE.encodeUtf8 workspace, longId] $ \secret ->
       BS.isInfixOf secret raw `shouldBe` False
+
+  it "reports pool wait, hold and provider phases for the request thread only" $ withTestEnv $ \env ->
+    bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \pool -> do
+      (entriesOf, logger) <- capture
+      let select1 conn = Session.run (Session.sql "SELECT 1") conn >>= either (fail . show) pure
+          ok respond = respond (Wai.responseLBS status200 [] "")
+          request = plainRequest "GET" "/api/v1/health" ""
+      -- Warm the single connection so the waiting request reuses it.
+      withConn pool select1
+      holding <- newEmptyMVar
+      release <- newEmptyMVar
+      withAsync (withConn pool (\conn -> select1 conn >> putMVar holding () >> takeMVar release)) $ \holder -> do
+        takeMVar holding
+        withAsync (threadDelay 80000 >> putMVar release ()) $ \_ ->
+          void $ logger (\_ respond -> do
+            withConn pool (\conn -> select1 conn >> threadDelay 30000)
+            timeProviderCall (threadDelay 10000)
+            ok respond) request drive
+        wait holder
+      -- Work forked by the handler is not attributed to the request.
+      void $ logger (\_ respond -> concurrently_ (withConn pool select1) (pure ()) >> ok respond) request drive
+      [waited, forked] <- entriesOf
+      number "db_checkouts" waited `shouldBe` Just 1
+      number "db_wait_ms" waited `shouldSatisfy` maybe False (>= 50)
+      number "db_hold_ms" waited `shouldSatisfy` maybe False (>= 25)
+      number "db_connect_ms" waited `shouldBe` Just 0
+      number "provider_ms" waited `shouldSatisfy` maybe False (>= 8)
+      number "complete_ms" waited `shouldSatisfy` maybe False (>= 110)
+      number "db_checkouts" forked `shouldBe` Just 0
+      forM_ ["db_wait_ms", "db_hold_ms", "db_connect_ms"] $ \key -> number key forked `shouldBe` Just 0
+      KM.lookup "provider_ms" forked `shouldBe` Just Null
 
   it "measures admission-to-preparation separately from monotonic stream completion" $ do
     now <- newIORef (1000000 :: Word64)

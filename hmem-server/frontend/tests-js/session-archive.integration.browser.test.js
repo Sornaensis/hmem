@@ -603,6 +603,31 @@ function observeArchiveManifests(page,url,observe){
   return {first,ready,stop,snapshot:()=>({scope:'passive real frontend response observations; queued Preparing is not active compression; event delivery uses caller monotonic time',records:[...records],errors:[...errors],...(sanitizedRun?{lostPolls:[...lostPolls]}:{})})}
 }
 
+async function awaitPreparingWorker(page,manifestObserver,workerUrls,actions,now=()=>performance.now()){
+  const started=now(),budgetMs=actions.remaining(5000),until=started+budgetMs
+  while(true){
+    actions.signal.throwIfAborted()
+    const {records}=manifestObserver.snapshot()
+    const preparing202=records.some(value=>value.status===202&&value.state==='preparing')
+    const targets=page.workers()
+    const worker=targets.find(candidate=>{
+      let url
+      try{url=new URL(candidate.url())}catch{return false}
+      return workerUrls.has(url.origin+url.pathname)&&url.searchParams.size===2&&url.searchParams.get('phase')==='processor'
+        &&/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(url.searchParams.get('incarnation')||'')
+    })
+    const observed=now()
+    if(observed>=until){
+      const latest=records.at(-1)
+      assert.fail('Preparing worker admission deadline '+JSON.stringify({budgetMs,elapsedMs:observed-started,preparing202,
+        latestManifest:latest?{status:latest.status,state:boundedText(latest.state,64)}:null,
+        matchingWorker:!!worker,targetCount:targets.length,targets:targets.slice(0,4).map(target=>boundedText(target.url(),160))}))
+    }
+    if(preparing202&&worker)return worker
+    await actions.pause(Math.min(10,until-observed))
+  }
+}
+
 async function clockSnapshot(actions,harness,{sanitized=false}={}){
   const metadataSentAt=performance.now(),value=await actions.control(harness,'snapshot'),metadataReceivedAt=performance.now()
   const control=sanitized?'foreground-clock':'status'
@@ -1044,13 +1069,9 @@ async function integrateArchive(harness,run,actions,vector){
   await page.getByText(/Preparing/).first().waitFor({timeout:actions.remaining(10000)})
   assert.equal(await page.locator('.session-sealed-viewer .session-record-text').count(),0)
   if(measuredFixture){
-    const until=performance.now()+actions.remaining(5000)
-    while(!manifestObserver.snapshot().records.some(value=>value.status===202)){
-      assert.ok(performance.now()<until,'actual Chromium manifest request before publication')
-      await actions.pause(10)
-    }
-    const worker=page.workers().find(candidate=>/\/assets\/session-archive-worker-/.test(candidate.url()))
-    assert.ok(worker,'actual production archive worker is attached')
+    const workerUrls=new Set(servedAssets.filter(value=>/^assets\/session-archive-worker-.*\.js$/.test(value.path))
+      .map(value=>new URL(value.path,harness.origin+'/').href))
+    const worker=await awaitPreparingWorker(page,manifestObserver,workerUrls,actions)
     if(process.env.HMEM_ARCHIVE_IDB_COUNTS==='1')await countProcessorTransactions(worker,browserOwner,actions)
     console.log(JSON.stringify({archiveWorkerAdmitted:true,representation:vector.sanitized?'sanitized':'exact',worker:new URL(worker.url()).pathname,manifestStatus:202}))
   }
@@ -1355,6 +1376,46 @@ test('integration protocol causal: view waits consume one unchanged product dead
   assert.ok(requested[1]<requested[0],'later transfer/verification waits cannot restart the full allowance')
   assert.throws(()=>remainingView(actions,100,budget,100+budget),/product deadline exhausted/)
   assert.throws(()=>remainingView({remaining(){throw Error('case cutoff')}},100,budget,200),/case cutoff/)
+})
+
+test('integration protocol causal: Preparing admission waits for the actual Worker after HTTP 202',async()=>{
+  const url='http://owned.test/assets/session-archive-worker-real.js',delays=[]
+  const target={url:()=>url+'?incarnation=35248d72-0713-4038-ae7f-26659fdb24f7&phase=processor'}
+  let clock=0
+  const actions={signal:new AbortController().signal,remaining:ms=>{assert.equal(ms,5000);return ms},
+    pause:async ms=>{delays.push(ms);clock+=ms}}
+  const page={workers:()=>clock>=20?[target]:[]},manifest={snapshot:()=>({records:[{status:202,state:'preparing'}]})}
+  assert.equal(await awaitPreparingWorker(page,manifest,new Set([url]),actions,()=>clock),target)
+  assert.deepEqual(delays,[10,10])
+})
+
+test('integration protocol causal: Preparing admission fails within the shared budget without both witnesses',async()=>{
+  const url='http://owned.test/assets/session-archive-worker-real.js',workerUrls=new Set([url])
+  const incarnation='35248d72-0713-4038-ae7f-26659fdb24f7'
+  const processor=url+'?incarnation='+incarnation+'&phase=processor'
+  const foreign=processor.replace('owned.test','other.test')
+  const reader=processor.replace('phase=processor','phase=reader'),malformed=processor.replace(incarnation,'invalid')
+  for(const [state,targetUrl,matchingWorker] of [
+    ['preparing',foreign,false],['preparing',reader,false],['preparing',malformed,false],
+    [null,processor,true],['retrying',processor,true]
+  ]){
+    let clock=0
+    const delays=[],page={workers:()=>[{url:()=>targetUrl}]},latestManifest=state?{status:202,state}:null
+    const manifest={snapshot:()=>({records:latestManifest?[latestManifest]:[]})}
+    const actions={signal:new AbortController().signal,remaining:ms=>{assert.equal(ms,5000);return 25},
+      pause:async ms=>{delays.push(ms);clock+=ms}}
+    await assert.rejects(awaitPreparingWorker(page,manifest,workerUrls,actions,()=>clock),error=>{
+      const prefix='Preparing worker admission deadline '
+      assert.ok(error.message.startsWith(prefix))
+      assert.deepEqual(JSON.parse(error.message.slice(prefix.length)),{budgetMs:25,elapsedMs:25,preparing202:state==='preparing',
+        latestManifest,matchingWorker,targetCount:1,targets:[targetUrl]})
+      return true
+    })
+    assert.deepEqual(delays,[10,10,5])
+  }
+  const aborted=new AbortController(),reason=Error('setup owner cancelled')
+  aborted.abort(reason)
+  await assert.rejects(awaitPreparingWorker({}, {},workerUrls,{signal:aborted.signal,remaining:()=>5000},()=>0),error=>error===reason)
 })
 
 test('integration protocol causal: sanitized foreground clock retains separate broad-metadata bounds',async()=>{

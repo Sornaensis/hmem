@@ -230,7 +230,7 @@ handleUploadTool registry _ordinaryManager base token identity name arguments = 
               activeCount = length [() | s <- Map.elems snapshots, not (terminal s.phase)]
           if closing then pure (Left "registry_closed")
           else if maybe False (not . terminal . (.phase)) (Map.lookup sid snapshots) then pure (Left "already_following")
-          else if activeCount >= 4 then pure (Left "capacity")
+          else if activeCount >= 12 then pure (Left "capacity")
           else do
             writeTVar registry.jobs (Map.insert sid job trimmed)
             modifyTVar' registry.order (\ids -> filter (`Map.member` trimmed) (filter (/= sid) ids) <> [sid])

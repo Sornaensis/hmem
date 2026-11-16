@@ -139,7 +139,7 @@ prefix; the uploader does not own that decision.
 After a restart, declare context again and explicitly start with the same UUID
 and file to verify the complete committed prefix before resuming. Existing
 followers keep their original workspace and identity when MCP context changes.
-The process admits four active followers and two shared follower HTTP requests;
+The process admits twelve active followers and two shared follower HTTP requests;
 normal MCP calls, including termination, retain independent capacity. A live
 follower that observes termination stops safely.
 

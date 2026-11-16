@@ -205,7 +205,7 @@ identity, bearer credential and provenance configuration. Context changes do not
 retarget or wait for background jobs. Restarting MCP loses the registry; start
 again explicitly with the same UUID and source to verify and resume.
 
-The registry admits at most four active jobs. Two fixed workers take fair turns;
+The registry admits at most twelve active jobs. Two fixed workers take fair turns;
 one shared gate permits at most two follower HTTP requests globally, including
 creation, metadata, verification, append, heartbeat and retry. Normal MCP tools,
 including explicit termination, use independent HTTP capacity. Each turn reads
@@ -385,7 +385,7 @@ content receipt for a sanitized generation. Pass its UUID as
 continuation. Verify assembled bytes against `content_sha256`.
 
 `session_import` accepts an explicitly supplied completed regular JSONL file and
-returns promptly. It shares the live uploader's four-job registry, two HTTP slots,
+returns promptly. It shares the live uploader's twelve-job registry, two HTTP slots,
 captured identity/workspace, request limits and cleanup. Before remote
 registration, bounded fair passes validate every UTF-8 JSON record and hash the
 entire fixed file boundary. CRLF and a complete final record without LF are

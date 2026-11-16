@@ -781,16 +781,23 @@ spec = describe "Session follower" $ do
         _ <- await registry manager base wid sid (hasStatus "failed")
         pure ()
 
-  it "caps four jobs and every follower HTTP category at two while normal terminate and context changes progress" $
+  it "caps twelve jobs and every follower HTTP category at two while normal terminate and context changes progress" $
     withBackend $ \_ wid manager base -> withSourceFile "{}\n" $ \path -> do
       blocked <- newEmptyMVar
       seen <- newTVarIO ([] :: [String])
       let action _ target _ = atomically (modifyTVar' seen (<> [target])) >> readMVar blocked >> pure (Left HTTPUnavailable)
       withRegistry fast {requestOverride = Just action} $ \registry -> do
-        ids <- replicateM 5 UUID.nextRandom
-        forM_ (take 4 ids) $ \sid -> start registry manager base wid sid path >>= (\result -> hasStatus "validating" result `shouldBe` True)
+        ids <- replicateM 13 UUID.nextRandom
+        forM_ (take 11 ids) $ \sid -> start registry manager base wid sid path >>= (\result -> hasStatus "validating" result `shouldBe` True)
+        let imported sid = payload <$> handleUploadTool registry manager base Nothing identity "session_import"
+              (object ["workspace_id" .= wid,"session_id" .= sid,"task_id" .= wid,"path" .= path,"title" .= ("Test historical work" :: Text),"format_label" .= ("jsonl" :: Text)])
+        imported (ids !! 11) >>= (\result -> hasStatus "validating" result `shouldBe` True)
         full <- start registry manager base wid (last ids) path
         nested ["error","code"] full `shouldBe` Just (String "capacity")
+        importFull <- imported (last ids)
+        nested ["error","code"] importFull `shouldBe` Just (String "capacity")
+        importRetry <- imported (ids !! 11)
+        field "error" importRetry `shouldBe` Just Null
         duplicate <- start registry manager base wid (head ids) path
         nested ["error","code"] duplicate `shouldBe` Just (String "already_following")
         _ <- waitUntil $ do (active,peak,_) <- registryMetrics registry; pure (active == 2 && peak == 2)
@@ -807,7 +814,7 @@ spec = describe "Session follower" $ do
         controlResult <- timeout 200000 $ control registry manager base wid (head ids) "session_upload_stop"
         controlResult `shouldSatisfy` isJustValue
         (active,peak,total) <- registryMetrics registry
-        (active,peak,total) `shouldBe` (2,2,4)
+        (active,peak,total) `shouldBe` (2,2,12)
 
   it "observes explicit live termination and closes without another append or heartbeat" $
     withBackend $ \env wid manager base -> withSourceFile "{}\n" $ \path -> withRegistry fast $ \registry -> do

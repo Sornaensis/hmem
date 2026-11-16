@@ -63,6 +63,7 @@ Desktop.ini
 
 # Local scratch work (see docs/reference/scratch-work.md)
 /.tmp/
+/output/
 
 # Logs
 *.log

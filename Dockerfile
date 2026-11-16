@@ -64,6 +64,7 @@ RUN set -eux; \
       hmem-embedding-http:exe:hmem-embedding-http-helper
 
 COPY hmem-core/src hmem-core/src
+COPY hmem-core/cbits hmem-core/cbits
 COPY hmem-server/src hmem-server/src
 COPY hmem-server/app hmem-server/app
 COPY hmem-server/app-build hmem-server/app-build

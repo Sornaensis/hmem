@@ -7,6 +7,11 @@ module HMem.Server.WebSocket
   , beginWebSocketShutdown
   , awaitWebSocketDrain
   , connectionCount
+    -- * Telemetry
+  , attachWebSocketTelemetryLog
+  , detachWebSocketTelemetryLog
+  , flushWebSocketTelemetry
+  , readWebSocketTelemetry
   , WorkspaceSubscription(..)
   , createTicket
   , createTicketWithAudience
@@ -42,6 +47,7 @@ import Data.Aeson.Key qualified as Key
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS8
 import Data.Int (Int64)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (find, nub)
 import Data.Maybe (catMaybes, isJust)
 import Data.Map.Strict (Map)
@@ -53,10 +59,12 @@ import Data.Time (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentT
 import Data.UUID (UUID)
 import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUIDv4
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
 import Network.HTTP.Types.URI (parseQuery)
 import Network.Wai qualified as Wai
 import Network.Wai.Handler.Warp (Settings)
-import Network.Wai.Handler.WebSockets (websocketsOr)
+import Network.Wai.Handler.WebSockets (isWebSocketsReq, websocketsOr)
 import Network.WebSockets qualified as WS
 import Control.Monad (forM, forM_, unless, void, when)
 import Data.Pool (Pool)
@@ -71,9 +79,14 @@ import HMem.Server.Event (ChangeEvent(..), EntityType(..))
 import HMem.Server.BotIdentity (requestBotIdentity)
 import HMem.Server.WebSocketTransport
   ( NativeTransport, NativeConnection, DeliveryTurn, DeliveryResult(..), DeliveryFailure(..), DeliveryCleanupFailure(..)
-  , abortNativeConnection, currentNativeConnection, newNativeTransport, runNativePlain, withNativeTransportSettings
+  , abortNativeConnection, nativeConnectionClosing, currentNativeConnection, newNativeTransport, runNativePlain, withNativeTransportSettings
   , reservePhysicalConnection, installControlledWriter, withDeliveryTurn, deliveryShouldYield, sendOwnedClose
-  , beginNativeShutdown, awaitNativeDrain )
+  , beginNativeShutdown, awaitNativeDrain, nativeGauges, nativeTelemetry )
+import HMem.Server.WebSocketTelemetry
+  ( WebSocketTelemetry, TelemetryRecord(..), TicketKind(..), UpgradeOutcome(..), ConnectionOutcome(..)
+  , ReplayPhase(..), ReplayOutcome(..), WebSocketTelemetrySnapshot(..)
+  , attachTelemetryLog, detachTelemetryLog, droppedLogEvents, elapsedNanos, flushTelemetryLog, readOutcomeStats, recordTelemetry )
+import System.Log.FastLogger (FastLogger)
 import Network.HTTP.Types (hContentType, status400)
 import HMem.Types (WebSocketTicketResponse(..))
 
@@ -87,6 +100,7 @@ data WSState = WSState
   , activityTickets :: !(TVar (Map Text ActivityTicket))
   , activityConnections :: !(TVar (Map UUID ActivityClient))
   , nativeTransport :: !NativeTransport
+  , telemetry :: !WebSocketTelemetry
   }
 
 data WSClient = WSClient
@@ -136,6 +150,8 @@ data CanonicalClient = CanonicalClient
   , canonicalClientExpiresAt :: !UTCTime
   , canonicalClientSendLock :: !(MVar ())
   , canonicalClientRetired :: !(STM.TMVar ())
+  -- Telemetry only: the open replay cycle and its monotonic start.
+  , canonicalClientReplayCycle :: !(TVar (Maybe (ReplayPhase, Word64)))
   }
 
 data CanonicalReplay = CanonicalReplay
@@ -168,9 +184,11 @@ data ActivityClient = ActivityClient
 
 -- | Create a fresh (empty) WebSocket state.
 newWSState :: IO WSState
-newWSState =
+newWSState = do
+  transport <- newNativeTransport
   WSState <$> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty
-    <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newNativeTransport
+    <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> pure transport
+    <*> nativeTelemetry transport
 
 withNativeWebSocketSettings :: WSState -> Settings -> (Settings -> IO a) -> IO a
 withNativeWebSocketSettings st = withNativeTransportSettings st.nativeTransport
@@ -187,6 +205,72 @@ awaitWebSocketDrain st = awaitNativeDrain st.nativeTransport
 -- | Number of currently connected clients.
 connectionCount :: WSState -> IO Int
 connectionCount st = Map.size <$> readTVarIO st.connections
+
+-- | Send noteworthy transport events to the server log. See
+-- docs/reference/websocket-telemetry.md.
+attachWebSocketTelemetryLog :: WSState -> FastLogger -> IO ()
+attachWebSocketTelemetryLog st = attachTelemetryLog st.telemetry
+
+-- | Emit pending events and stop logging; call before releasing the log.
+detachWebSocketTelemetryLog :: WSState -> IO ()
+detachWebSocketTelemetryLog st = detachTelemetryLog st.telemetry
+
+-- | Emit pending telemetry log events. The change-stream dispatcher calls
+-- this on every turn.
+flushWebSocketTelemetry :: WSState -> IO ()
+flushWebSocketTelemetry st = flushTelemetryLog st.telemetry
+
+-- | Flush pending events, then read bounded outcome counters and
+-- occupancy. Reading never reclaims retained delivery work.
+readWebSocketTelemetry :: WSState -> IO WebSocketTelemetrySnapshot
+readWebSocketTelemetry st = do
+  flushTelemetryLog st.telemetry
+  stats <- readOutcomeStats st.telemetry
+  gauges <- nativeGauges st.nativeTransport
+  canonical <- Map.elems <$> readTVarIO st.canonicalConnections
+  cycles <- catMaybes <$> mapM (readTVarIO . (.canonicalClientReplayCycle)) canonical
+  pending <- length . filter isJust <$> mapM (readTVarIO . (.canonicalClientReplay)) canonical
+  activity <- Map.size . Map.filter (isJust . (.activityConnection)) <$> readTVarIO st.activityConnections
+  legacy <- Map.size <$> readTVarIO st.connections
+  dropped <- droppedLogEvents st.telemetry
+  now <- getMonotonicTimeNSec
+  pure WebSocketTelemetrySnapshot
+    { outcomes = stats
+    , delivery = gauges
+    , canonicalClients = length canonical
+    , activityClients = activity
+    , legacyClients = legacy
+    , replaysPending = pending
+    , oldestPendingReplayMs = if null cycles then Nothing
+        else Just (fromIntegral (elapsedNanos (minimum (map snd cycles)) now) / 1e6)
+    , droppedEvents = dropped
+    }
+
+recordUpgrade :: WSState -> TicketKind -> UpgradeOutcome -> Word64 -> IO ()
+recordUpgrade st kind outcome started = do
+  now <- getMonotonicTimeNSec
+  gauges <- nativeGauges st.nativeTransport
+  recordTelemetry st.telemetry (UpgradeRecord kind outcome (elapsedNanos started now) gauges)
+
+openReplayCycle :: CanonicalClient -> ReplayPhase -> Word64 -> STM.STM ()
+openReplayCycle client phase now = modifyTVar' client.canonicalClientReplayCycle $ \case
+  Nothing -> Just (phase, now)
+  open -> open
+
+-- Each replay cycle is recorded once, by whichever outcome closes it first.
+closeReplayCycle :: WSState -> CanonicalClient -> ReplayOutcome -> IO ()
+closeReplayCycle st client outcome = do
+  now <- getMonotonicTimeNSec
+  closed <- STM.atomically $ STM.swapTVar client.canonicalClientReplayCycle Nothing
+  recordReplayCycle st closed outcome now
+
+recordReplayCycle :: WSState -> Maybe (ReplayPhase, Word64) -> ReplayOutcome -> Word64 -> IO ()
+recordReplayCycle st closed outcome now = forM_ closed $ \(phase, started) ->
+  recordTelemetry st.telemetry (ReplayRecord phase outcome (elapsedNanos started now))
+
+replayFailure :: ChangeStreamError -> ReplayOutcome
+replayFailure ResyncUnauthorized = ReplayRevoked
+replayFailure _ = ReplayResyncRequired
 
 ------------------------------------------------------------------------
 -- Connection management
@@ -477,12 +561,20 @@ ticketTtlSeconds = 60
 -- requests pass through unchanged.
 wsMiddleware :: AuthConfig -> Pool Hasql.Connection -> WSState -> Wai.Middleware
 wsMiddleware authCfg pool st app req respond
-  | Wai.pathInfo req == ["api", "v1", "ws"] =
+  | Wai.pathInfo req == ["api", "v1", "ws"] = do
+      started <- getMonotonicTimeNSec
       case requestBotIdentity (Wai.requestHeaders req) of
-        Left message -> respond $ Wai.responseLBS status400 [(hContentType, "application/json")]
-          (encode (object ["error" .= ("invalid_bot_identity" :: Text), "message" .= message]))
-        Right _ -> websocketsOr WS.defaultConnectionOptions (wsApp authCfg pool st) app req respond
+        Left message -> do
+          let upgrade outcome = when (isWebSocketsReq req) $ recordUpgrade st TicketUnresolved outcome started
+          received <- respond (Wai.responseLBS status400 [(hContentType, "application/json")]
+            (encode (object ["error" .= ("invalid_bot_identity" :: Text), "message" .= message])))
+            `onException` upgrade UpgradeFailed
+          upgrade UpgradeRejectedInvalidIdentity
+          pure received
+        Right _ -> websocketsOr WS.defaultConnectionOptions (wsApp authCfg pool st started) app req respond
   | otherwise = app req respond
+
+data HandshakeStage = Handshaking | HandshakeRejected | HandshakeAccepted !Word64
 
 ------------------------------------------------------------------------
 -- WebSocket application
@@ -495,37 +587,68 @@ wsMiddleware authCfg pool st app req respond
 --   3. Register in the connection map.
 --   4. Keep alive with ping/pong; discard incoming messages.
 --   5. Unregister on disconnect.
-wsApp :: AuthConfig -> Pool Hasql.Connection -> WSState -> WS.ServerApp
-wsApp authCfg pool st pending = case ticketFromRequest (WS.pendingRequest pending) of
-  -- Canonical tickets are consumed before legacy tickets in every mode.  A
-  -- local server must exercise the same one-use canonical hand-off rather
-  -- than silently treating a canonical reconnect as legacy traffic.
-  Just ticketText -> do
-    canonical <- consumeCanonicalTicket st (TE.decodeUtf8Lenient ticketText)
-    case canonical of
-      Just canonicalTicket -> acceptCanonical canonicalTicket
-      Nothing -> consumeActivityTicket st (TE.decodeUtf8Lenient ticketText) >>= \case
-        Just activityTicket -> acceptActivity activityTicket
-        Nothing -> acceptLegacyTicket ticketText
-  Nothing -> acceptWithoutTicket
+wsApp :: AuthConfig -> Pool Hasql.Connection -> WSState -> Word64 -> WS.ServerApp
+wsApp authCfg pool st started pending = do
+  kindRef <- newIORef TicketUnresolved
+  stageRef <- newIORef Handshaking
+  let decided stage outcome = do
+        writeIORef stageRef stage
+        kind <- readIORef kindRef
+        recordUpgrade st kind outcome started
+      acceptPending = do
+        conn <- WS.acceptRequest pending
+        acceptedAt <- getMonotonicTimeNSec
+        decided (HandshakeAccepted acceptedAt) UpgradeAccepted
+        pure conn
+      rejectWith outcome response = response >> decided HandshakeRejected outcome
+  -- The upgrade is recorded once at its decision; an accepted connection is
+  -- recorded again when its application ends.
+  mask $ \restore -> do
+    result <- try @SomeException (restore (route (writeIORef kindRef) acceptPending rejectWith))
+    ended <- getMonotonicTimeNSec
+    kind <- readIORef kindRef
+    readIORef stageRef >>= \case
+      Handshaking -> recordUpgrade st kind UpgradeFailed started
+      HandshakeRejected -> pure ()
+      HandshakeAccepted acceptedAt -> do
+        gauges <- nativeGauges st.nativeTransport
+        recordTelemetry st.telemetry $ ConnectionRecord kind
+          (either (const ConnectionFailed) (const ConnectionClosed) result) (elapsedNanos acceptedAt ended) gauges
+    either throwIO pure result
   where
+   route classify acceptPending rejectWith = case ticketFromRequest (WS.pendingRequest pending) of
+    -- Canonical tickets are consumed before legacy tickets in every mode.  A
+    -- local server must exercise the same one-use canonical hand-off rather
+    -- than silently treating a canonical reconnect as legacy traffic.
+    Just ticketText -> do
+      canonical <- consumeCanonicalTicket st (TE.decodeUtf8Lenient ticketText)
+      case canonical of
+        Just canonicalTicket -> classify TicketCanonical >> acceptCanonical canonicalTicket
+        Nothing -> consumeActivityTicket st (TE.decodeUtf8Lenient ticketText) >>= \case
+          Just activityTicket -> classify TicketActivity >> acceptActivity activityTicket
+          Nothing -> acceptLegacyTicket ticketText
+    Nothing -> classify TicketNone >> acceptWithoutTicket
+    where
+    rejectUnauthorized = rejectWith UpgradeRejectedUnauthorized (WS.rejectRequest pending "Unauthorized")
+
     acceptLegacyTicket ticketText
-      | authCfg.mode /= AuthModeDeployed = WS.rejectRequest pending "Unauthorized"
+      | authCfg.mode /= AuthModeDeployed = rejectUnauthorized
       | otherwise = do
           mTicket <- consumeTicket st (TE.decodeUtf8Lenient ticketText)
           case mTicket of
-            Just ticket ->
+            Just ticket -> do
+              classify TicketLegacy
               let (receivesGlobalGroupEvents, subscription) = ticketSubscription ticket
-               in accept (Just ticket.ticketPrincipal) subscription receivesGlobalGroupEvents ticket.ticketReceivesWorkspaceAdminEvents
-            Nothing -> WS.rejectRequest pending "Unauthorized"
+              accept (Just ticket.ticketPrincipal) subscription receivesGlobalGroupEvents ticket.ticketReceivesWorkspaceAdminEvents
+            Nothing -> rejectUnauthorized
 
     acceptWithoutTicket
-      | authCfg.mode == AuthModeDeployed = WS.rejectRequest pending "Unauthorized"
+      | authCfg.mode == AuthModeDeployed = rejectUnauthorized
       | otherwise = case resolveLocalWebSocketAccess authCfg (TE.decodeUtf8Lenient <$> tokenFromRequest (WS.pendingRequest pending)) of
           Just (principal, subscription) -> accept principal subscription True True
-          Nothing -> WS.rejectRequest pending "Unauthorized"
+          Nothing -> rejectUnauthorized
 
-    rejectUnavailable = WS.rejectRequestWith pending WS.defaultRejectRequest
+    rejectUnavailable = rejectWith UpgradeRejectedUnavailable $ WS.rejectRequestWith pending WS.defaultRejectRequest
       { WS.rejectCode=503, WS.rejectMessage="Service Unavailable", WS.rejectHeaders=[("Retry-After","1")] }
 
     withPhysical principal use = currentNativeConnection st.nativeTransport >>= \case
@@ -538,9 +661,9 @@ wsApp authCfg pool st pending = case ticketFromRequest (WS.pendingRequest pendin
       allowed <- case (principal, subscription) of
         (Just actor, SubscribeWorkspace workspace) -> scopeAuthorized pool actor (WorkspaceScope workspace)
         _ -> pure True
-      if not allowed then WS.rejectRequest pending "Unauthorized" else
+      if not allowed then rejectUnauthorized else
         withPhysical principal $ \native -> do
-          conn <- installControlledWriter native <$> WS.acceptRequest pending
+          conn <- installControlledWriter native <$> acceptPending
           connId <- addConnection st native conn principal subscription receivesGlobalGroupEvents receivesWorkspaceAdminEvents
           WS.withPingThread conn 30 (pure ()) $
             sinkMessages conn
@@ -551,13 +674,13 @@ wsApp authCfg pool st pending = case ticketFromRequest (WS.pendingRequest pendin
     -- then acknowledges catch-up with an opaque replacement token.
     acceptCanonical canonicalTicket = do
       allowed <- scopeAuthorized pool canonicalTicket.canonicalPrincipal canonicalTicket.canonicalScope
-      if not allowed then WS.rejectRequest pending "Unauthorized" else
+      if not allowed then rejectUnauthorized else
        withPhysical (Just canonicalTicket.canonicalPrincipal) $ \native -> do
-        conn <- installControlledWriter native <$> WS.acceptRequest pending
+        conn <- installControlledWriter native <$> acceptPending
         bracket
           (addCanonicalConnection st native conn canonicalTicket.canonicalPrincipal canonicalTicket.canonicalScope
             canonicalTicket.canonicalResumeToken canonicalTicket.canonicalResumeTtl canonicalTicket.canonicalResumeExpiresAt)
-          (removeCanonicalConnection st . fst) $ \(connId, client) -> do
+          (uncurry (endCanonicalConnection st)) $ \(connId, client) -> do
             let serve = do
                   withLiveCanonicalClient st connId client $ \turn ->
                     advanceCanonicalClientUnlocked pool st connId client (deliveryShouldYield turn)
@@ -575,14 +698,14 @@ wsApp authCfg pool st pending = case ticketFromRequest (WS.pendingRequest pendin
 
     acceptActivity activityTicket = do
       allowed <- activityPrincipalValid pool activityTicket.activityTicketPrincipal
-      if not allowed then WS.rejectRequest pending "Unauthorized" else
+      if not allowed then rejectUnauthorized else
        withPhysical (Just activityTicket.activityTicketPrincipal) $ \native -> do
         reserved <- reserveActivityClient st native activityTicket
         case reserved of
           Nothing -> rejectUnavailable
           Just (identifier,reservation) -> flip finally
             (withMVar reservation.activitySendLock $ \_ -> retireActivityClient reservation >> removeActivityClient st identifier) $ do
-            conn <- installControlledWriter native <$> WS.acceptRequest pending
+            conn <- installControlledWriter native <$> acceptPending
             let client=reservation {activityConnection=Just conn}
             -- Independent expiry output wakes native reads through the close
             -- handshake. Keep the physical slot until the owning application
@@ -610,13 +733,24 @@ addCanonicalConnection st native conn principal scope token resumeTtl expiresAt 
   replay <- newTVarIO (Just (newCanonicalReplay token True))
   sendLock <- newMVar ()
   retired <- STM.newEmptyTMVarIO
-  let client = CanonicalClient conn native principal scope bearer replay resumeTtl expiresAt sendLock retired
+  replayStarted <- getMonotonicTimeNSec
+  replayCycle <- newTVarIO (Just (ReplayInitial, replayStarted))
+  let client = CanonicalClient conn native principal scope bearer replay resumeTtl expiresAt sendLock retired replayCycle
   STM.atomically $ modifyTVar' st.canonicalConnections (Map.insert connId client)
   pure (connId, client)
 
 removeCanonicalConnection :: WSState -> UUID -> IO ()
 removeCanonicalConnection st connId =
   STM.atomically $ modifyTVar' st.canonicalConnections (Map.delete connId)
+
+-- A replay still open when its connection ends was retired by the server
+-- (its delivery turn, a native abort or shutdown) or ended by the peer.
+endCanonicalConnection :: WSState -> UUID -> CanonicalClient -> IO ()
+endCanonicalConnection st connId client = do
+  removeCanonicalConnection st connId
+  retired <- STM.atomically (not <$> STM.isEmptyTMVar client.canonicalClientRetired)
+  aborted <- nativeConnectionClosing client.canonicalClientNative
+  closeReplayCycle st client (if retired || aborted then ReplayRetired else ReplayDisconnected)
 
 -- Unregister the exact client and wake its owning application atomically.
 -- This path needs no successful write to end the transport.
@@ -647,9 +781,10 @@ withLiveCanonicalClient st connId client action =
 
 -- Successful terminal delivery retains the peer Close handshake. A failed
 -- control or Close write is handled by the surrounding delivery turn.
-closeCanonicalConnectionUnlocked :: WSState -> UUID -> CanonicalClient -> Value -> Text -> IO ()
-closeCanonicalConnectionUnlocked st connId client frame reason =
+closeCanonicalConnectionUnlocked :: WSState -> UUID -> CanonicalClient -> ReplayOutcome -> Value -> Text -> IO ()
+closeCanonicalConnectionUnlocked st connId client outcome frame reason =
   (do
+    closeReplayCycle st client outcome
     removeCanonicalConnection st connId
     sendFrameUnlocked client.canonicalClientConnection frame
     sendOwnedClose client.canonicalClientNative client.canonicalClientConnection reason)
@@ -760,7 +895,10 @@ canonicalOutboxActions pool st records = do
           visible <- visibleOrYield client shouldYield scopedRecords
           if visible then do
             token <- readTVarIO client.canonicalClientToken
-            STM.atomically $ STM.writeTVar client.canonicalClientReplay (Just (newCanonicalReplay token False))
+            now <- getMonotonicTimeNSec
+            STM.atomically $ do
+              STM.writeTVar client.canonicalClientReplay (Just (newCanonicalReplay token False))
+              openReplayCycle client ReplayLive now
             advanceCanonicalClientUnlocked pool st connId client shouldYield
           else rebaseHidden connId client shouldYield scopedRecords
 
@@ -769,7 +907,10 @@ canonicalOutboxActions pool st records = do
       yielding <- shouldYield
       if yielding then do
         token <- readTVarIO client.canonicalClientToken
-        STM.atomically $ STM.writeTVar client.canonicalClientReplay (Just (newCanonicalReplay token False))
+        now <- getMonotonicTimeNSec
+        STM.atomically $ do
+          STM.writeTVar client.canonicalClientReplay (Just (newCanonicalReplay token False))
+          openReplayCycle client ReplayLive now
       else do
         stillLive <- rebaseCanonicalClientUnlocked pool st connId client record.outboxCursor
         when stillLive $ rebaseHidden connId client shouldYield rest
@@ -872,6 +1013,7 @@ rebaseCanonicalClientUnlocked pool st connId client hiddenThrough = do
       STM.atomically $ STM.writeTVar client.canonicalClientToken token
       pure True
     Left err -> do
+      closeReplayCycle st client (replayFailure err)
       sendFrameUnlocked client.canonicalClientConnection (object ["type" .= terminalFrame err, "schema_version" .= (1 :: Int)])
       retireCanonicalConnection st connId client
       pure False
@@ -906,8 +1048,9 @@ advanceCanonicalClientUnlocked pool st connId client shouldYield = do
     principal = client.canonicalClientPrincipal
     scope = client.canonicalClientScope
     audience = audienceFor principal
-    expire = closeCanonicalConnectionUnlocked st connId client canonicalExpiryFrame "canonical resume expired"
+    expire = closeCanonicalConnectionUnlocked st connId client ReplayExpired canonicalExpiryFrame "canonical resume expired"
     reportFailure err = do
+      closeReplayCycle st client (replayFailure err)
       sendFrameUnlocked conn (object ["type" .= terminalFrame err, "schema_version" .= (1 :: Int)])
       retireCanonicalConnection st connId client
     sendAuthorized frame after = do
@@ -940,10 +1083,16 @@ advanceCanonicalClientUnlocked pool st connId client shouldYield = do
           settle result = case result of
             Left ResumeExpired -> expire
             Left err -> reportFailure err
-            Right token -> STM.atomically $ do
-              STM.writeTVar client.canonicalClientToken token
-              STM.writeTVar client.canonicalClientReplay
-                (if replay.replayDirty then Just (newCanonicalReplay token False) else Nothing)
+            Right token -> do
+              now <- getMonotonicTimeNSec
+              closed <- STM.atomically $ do
+                STM.writeTVar client.canonicalClientToken token
+                STM.writeTVar client.canonicalClientReplay
+                  (if replay.replayDirty then Just (newCanonicalReplay token False) else Nothing)
+                closed <- STM.swapTVar client.canonicalClientReplayCycle Nothing
+                when replay.replayDirty $ openReplayCycle client ReplayLive now
+                pure closed
+              recordReplayCycle st closed ReplayCompleted now
       if replay.replayInitialCheckpoint || replay.replaySawVisible
         then sendAuthorized (object
           [ "type" .= ("checkpoint" :: Text), "schema_version" .= (1 :: Int)
@@ -969,7 +1118,7 @@ expireCanonicalConnection st connId client = do
   remaining <- remainingCanonicalTtl client
   waitForCanonicalExpiry remaining
   withLiveCanonicalClient st connId client $ \_ ->
-    closeCanonicalConnectionUnlocked st connId client canonicalExpiryFrame "canonical resume expired"
+    closeCanonicalConnectionUnlocked st connId client ReplayExpired canonicalExpiryFrame "canonical resume expired"
 
 canonicalExpiryFrame :: Value
 canonicalExpiryFrame = object ["type" .= ("resync_required" :: Text), "schema_version" .= (1 :: Int)]
@@ -1011,7 +1160,7 @@ applyAccessControlsUnlocked pool st connId client = go
       allowed <- scopeAuthorized pool client.canonicalClientPrincipal (WorkspaceScope workspace)
       case client.canonicalClientScope of
         WorkspaceScope current | current == workspace && not allowed -> do
-          closeCanonicalConnectionUnlocked st connId client (accessFrame "access_revoked" workspace) "access revoked"
+          closeCanonicalConnectionUnlocked st connId client ReplayRevoked (accessFrame "access_revoked" workspace) "access revoked"
           pure False
         WorkspaceScope current | current == workspace -> go rest
         _ -> do
@@ -1058,7 +1207,7 @@ reauthorizeCanonicalConnections pool st = do
             -- checks no longer query outside the delivery deadline and repeat
             -- a denied query a second time after locking.
             allowed <- scopeAuthorized pool client.canonicalClientPrincipal client.canonicalClientScope
-            unless allowed $ closeCanonicalConnectionUnlocked st connId client
+            unless allowed $ closeCanonicalConnectionUnlocked st connId client ReplayRevoked
               (object ["type" .= ("access_revoked" :: Text), "schema_version" .= (1 :: Int)]) "access revoked"
         | (connId, client) <- clients ]
   runDeliveryBatch (activityChecks <> canonicalChecks)

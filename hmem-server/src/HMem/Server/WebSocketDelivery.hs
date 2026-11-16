@@ -6,11 +6,15 @@ module HMem.Server.WebSocketDelivery
   , DeliveryFailure(..)
   , DeliveryCleanupFailure(..)
   , newDeliveryHub
+  , newDeliveryHubWith
+  , deliveryTelemetry
+  , deliveryGauges
   , newDeliveryOwner
   , reservePhysicalConnection
   , finishDeliveryOwner
   , finishDeliveryOwnerWith
   , retainFailedOwner
+  , deliveryOwnerClosing
   , requestDeliveryAbort
   , abortDeliveryOwner
   , beginDeliveryShutdown
@@ -41,6 +45,9 @@ import GHC.Clock (getMonotonicTimeNSec)
 import Network.WebSockets qualified as WS
 import System.Timeout (timeout)
 
+import HMem.Server.WebSocketTelemetry (DeliveryGauges(..), WebSocketTelemetry)
+import HMem.Server.WebSocketTelemetry qualified as Telemetry
+
 newtype DeliveryHub = DeliveryHub (TVar HubState)
 
 data HubState = HubState
@@ -49,6 +56,7 @@ data HubState = HubState
   , physical :: !(Map.Map Unique Admission)
   , turns :: !(Map.Map Unique ActiveTurn)
   , participants :: !(Map.Map ThreadId Participant)
+  , telemetry :: !WebSocketTelemetry
   }
 
 -- An admitted owner keeps its seat until its outer worker has finished and
@@ -82,6 +90,8 @@ data ActiveTurn = ActiveTurn
   , activeCancel :: !(Maybe (Async ()))
   , activeAbort :: !(Maybe (Async ()))
   , activeQuarantined :: !Bool
+  -- Telemetry only: when the turn was quarantined.
+  , activeQuarantinedAt :: !(Maybe Word64)
   }
 
 -- Completion of retained work. A failed native abort or cancellation helper
@@ -96,7 +106,8 @@ data Participant = TurnParent | TurnChild !DeliveryTurn
 data WritePhase
   = Idle !Word64
   | Writing !Word64 !Word64
-  | Expired
+  -- Whether a write was in progress or overran its deadline.
+  | Expired !Bool
   | WriteFailed !SomeException
 
 data DeliveryResult a = DeliveryCompleted a | DeliveryRetired
@@ -121,7 +132,34 @@ data DeliveryCleanupFailure = DeliveryCleanupFailure
 instance Exception DeliveryCleanupFailure
 
 newDeliveryHub :: IO DeliveryHub
-newDeliveryHub = DeliveryHub <$> newTVarIO (HubState False False Map.empty Map.empty Map.empty)
+newDeliveryHub = Telemetry.newWebSocketTelemetry >>= newDeliveryHubWith
+
+newDeliveryHubWith :: WebSocketTelemetry -> IO DeliveryHub
+newDeliveryHubWith telemetry =
+  DeliveryHub <$> newTVarIO (HubState False False Map.empty Map.empty Map.empty telemetry)
+
+deliveryTelemetry :: DeliveryHub -> IO WebSocketTelemetry
+deliveryTelemetry (DeliveryHub state) = (.telemetry) <$> readTVarIO state
+
+-- | Observe occupancy without reclaiming retained work.
+deliveryGauges :: DeliveryHub -> IO DeliveryGauges
+deliveryGauges (DeliveryHub state) = do
+  current <- readTVarIO state
+  waiting <- Telemetry.leaseWaiterCount current.telemetry
+  now <- getMonotonicTimeNSec
+  let quarantined = filter (.activeQuarantined) (Map.elems current.turns)
+      since = [at | entry <- quarantined, Just at <- [entry.activeQuarantinedAt]]
+  pure DeliveryGauges
+    { physicalAdmitted = Map.size current.physical
+    , physicalRetained = Map.size (Map.filter (isJust . (.finishedWorker)) current.physical)
+    , leasesInUse = Map.size current.turns
+    , leasesQuarantined = length quarantined
+    , leaseWaiters = waiting
+    , oldestQuarantineMs = if null since then Nothing
+        else Just (fromIntegral (Telemetry.elapsedNanos (minimum since) now) / 1e6)
+    , admissionShut = current.admissionClosed
+    , admissionPoisoned = current.poisoned
+    }
 
 newDeliveryOwner :: DeliveryHub -> IO () -> IO DeliveryOwner
 newDeliveryOwner hub abort =
@@ -164,6 +202,10 @@ finishDeliveryOwnerWith owner releaseWorker = mask_ $ do
     reclaimRetained state
     pure (abort == Failed)
   when abortFailed $ retainFailedOwner owner >> throwIO DeliveryUnconfirmed
+
+-- | Whether the owner was closed by a native abort, shutdown or its worker.
+deliveryOwnerClosing :: DeliveryOwner -> IO Bool
+deliveryOwnerClosing owner = readTVarIO owner.closing
 
 retainFailedOwner :: DeliveryOwner -> IO ()
 retainFailedOwner owner = do
@@ -251,6 +293,8 @@ reclaimRetained state = do
       released = Map.intersection finished doneSeats
       failed = Failed `elem` Map.elems turnStates || Failed `elem` Map.elems seatStates
   forM_ released $ \admission -> sequence_ admission.finishedWorker
+  unless (Map.null reclaimed) $ Telemetry.recordReclaimsSTM current.telemetry
+    [at | entry <- Map.elems reclaimed, Just at <- [entry.activeQuarantinedAt]]
   unless (Map.null reclaimed && Map.null released && (not failed || current.poisoned)) $
     writeTVar state current
       { turns = remaining
@@ -286,10 +330,11 @@ handleSettlement handle = pollSTM handle <&> \case
 quarantineTurn :: DeliveryTurn -> ThreadId -> Bool -> IO ()
 quarantineTurn turn parent failed = do
   let DeliveryHub state = turn.owner.hub
+  now <- getMonotonicTimeNSec
   atomically $ modifyTVar' state $ \current -> current
     { poisoned = current.poisoned || failed
     , admissionClosed = current.admissionClosed || failed
-    , turns = Map.adjust (\entry -> entry { activeQuarantined = True }) turn.turnKey current.turns
+    , turns = Map.adjust (\entry -> entry { activeQuarantined = True, activeQuarantinedAt = Just now }) turn.turnKey current.turns
     , participants = Map.delete parent current.participants
     }
 
@@ -301,10 +346,21 @@ withDeliveryTurn owner action = mask $ \restore -> do
   gate <- newEmptyTMVarIO
   let DeliveryHub state = owner.hub
       release child = releaseTurn state key parent child
-  admitted <- atomically $ admitTurn owner key parent
-  if not admitted then pure DeliveryRetired else do
+  telemetry <- (.telemetry) <$> readTVarIO state
+  waitStarted <- getMonotonicTimeNSec
+  admitted <- Telemetry.awaitingLease telemetry (atomically $ admitTurn owner key parent)
+  if not admitted then do
+    refused <- getMonotonicTimeNSec
+    Telemetry.recordTelemetry telemetry
+      (Telemetry.TurnRecord Telemetry.TurnRefused (Telemetry.elapsedNanos waitStarted refused) 0)
+    pure DeliveryRetired
+  else do
     started <- getMonotonicTimeNSec
     let turn = DeliveryTurn owner key (started + workNanos) phase
+        recordTurn outcome = do
+          now <- getMonotonicTimeNSec
+          Telemetry.recordTelemetry telemetry $ Telemetry.TurnRecord outcome
+            (Telemetry.elapsedNanos waitStarted started) (Telemetry.elapsedNanos started now)
     child <- (asyncWithUnmask $ \unmask -> do
       run <- atomically (readTMVar gate)
       result <- if run
@@ -322,13 +378,27 @@ withDeliveryTurn owner action = mask $ \restore -> do
         -- join remains unfinished. Only a failed native abort or cleanup
         -- startup poisons admission.
         retire = do
+          cleanupStarted <- getMonotonicTimeNSec
           joined <- try @SomeException (abortAndJoin turn child)
+          cleanupEnded <- getMonotonicTimeNSec
+          let cleaned outcome = Telemetry.recordTelemetry telemetry
+                (Telemetry.CleanupRecord outcome (Telemetry.elapsedNanos cleanupStarted cleanupEnded))
           case joined of
-            Right (interrupted, Joined) -> release (Just childId) >> pure (interrupted, False)
-            Right (interrupted, Unfinished) -> quarantineTurn turn parent False >> pure (interrupted, True)
-            Right (interrupted, AbortFailed) -> quarantineTurn turn parent True >> unconfirmed interrupted
+            Right (interrupted, Joined) -> do
+              release (Just childId)
+              cleaned Telemetry.CleanupJoined
+              pure (interrupted, False)
+            Right (interrupted, Unfinished) -> do
+              quarantineTurn turn parent False
+              cleaned Telemetry.CleanupUnfinished
+              pure (interrupted, True)
+            Right (interrupted, AbortFailed) -> do
+              quarantineTurn turn parent True
+              cleaned Telemetry.CleanupAbortFailed
+              unconfirmed interrupted
             Left failure -> do
               quarantineTurn turn parent True
+              cleaned Telemetry.CleanupFailed
               case fromException failure :: Maybe SomeAsyncException of
                 Just _ -> unconfirmed (Just failure)
                 Nothing -> throwIO failure
@@ -344,15 +414,18 @@ withDeliveryTurn owner action = mask $ \restore -> do
       Left (primary :: SomeException) -> do
         -- Cancellation is clean only after the owned native abort and child
         -- join are proven. Annotate an unconfirmed cleanup on the cause.
+        recordTurn Telemetry.TurnInterrupted
         retired <- try @SomeException retire
         case retired of
           Left cleanupFailure -> throwIO (DeliveryCleanupFailure primary cleanupFailure)
           Right (_, True) -> throwIO (DeliveryCleanupFailure primary (toException DeliveryUnconfirmed))
           Right (_, False) -> throwIO primary
       Right (TurnFinished result) -> do
+        recordTurn (either (const Telemetry.TurnFailed) (const Telemetry.TurnCompleted) result)
         release (Just childId)
         DeliveryCompleted <$> either throwIO pure result
-      Right (TurnRetired failure) -> do
+      Right (TurnRetired cause failure) -> do
+        recordTurn cause
         (interrupted, unfinished) <- retire
         case interrupted of
           Just cancellation
@@ -376,7 +449,7 @@ admitTurn owner key parent = do
       -- Retained turns keep their leases until reclaimed.
       check (Map.size current.turns < 4)
       writeTVar state current
-        { turns = Map.insert key (ActiveTurn owner.ownerKey Nothing Nothing Nothing False) current.turns
+        { turns = Map.insert key (ActiveTurn owner.ownerKey Nothing Nothing Nothing False Nothing) current.turns
         , participants = Map.insert parent TurnParent current.participants
         }
       pure True
@@ -390,7 +463,9 @@ releaseTurn state key parent child = atomically $ do
   -- The owner's finished worker may have been waiting only for this turn.
   reclaimRetained state
 
-data TurnOutcome a = TurnFinished !(Either SomeException a) | TurnRetired !(Maybe SomeException)
+data TurnOutcome a
+  = TurnFinished !(Either SomeException a)
+  | TurnRetired !Telemetry.TurnOutcome !(Maybe SomeException)
 
 monitorTurn :: DeliveryTurn -> Async (Word64, Either SomeException a) -> IO (TurnOutcome a)
 monitorTurn turn child = go
@@ -402,13 +477,14 @@ monitorTurn turn child = go
         finished <- pollSTM child
         pure (closing, phase, finished)
       case observed of
-        (_, WriteFailed err, _) -> pure (TurnRetired (Just err))
-        (_, Expired, _) -> pure (TurnRetired Nothing)
-        (True, _, _) -> pure (TurnRetired Nothing)
+        (_, WriteFailed err, _) -> pure (TurnRetired Telemetry.TurnRetiredWriteFailed (Just err))
+        (_, Expired writing, _) -> pure (TurnRetired
+          (if writing then Telemetry.TurnRetiredWriteTimeout else Telemetry.TurnRetiredDeadline) Nothing)
+        (True, _, _) -> pure (TurnRetired Telemetry.TurnRetiredClosing Nothing)
         (_, _, Just (Right (ended, result)))
           | ended < turn.workDeadline -> pure (TurnFinished result)
-          | otherwise -> pure (TurnRetired (either Just (const Nothing) result))
-        (_, _, Just (Left err)) -> pure (TurnRetired (Just err))
+          | otherwise -> pure (TurnRetired Telemetry.TurnRetiredDeadline (either Just (const Nothing) result))
+        (_, _, Just (Left err)) -> pure (TurnRetired Telemetry.TurnFailed (Just err))
         (_, phase, Nothing) -> do
           now <- getMonotonicTimeNSec
           let deadline = case phase of
@@ -421,13 +497,18 @@ monitorTurn turn child = go
               case finished of
                 Nothing
                   | samePhase phase current && now >= deadline ->
-                      writeTVar turn.writePhase Expired
+                      writeTVar turn.writePhase (Expired (isWriting phase))
                 _ -> pure ()
             else void $ timeout (nanosToMicros (deadline - now)) $ atomically $
               (void $ waitCatchSTM child)
                 `orElse` (readTVar turn.owner.closing >>= check)
                 `orElse` (readTVar turn.writePhase >>= check . not . samePhase phase)
           go
+
+isWriting :: WritePhase -> Bool
+isWriting = \case
+  Writing _ _ -> True
+  _ -> False
 
 samePhase :: WritePhase -> WritePhase -> Bool
 samePhase (Idle a) (Idle b) = a == b
@@ -515,7 +596,7 @@ writeInTurn turn write = mask $ \restore -> do
             let generation = previous + 1
             writeTVar turn.writePhase (Writing generation (start + writeNanos))
             pure generation
-      Expired -> throwSTM DeliveryWriteTimedOut
+      Expired _ -> throwSTM DeliveryWriteTimedOut
       Idle _ -> throwSTM DeliveryWriteTimedOut
       _ -> throwSTM DeliveryOwnershipViolation
   result <- try @SomeException (restore write)
@@ -526,11 +607,18 @@ writeInTurn turn write = mask $ \restore -> do
       Writing active deadline | active == generation -> do
         let withinBudget = ended < min deadline turn.workDeadline
         writeTVar turn.writePhase $
-          if not withinBudget then Expired else case result of
+          if not withinBudget then Expired True else case result of
             Left err -> WriteFailed err
             Right _ -> Idle generation
         pure withinBudget
       _ -> pure False
+  let DeliveryHub state = turn.owner.hub
+  telemetry <- (.telemetry) <$> readTVarIO state
+  Telemetry.recordTelemetry telemetry $ flip Telemetry.WriteRecord (Telemetry.elapsedNanos start ended) $
+    if not withinBudget then Telemetry.WriteTimedOut else case result of
+      Right _ -> Telemetry.WriteCompleted
+      Left err | Just (_ :: SomeAsyncException) <- fromException err -> Telemetry.WriteInterrupted
+               | otherwise -> Telemetry.WriteFailed
   value <- either throwIO pure result
   unless withinBudget $ throwIO DeliveryWriteTimedOut
   pure value

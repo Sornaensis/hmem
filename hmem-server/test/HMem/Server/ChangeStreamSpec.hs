@@ -15,6 +15,7 @@ import Data.FileEmbed (embedFile, makeRelativeToProject)
 import Data.Int (Int64)
 import Data.Maybe (isJust)
 import Data.List (nub, sort)
+import Data.Map.Strict qualified as Map
 import Data.Pool (Pool, destroyAllResources)
 import Hasql.Connection qualified as Hasql
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
@@ -48,6 +49,7 @@ import System.Timeout (timeout)
 import System.IO (hPutStrLn, stderr)
 import System.Environment (lookupEnv)
 import System.Directory (getFileSize)
+import System.Log.FastLogger (fromLogStr)
 import Test.Hspec
 
 import HMem.Config qualified as Config
@@ -65,11 +67,13 @@ import HMem.DB.Workspace qualified as WorkspaceDB
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withRequestContext, emptyRequestContext)
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), createTestWorkspace)
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
-import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, withDeployedSandboxAppContext, withLocalSandboxAppContext)
+import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, mkDeployedSandboxConfig, withDeployedSandboxAppContext, withDeployedSandboxAppLogged, withLocalSandboxAppContext)
+import HMem.Server.Logging (jsonRequestLogger)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.ChangeStream (ChangeStreamWorker, ChangeStreamMaintenance(..), startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker, readChangeStreamMaintenance, retentionScopeTurn, retentionDue, ChangeStreamDispatchEvent(..), startChangeStreamWorkerWithObserver)
 import HMem.Server.Snapshot (materializeSnapshot, materializeSnapshotWithProfile)
-import HMem.Server.WebSocket (WSState, newWSState, withNativeWebSocketSettings, awaitWebSocketDrain, connectionCount, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections)
+import HMem.Server.WebSocket (WSState, newWSState, withNativeWebSocketSettings, awaitWebSocketDrain, connectionCount, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections, attachWebSocketTelemetryLog, readWebSocketTelemetry)
+import HMem.Server.WebSocketTelemetry (DeliveryGauges(..), OutcomeStats(..), WebSocketTelemetrySnapshot(..))
 import HMem.Server.WebSocketDelivery (DeliveryCleanupFailure(..), DeliveryFailure(..))
 import HMem.Server.WebSocketTransport (newNativeTransport, runPlainSocket, runPlainSocketWith, withNativeTransportSettings)
 import HMem.Types (ChangeStreamResyncResponse(..), ChangeStreamSnapshotItem(..), CreateProject(..), CreateTask(..), CreateWorkspaceGroup(..), Project(..), Task(..), SnapshotProfile(..), UpdateWorkspace(..), WebSocketTicketResponse(..), Workspace(..), WorkspaceGroup(..))
@@ -1209,6 +1213,20 @@ spec = describe "canonical change-stream loopback" $ do
               record <- latestOutbox ctx liveScope
               declaredPhase "live dispatch" (dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [record])
               awaitCanonical >>= assertChangeIdentity record project.id
+          -- The stalled catch-up passed its work deadline without a write, its
+          -- join stayed unfinished, and the drain reclaimed it afterwards.
+          snapshot <- awaitTelemetry ctx.deployedWSState "stalled catch-up telemetry" $ \current ->
+            outcomeCount current ("websocket_replay", "live", "completed") == 1
+          map (outcomeCount snapshot)
+            [ ("websocket_turn", "", "retired_deadline"), ("websocket_cleanup", "", "unfinished")
+            , ("websocket_reclaim", "", "reclaimed"), ("websocket_replay", "initial", "retired")
+            , ("websocket_replay", "initial", "completed"), ("websocket_turn", "", "retired_write_timeout") ]
+            `shouldBe` [1, 1, 1, 1, 1, 0]
+          fmap (\stats -> (stats.timed, stats.maxMs >= 250)) (Map.lookup ("websocket_reclaim", "", "reclaimed") snapshot.outcomes)
+            `shouldBe` Just (1, True)
+          fmap (.maxMs) (Map.lookup ("websocket_turn", "", "retired_deadline") snapshot.outcomes)
+            `shouldSatisfy` maybe False (>= 750)
+          (snapshot.delivery.leasesQuarantined, snapshot.delivery.physicalAdmitted) `shouldBe` (0, 0)
 
   it "retires the canonical owner when expiry output throws" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -1270,6 +1288,10 @@ spec = describe "canonical change-stream loopback" $ do
           headers `shouldSatisfy` BS.isInfixOf "503 Service Unavailable"
           headers `shouldSatisfy` BS.isInfixOf "Retry-After: 1"
           headers `shouldSatisfy` (not . BS.isInfixOf "Sec-WebSocket-Accept")
+          snapshot <- awaitTelemetry ctx.localWSState "unavailable rejection telemetry" $ \current ->
+            outcomeCount current ("websocket_upgrade", "none", "rejected_unavailable") == 1
+          outcomeCount snapshot ("websocket_upgrade", "none", "accepted") `shouldBe` 32
+          snapshot.delivery.physicalAdmitted `shouldBe` 32
 
   it "keeps a successful Close physically admitted until its peer acknowledges" $
     withLocalSandboxAppContext $ \ctx -> do
@@ -1329,6 +1351,97 @@ spec = describe "canonical change-stream loopback" $ do
           declaredPhase "disconnected expiry writer joined" (takeMVar writerEnded)
           declaredPhase "disconnected expiry owner finalized" (takeMVar ownerEnded))
           `finally` void (tryPutMVar release ())
+
+  it "measures upgrade, replay, delivery and connection outcomes without identifiers or HTTP 500 upgrades" $ do
+    requestLines <- newIORef []
+    requestLogger <- jsonRequestLogger (\line -> atomicModifyIORef' requestLines (\captured -> (captured <> [fromLogStr line], ())))
+    withDeployedSandboxAppLogged requestLogger mkDeployedSandboxConfig $ \ctx -> do
+      telemetryLines <- newIORef []
+      let st = ctx.deployedWSState
+          pool = ctx.deployedEnv.pool
+      attachWebSocketTelemetryLog st (\line -> atomicModifyIORef' telemetryLines (\captured -> (captured <> [fromLogStr line], ())))
+      workspace <- createTestWorkspace ctx.deployedEnv "websocket-telemetry"
+      subscriber <- createDeployedSandboxUser ctx.deployedEnv False False
+      _ <- Auth.upsertWorkspaceMembership pool workspace.id
+        (Auth.UpsertWorkspaceMembership subscriber Auth.WorkspaceRoleRead) Nothing
+      let principal = grantPrincipal subscriber
+          scope = WorkspaceScope workspace.id
+          audience = AuthenticatedAudience (UUID.toText subscriber) subscriber
+      resume <- terminalResume ctx scope audience
+      accepted <- createCanonicalTicket st principal scope resume
+      unsupported <- createCanonicalTicket st principal scope resume
+      -- The unsupported-version handshake throws; keep that expected
+      -- application failure local to its own disposition.
+      withSocketApplication st False runPlainSocket (pure ()) ctx.deployedApplication $ \port -> do
+        withActivityFrames port accepted.ticket $ \frames -> do
+          let next = declaredPhase "telemetry peer frame" (readChan frames >>= decodeFrame)
+          frameType <$> next `shouldReturn` Just "checkpoint"
+          project <- Project.createProject pool
+            (CreateProject workspace.id Nothing "telemetry live delivery" Nothing Nothing Nothing)
+          committed <- getMonotonicTimeNSec
+          record <- latestOutbox ctx scope
+          dispatchCanonicalOutbox pool st [record]
+          next >>= assertChangeIdentity record project.id
+          observed <- getMonotonicTimeNSec
+          frameType <$> next `shouldReturn` Just "checkpoint"
+          -- Only this independent client observes delivery; the server
+          -- records socket-write completion, not receipt.
+          qualificationMetric "websocket-commit-to-observed" (object ["commit_to_observed_ms" .= milliseconds committed observed])
+        unauthorized <- rawUpgrade port "/api/v1/ws?ticket=unknown-telemetry-ticket" "13" []
+        unauthorized `shouldSatisfy` BS.isPrefixOf "HTTP/1.1 400"
+        invalidIdentity <- rawUpgrade port ("/api/v1/ws?ticket=" <> Text.encodeUtf8 accepted.ticket) "13" ["X-HMem-Bot-Identity: not-json"]
+        invalidIdentity `shouldSatisfy` BS.isPrefixOf "HTTP/1.1 400"
+        failed <- rawUpgrade port ("/api/v1/ws?ticket=" <> Text.encodeUtf8 unsupported.ticket) "99" []
+        failed `shouldSatisfy` (not . BS.isInfixOf "101 Switching Protocols")
+        snapshot <- awaitTelemetry st "connection and physical release" $ \current ->
+          outcomeCount current ("websocket_connection", "canonical", "closed") == 1
+            && outcomeCount current ("websocket_upgrade", "canonical", "failed") == 1
+            && current.delivery.physicalAdmitted == 0
+        let events event = Map.toList (Map.map (.count) (Map.filterWithKey (\(name, _, _) _ -> name == event) snapshot.outcomes))
+        events "websocket_upgrade" `shouldMatchList`
+          [ (("websocket_upgrade", "canonical", "accepted"), 1)
+          , (("websocket_upgrade", "canonical", "failed"), 1)
+          , (("websocket_upgrade", "unresolved", "rejected_unauthorized"), 1)
+          , (("websocket_upgrade", "unresolved", "rejected_invalid_identity"), 1) ]
+        events "websocket_connection" `shouldBe` [(("websocket_connection", "canonical", "closed"), 1)]
+        events "websocket_replay" `shouldMatchList`
+          [ (("websocket_replay", "initial", "completed"), 1)
+          , (("websocket_replay", "live", "completed"), 1) ]
+        map fst (events "websocket_turn") `shouldSatisfy` all (\(_, _, outcome) -> outcome `elem` ["completed", "refused"])
+        events "websocket_cleanup" `shouldBe` []
+        -- Checkpoint, change, checkpoint and Close frames completed.
+        outcomeCount snapshot ("websocket_write", "", "completed") `shouldSatisfy` (>= 4)
+        outcomeCount snapshot ("websocket_write", "", "timed_out") `shouldBe` 0
+        forM_ (Map.elems snapshot.outcomes) $ \stats -> stats.timed `shouldBe` stats.count
+        -- A replay cycle lies within its connection's lifetime.
+        let maxOf key = maybe 0 (.maxMs) (Map.lookup key snapshot.outcomes)
+        maxOf ("websocket_replay", "initial", "completed") `shouldSatisfy`
+          (<= maxOf ("websocket_connection", "canonical", "closed"))
+        (snapshot.canonicalClients, snapshot.replaysPending, snapshot.delivery.leasesInUse) `shouldBe` (0, 0, 0)
+      telemetry <- map decodeLine <$> readIORef telemetryLines
+      map (\entry -> (textField "event" entry, textField "outcome" entry)) telemetry `shouldMatchList`
+        [ (Just "websocket_upgrade", Just "accepted")
+        , (Just "websocket_upgrade", Just "rejected_unauthorized")
+        , (Just "websocket_upgrade", Just "rejected_invalid_identity")
+        , (Just "websocket_upgrade", Just "failed")
+        , (Just "websocket_replay", Just "completed")
+        , (Just "websocket_connection", Just "closed") ]
+      forM_ telemetry $ \entry -> KeyMap.keys entry `shouldSatisfy` all (`elem`
+        [ "timestamp", "level", "event", "ticket_kind", "phase", "outcome", "handshake_ms", "lifetime_ms"
+        , "replay_ms", "admitted", "leases", "lease_waiters", "quarantined" ])
+      rawTelemetry <- BS.concat <$> readIORef telemetryLines
+      forM_ [accepted.ticket, unsupported.ticket, "unknown-telemetry-ticket", UUID.toText subscriber, UUID.toText workspace.id] $ \secret ->
+        BS.isInfixOf (Text.encodeUtf8 secret) rawTelemetry `shouldBe` False
+      -- An accepted raw upgrade closes as an upgrade, never as an HTTP 500.
+      requests <- map decodeLine <$> readIORef requestLines
+      let upgrades = filter ((== Just "/api/v1/ws") . textField "route") requests
+      length upgrades `shouldBe` 4
+      map (KeyMap.lookup "status") requests `shouldSatisfy` notElem (Just (Number 500))
+      map (\entry -> (textField "outcome" entry, KeyMap.lookup "status" entry)) upgrades `shouldMatchList`
+        [ (Just "upgrade_closed", Just Null)
+        , (Just "upgrade_closed", Just Null)
+        , (Just "completed", Just (Number 400))
+        , (Just "upgrade_failed", Just Null) ]
 
   it "never materializes global workspace-group membership rows" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -1911,6 +2024,11 @@ spec = describe "canonical change-stream loopback" $ do
           canonicalReplayPending st `shouldReturn` True
           validateCanonicalResumeToken pool scope audience original `shouldReturn` Right expires
         declaredPhase "first replay connection retired" (takeMVar finished)
+        -- The peer left during a pending catch-up without a server decision.
+        disconnected <- readWebSocketTelemetry st
+        map (outcomeCount disconnected)
+          [("websocket_replay", "initial", "disconnected"), ("websocket_replay", "initial", "completed")]
+          `shouldBe` [1, 0]
         reconnect <- createCanonicalTicketWithExpiry st deadline principal scope original
         withActivityFrames port reconnect.ticket $ \frames -> do
           receiveChanges "duplicates after reconnect" frames 500 `shouldReturn` eventIds (take 500 backlog)
@@ -1936,6 +2054,9 @@ spec = describe "canonical change-stream loopback" $ do
           later `shouldBe` replacementResumeToken scope audience next markerRecord.outboxCursor
           validateCanonicalResumeToken pool scope audience later `shouldReturn` Right deadline
           canonicalReplayPending st `shouldReturn` False
+          replayed <- awaitTelemetry st "frozen replay telemetry" $ \current ->
+            outcomeCount current ("websocket_replay", "live", "completed") == 1
+          outcomeCount replayed ("websocket_replay", "initial", "completed") `shouldBe` 1
 
   it "rechecks authority before continuing a partially delivered replay" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -1967,6 +2088,10 @@ spec = describe "canonical change-stream loopback" $ do
           delivered <- declaredPhase "terminal revocation" (awaitRevocation (1 :: Int))
           delivered `shouldSatisfy` (< 525)
           canonicalReplayPending st `shouldReturn` False
+          revoked <- readWebSocketTelemetry st
+          map (outcomeCount revoked)
+            [("websocket_replay", "initial", "revoked"), ("websocket_replay", "initial", "completed")]
+            `shouldBe` [1, 0]
 
   it "leaves the original bearer usable when the final checkpoint write fails" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -2217,6 +2342,14 @@ assertBlockedNativeWrite withListener runPeer ctx = do
         declaredPhase "native raw write entered" (takeMVar writing)
         declaredPhase "native raw write ended" (takeMVar writeEnded)
         declaredPhase "native owner ended before peer release" (takeMVar ownerEnded)
+        -- The parent's write deadline retired the blocked native write.
+        telemetry <- readWebSocketTelemetry ctx.deployedWSState
+        map (outcomeCount telemetry)
+          [ ("websocket_turn", "", "retired_write_timeout"), ("websocket_write", "", "timed_out")
+          , ("websocket_replay", "live", "retired"), ("websocket_turn", "", "retired_deadline") ]
+          `shouldBe` [1, 1, 1, 0]
+        fmap (.maxMs) (Map.lookup ("websocket_turn", "", "retired_write_timeout") telemetry.outcomes)
+          `shouldSatisfy` maybe False (\ms -> ms >= 250 && ms < 750)
         count <- readIORef chunks
         count `shouldSatisfy` (> 0)
         count `shouldSatisfy` (< 1024)
@@ -2280,6 +2413,44 @@ withHeldLegacyPeers port count use = do
     withHeldLegacyPeers port (count - 1) use
       `finally` void (tryPutMVar release ())
     declaredPhase "physical peer joined" (wait worker)
+
+-- Sends one upgrade request with the given path, protocol version and extra
+-- header lines, returning the response headers.
+rawUpgrade :: Int -> BS.ByteString -> BS.ByteString -> [BS.ByteString] -> IO BS.ByteString
+rawUpgrade port path version extra =
+  bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \socket -> do
+    Socket.connect socket (Socket.SockAddrInet (fromIntegral port) (Socket.tupleToHostAddress (127,0,0,1)))
+    SocketBytes.sendAll socket $ BS.concat $
+      [ "GET ", path, " HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+      , "Sec-WebSocket-Version: ", version, "\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ]
+      <> map (<> "\r\n") extra <> ["\r\n"]
+    let receive bytes
+          | "\r\n\r\n" `BS.isInfixOf` bytes = pure bytes
+          | BS.length bytes >= 8192 = fail "upgrade response header limit exceeded"
+          | otherwise = do
+              next <- SocketBytes.recv socket 4096
+              if BS.null next then pure bytes else receive (bytes <> next)
+    declaredPhase "raw upgrade response" (receive BS.empty)
+
+awaitTelemetry :: WSState -> String -> (WebSocketTelemetrySnapshot -> Bool) -> IO WebSocketTelemetrySnapshot
+awaitTelemetry st phase ready = declaredPhase phase loop
+  where
+    loop = do
+      snapshot <- readWebSocketTelemetry st
+      if ready snapshot then pure snapshot else threadDelay 10000 >> loop
+
+outcomeCount :: WebSocketTelemetrySnapshot -> (Text, Text, Text) -> Int
+outcomeCount snapshot key = maybe 0 (.count) (Map.lookup key snapshot.outcomes)
+
+decodeLine :: BS.ByteString -> KeyMap.KeyMap Value
+decodeLine line = case decode (LBS.fromStrict line) of
+  Just (Object entry) -> entry
+  _ -> error ("log line is not one JSON object: " <> show line)
+
+textField :: Key.Key -> KeyMap.KeyMap Value -> Maybe Text
+textField key entry = case KeyMap.lookup key entry of
+  Just (String value) -> Just value
+  _ -> Nothing
 
 upgradeResponseHeaders :: Int -> IO BS.ByteString
 upgradeResponseHeaders port =

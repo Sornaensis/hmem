@@ -35,7 +35,7 @@ application fails before responding, completion is that failure.
 | Outcome | Meaning |
 | --- | --- |
 | `completed` | The HTTP response was written. |
-| `upgrade_closed` | The raw upgrade connection ended normally. The handshake status is not observable, so `status` is `null`. |
+| `upgrade_closed` | The raw upgrade connection ended normally. The handshake status is not observable, so `status` is `null`; [WebSocket telemetry](websocket-telemetry.md) records the upgrade decision. |
 | `upgrade_fallback` | The transport could not upgrade and sent the fallback HTTP response. |
 | `application_failed` | The application threw before responding. |
 | `response_failed` | A response failed outside a stream producer with a non-I/O error, such as a failing lazy body. |

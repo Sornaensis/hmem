@@ -53,7 +53,7 @@ import HMem.Server.Embedding.Worker
 import HMem.Server.LogRotation (preRotateLogFileIfNeeded)
 import HMem.Server.Logging (newLogger, parseLogLevel, logInfo, logWarn, jsonRequestLogger)
 import HMem.Server.Static (resolveStaticDir)
-import HMem.Server.WebSocket (newWSState, runPlainWithNativeWebSockets, withNativeWebSocketSettings, beginWebSocketShutdown, awaitWebSocketDrain)
+import HMem.Server.WebSocket (newWSState, runPlainWithNativeWebSockets, withNativeWebSocketSettings, beginWebSocketShutdown, awaitWebSocketDrain, attachWebSocketTelemetryLog, detachWebSocketTelemetryLog)
 
 ------------------------------------------------------------------------
 -- CLI
@@ -144,6 +144,7 @@ runDevMode opts = do
     (logAction, cleanupLog) <- newFastLogger (LogStderr defaultBufSize)
     let logger = newLogger logAction (parseLogLevel "info")
     requestLogger <- jsonRequestLogger logAction
+    attachWebSocketTelemetryLog wsState logAction
 
     logInfo logger $ "[dev] Sandboxed PostgreSQL on port " <> T.pack (show dbPort)
     logInfo logger $ "[dev] hmem-server listening on http://localhost:" <> T.pack (show port)
@@ -188,7 +189,7 @@ runDevMode opts = do
           stopChangeStreamWorker streamWorker
           awaitWebSocketDrain wsState 5000000
           flushNow pool tracker `catch` \(_ :: SomeException) -> pure ()
-          cleanupLog
+          detachWebSocketTelemetryLog wsState `finally` cleanupLog
     (bracket (newPrefixRegistry pool) closePrefixRegistry $ \prefixes -> do
       app <- mkAppWithPrefixProofs prefixes Nothing Config.defaultConfig.changeStream requestLogger devAuth devCors devRateLimit pool tracker wsState mStaticDir pgvec
       bracket (startSessionReaper pool) stopSessionReaper $ \_ ->
@@ -327,6 +328,7 @@ runNormalMode opts = do
   (logAction, cleanupLog) <- newFastLogger (LogFile fileSpec defaultBufSize)
   let logger = newLogger logAction (parseLogLevel cfg.logging.level)
   requestLogger <- jsonRequestLogger logAction
+  attachWebSocketTelemetryLog wsState logAction
   let settings = setHost (fromString (T.unpack cfg.server.host))
                $ setPort port
                $ setTimeout 60
@@ -341,7 +343,7 @@ runNormalMode opts = do
           `catch` \(_ :: SomeException) -> logWarn logger "failed to flush access tracker"
         runAllReleases
           [ destroyAllResources pool
-          , cleanupLog
+          , detachWebSocketTelemetryLog wsState `finally` cleanupLog
           ]
 
   -- Resolve TLS config: CLI flags override config.yaml

@@ -135,6 +135,7 @@ library
       HMem.Server.Static
       HMem.Server.WebSocket
       HMem.Server.WebSocketDelivery
+      HMem.Server.WebSocketTelemetry
       HMem.Server.WebSocketTransport
   other-modules:
       Paths_hmem_server

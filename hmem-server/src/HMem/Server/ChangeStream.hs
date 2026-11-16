@@ -24,7 +24,7 @@ import System.IO (hPutStrLn, stderr)
 import HMem.Config (ChangeStreamConfig(..))
 import HMem.DB.ChangeStream (ChangeScope, OutboxRecord(..), OutboxBacklog(..), cleanupChangeStream, listOutboxAfter, listRetentionScopes, outboxBacklog, pruneOutboxScopeBefore)
 import HMem.DB.Pool (DBException(..))
-import HMem.Server.WebSocket (WSState, dispatchOutboxBatch, canonicalReplayPending, reauthorizeCanonicalConnections)
+import HMem.Server.WebSocket (WSState, dispatchOutboxBatch, canonicalReplayPending, flushWebSocketTelemetry, reauthorizeCanonicalConnections)
 import HMem.Server.WebSocketDelivery (DeliveryFailure(..), DeliveryCleanupFailure(..))
 
 data ChangeStreamMaintenance = ChangeStreamMaintenance
@@ -85,6 +85,8 @@ startObserved startupHook observe pool config wsState = mask_ $ do
   pure (ChangeStreamWorker worker finished status)
   where
     loop status acknowledgements lastMaintenance lastScope maintenanceDueAt dispatchCursor sweepBusy lastAuthorization = do
+      -- Emit WebSocket telemetry recorded since the previous turn.
+      flushWebSocketTelemetry wsState
       -- Maintenance and idle authority have their own elapsed-time cadence;
       -- neither is multiplied by the number of empty retained scope counters.
       monotonic <- getMonotonicTimeNSec

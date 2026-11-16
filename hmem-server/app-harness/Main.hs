@@ -3,7 +3,7 @@ module Main where
 
 import Control.Concurrent (ThreadId, forkIO, forkIOWithUnmask, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, newMVar, modifyMVar, modifyMVar_, readMVar, tryReadMVar, takeMVar, putMVar, tryPutMVar, tryTakeMVar)
-import Control.Exception (Exception, SomeException, SomeAsyncException, IOException, bracket, finally, throwIO, try, catch, mask, onException, fromException, toException)
+import Control.Exception (Exception, SomeException, SomeAsyncException, IOException, bracket, bracket_, finally, throwIO, try, catch, mask, onException, fromException, toException)
 import Control.Monad (unless, when, forever, void)
 import Data.Aeson (Value(..), FromJSON, encode, toJSON, object, (.=), eitherDecodeStrict', fromJSON)
 import Data.Aeson qualified as Aeson
@@ -63,7 +63,7 @@ import HMem.Server.ChangeStream (startChangeStreamWorker, stopChangeStreamWorker
 import HMem.Server.SessionReaper (startSessionReaper, stopSessionReaper)
 import HMem.Server.Archive.Worker (ArchiveWorker, startArchiveWorker, stopArchiveWorker)
 import HMem.Server.Logging (jsonRequestLogger, logInfo, logWarn, newLogger, parseLogLevel)
-import HMem.Server.WebSocket (WSState, newWSState, runPlainWithNativeWebSockets, beginWebSocketShutdown, awaitWebSocketDrain)
+import HMem.Server.WebSocket (WSState, newWSState, runPlainWithNativeWebSockets, beginWebSocketShutdown, awaitWebSocketDrain, attachWebSocketTelemetryLog, detachWebSocketTelemetryLog)
 import HMem.Server.WebSocketTransport (DeliveryFailure(..))
 
 data HarnessMode
@@ -247,7 +247,8 @@ runHarnessEnvWith qualified wsState opts env = do
         bracket
           (newFastLogger (LogFile fileSpec defaultBufSize))
           (\(_, cleanupLog) -> cleanupLog)
-          (\(logAction, _) -> bracket (newPrefixRegistry env.pool) closePrefixRegistry $ \prefixes -> do
+          (\(logAction, _) -> bracket_ (attachWebSocketTelemetryLog wsState logAction) (detachWebSocketTelemetryLog wsState) $
+            bracket (newPrefixRegistry env.pool) closePrefixRegistry $ \prefixes -> do
             let logger = newLogger logAction (parseLogLevel "info")
             requestLogger <- jsonRequestLogger logAction
 

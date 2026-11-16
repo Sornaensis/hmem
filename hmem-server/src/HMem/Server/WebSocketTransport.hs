@@ -10,9 +10,12 @@ module HMem.Server.WebSocketTransport
   , runPlainSocketWith
   , currentNativeConnection
   , abortNativeConnection
+  , nativeConnectionClosing
   , reservePhysicalConnection
   , beginNativeShutdown
   , awaitNativeDrain
+  , nativeTelemetry
+  , nativeGauges
   , DeliveryTurn
   , DeliveryResult(..)
   , DeliveryFailure(..)
@@ -42,6 +45,7 @@ import System.Timeout (timeout)
 import HMem.Server.WebSocketDelivery
   ( DeliveryFailure(..), DeliveryCleanupFailure(..), DeliveryResult(..), DeliveryTurn, deliveryShouldYield )
 import HMem.Server.WebSocketDelivery qualified as Delivery
+import HMem.Server.WebSocketTelemetry (DeliveryGauges, WebSocketTelemetry)
 
 data NativeTransport = NativeTransport
   { acceptedSockets :: !(TVar (Map.Map ThreadId Socket.Socket))
@@ -221,6 +225,9 @@ currentNativeConnection transport = do
 abortNativeConnection :: NativeConnection -> IO ()
 abortNativeConnection (NativeConnection owner) = Delivery.abortDeliveryOwner owner
 
+nativeConnectionClosing :: NativeConnection -> IO Bool
+nativeConnectionClosing (NativeConnection owner) = Delivery.deliveryOwnerClosing owner
+
 abortSocket :: Socket.Socket -> IO ()
 abortSocket socket =
   (Socket.shutdown socket Socket.ShutdownBoth `catch` \(_ :: IOException) -> pure ())
@@ -240,6 +247,12 @@ installControlledWriter (NativeConnection owner) original =
 sendOwnedClose :: WS.WebSocketsData a => NativeConnection -> WS.Connection -> a -> IO ()
 sendOwnedClose (NativeConnection owner) connection payload =
   Delivery.ownedClose owner (WS.sendClose connection payload)
+
+nativeTelemetry :: NativeTransport -> IO WebSocketTelemetry
+nativeTelemetry transport = Delivery.deliveryTelemetry transport.deliveryHub
+
+nativeGauges :: NativeTransport -> IO DeliveryGauges
+nativeGauges transport = Delivery.deliveryGauges transport.deliveryHub
 
 beginNativeShutdown :: NativeTransport -> IO ()
 beginNativeShutdown transport = Delivery.beginDeliveryShutdown transport.deliveryHub

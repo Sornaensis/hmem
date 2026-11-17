@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M7MV1RDGGJ02GB0A12MV8Y33"
+relation = "amends"
+from_record = "R01M7MV1RDG347ZJQC29384EHTM"
+subject_adr = "A01M39QPB23CYS9QHCWQSATSJE9"
+to_records = ["R01M7MBSEP6DXYPZ7PE3MR8JF89"]
++++
+
+Admit HTTP requests server-wide through a bounded fair queue on a single-stripe pool, with a 503 server_busy overload contract, documented exemptions and configuration
+
+<!-- @adrai:eyJhIjp7ImkiOiJjbGF1ZGUtY29kZSIsImsiOiJsbG0iLCJtIjoiY2xhdWRlLW9wdXMtNS01In0sImIiOiIxMDUzZGY1ZTA3MGI2MzA3MGIwNjc1NWIwMWFjNTkxNGVjMTA3YmZjIiwiaSI6InNoYTI1NjpNb3BVSEY5VGU5WjVoaVNRMXV2ZlQ2YlhCeEtIT2oyQ1FkTlQwbEN4ZUxBIiwiayI6ImNvbm5lY3Rpb24uYW1lbmRzIiwibyI6IkMwMU03TVYxUkRHR0owMkdCMEExMk1WOFkzMyIsIm9wIjoiTzAxTTdNVjFSREczNDdaSlFDMjkzODRFSFRNIiwicCI6WyJSMDFNN01CU0VQNkRYWVBaN1BFM01SOEpGODkiXSwiciI6Im1hc3RlciIsInMiOiJzaGEyNTY6QWFtNWJEZGFBSjF5VXZYRHNJQkg5YWV4Q0xxeWhab2JSbVE5SmpjSVRMMCIsInQiOjE3OTQ5MjIwNDU4NzIsInYiOjEsIngiOiJhZHJhaS8xLjAuMCJ9 -->

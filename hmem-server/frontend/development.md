@@ -123,6 +123,17 @@ Tree, independently of browse filters and match/tree totals. Mode changes preser
 a settled total; canonical Observation changes and resynchronization refresh it.
 Project startup settlement uses this independent header read.
 
+Observation discovery reuses an accepted context for the same owner and applied
+query until the local clock reaches its `expires_at` minus five seconds. That
+deadline is trusted only if it is still in the future when the context arrives;
+otherwise the server decides. An expired continuation is never sent. It, or a
+continuation rejected with 409, rebuilds the active view from page zero through
+one fresh bootstrap that also serves queued count and page demand; displayed
+results stay until the replacement completes. A 409 from a fresh bootstrap, or
+from a renewed context before any of its continuations succeeds, shows
+**Retry search** and pauses automatic discovery reads for that owner and query
+until retry or a new owner or query.
+
 Startup count reads and the first ordinary navigation wave share six admission
 credits under the current workspace, session and audience. Completed or retired
 requests do not refund those credits. A settled canonical stream, root and header

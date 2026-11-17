@@ -9,10 +9,10 @@ const ordered = values => [...values].sort((a, b) => b.updated_at.localeCompare(
 // backend qualification; browser receipts always describe the real POST wire.
 export function createObservationDiscoveryAdapter(fixtures, { allObservations, actor = () => 'fixture-user' }) {
   const contexts = new Map(), generations = new Map(), receipts = []
-  let nextToken = 1, mode = 'fts_only', reason = 'disabled', semantic = () => false, maximum = 0
+  let nextToken = 1, mode = 'fts_only', reason = 'disabled', semantic = () => false, maximum = 0, expiresAt = () => '2099-01-01T00:00:00Z'
   const failure = (status, receipt) => ({ status, body: { error: status === 409 ? 'discovery_restart_required' : 'discovery_capacity' }, receipt })
   const adapter = {
-    contexts, receipts, configure(value) { mode = value.mode || mode; reason = value.reason === undefined ? reason : value.reason; semantic = value.semantic || semantic },
+    contexts, receipts, configure(value) { mode = value.mode || mode; reason = value.reason === undefined ? reason : value.reason; semantic = value.semantic || semantic; expiresAt = value.expiresAt || expiresAt },
     expire(token) { const context = contexts.get(token); assert.ok(context, 'Known fixture token'); context.retired = true },
     get maximumContexts() { return maximum },
     handle(payload) {
@@ -26,7 +26,7 @@ export function createObservationDiscoveryAdapter(fixtures, { allObservations, a
       if (payload.context_token) {
         assert.ok(Object.keys(payload).every(key => ['workspace_id', 'context_token', 'view', 'prefix', 'terminal', 'limit', 'offset'].includes(key)), 'Continuation must omit all creation fields')
         context = contexts.get(payload.context_token)
-        if (!context || context.retired || context.workspace !== payload.workspace_id || context.actor !== actor()) return failure(409, receipt)
+        if (!context || context.retired || Date.parse(context.expiresAt) <= Date.now() || context.workspace !== payload.workspace_id || context.actor !== actor()) return failure(409, receipt)
       } else {
         assert.ok(uuid(payload.search_session), 'Dedicated discovery session is a UUID')
         assert.ok(Number.isInteger(payload.generation) && payload.generation > 0 && payload.generation <= 2147483647)
@@ -38,7 +38,7 @@ export function createObservationDiscoveryAdapter(fixtures, { allObservations, a
         for (const old of contexts.values()) if (old.key === key) old.retired = true
         const body = payload.filters.content_query
         context = { key, workspace: payload.workspace_id, actor: actor(), filters: structuredClone(payload.filters), generation: payload.generation,
-          token: 'fixture-discovery-' + nextToken++, retired: false, retrieval: { mode: body ? mode : 'fts_only', reason: body ? (mode === 'hybrid' ? null : reason) : 'empty_query' }, semantic }
+          token: 'fixture-discovery-' + nextToken++, retired: false, expiresAt: expiresAt(), retrieval: { mode: body ? mode : 'fts_only', reason: body ? (mode === 'hybrid' ? null : reason) : 'empty_query' }, semantic }
         contexts.set(context.token, context)
         maximum = Math.max(maximum, [...contexts.values()].filter(value => !value.retired).length)
       }
@@ -72,7 +72,7 @@ export function createObservationDiscoveryAdapter(fixtures, { allObservations, a
       }
       const provenance = {...(filters.git_sha?{original_git_sha:filters.git_sha}:{}),...(filters.current_git_sha?{current_git_sha:filters.current_git_sha}:{}),...(filters.history_git_sha?{history_git_sha:filters.history_git_sha}:{})}
       if(Object.keys(provenance).length) page.items=page.items.map(value=>({...value,provenance_match:provenance}))
-      const body = { context_token: context.token, expires_at: '2099-01-01T00:00:00Z', retrieval: context.retrieval, complete: true, page }
+      const body = { context_token: context.token, expires_at: context.expiresAt, retrieval: context.retrieval, complete: true, page }
       receipt.response = body
       return { status: 200, body, receipt }
     }

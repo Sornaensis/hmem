@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { openDiscovery, discoverySelection } from './observation-discovery-fixture.mjs'
+import { openDiscovery, discoverySelection, interceptDiscovery, controlDiscoveryLifetime } from './observation-discovery-fixture.mjs'
 import { paint, scanObservationRows, revealObservationRow } from './observation-viewport-fixture.mjs'
 
 const applied = h => h.page.locator('.observation-applied-filters').textContent()
@@ -350,5 +350,155 @@ for (const width of [1440, 320]) test(`production ${width} compact live filters 
     await composer(h)
     assert.equal(await h.page.getByLabel('Search file matches', {exact: true}).count(), 1)
     assert.equal(await h.page.locator('#observation-subject').count(), 0)
+  } finally { await h.close() }
+})
+
+const flatTuple = encodeURIComponent(JSON.stringify(['flat', '', null, '', '', null, null, [], '', '', '']))
+const searches = h => h.receipts.filter(value => value.endpoint === '/api/v1/observations/discovery')
+const fresh = values => values.filter(value => !value.payload.context_token)
+const loaded = h => h.page.locator('#observation-viewport').getAttribute('data-observation-loaded-count')
+let changeSequence = 0
+const pushChange = h => h.page.evaluate(({ workspace, sequence }) => window.pushHierarchyFrames([{ schema_version: 1, type: 'change', event: {
+  schema_version: 1, event_id: 'expiry-change-' + sequence, scope: 'workspace', workspace_id: workspace, occurred_at: '2026-11-01T00:00:00Z',
+  transaction: { id: 'expiry-change-tx-' + sequence, cause: 'rest', request_id: null }, actor: { type: 'system', id: null },
+  entity: { type: 'observation', id: 'cache-main', action: 'updated' }, invalidations: [{ kind: 'collection', target: 'observations:' + workspace }] } }]),
+  { workspace: h.fixture.workspace.id, sequence: ++changeSequence })
+const openProjects = async h => { await h.page.goto(h.origin + '/workspace/' + h.fixture.workspace.id + '#tab=projects&ov=1&oq=' + flatTuple); await h.idle() }
+
+test('startup count context is reused before expiry and renewed after expiry without sending the expired token', { timeout: 60000 }, async () => {
+  for (const expired of [false, true]) {
+    const h = await openDiscovery()
+    const lifetime = controlDiscoveryLifetime(h)
+    try {
+      if (expired) lifetime.shortly()
+      await openProjects(h)
+      const count = searches(h).find(value => value.payload.view === 'count'), token = count.response.context_token
+      if (expired) await lifetime.lapse(count.response)
+      const before = searches(h).length
+      await h.page.getByRole('button', { name: 'Observations', exact: true }).click(); await h.idle()
+      await h.page.getByRole('button', { name: 'Load more', exact: true }).click(); await h.idle()
+      const visit = searches(h).slice(before)
+      assert.equal(await loaded(h), '64')
+      assert.deepEqual(visit.map(value => value.payload.offset), [0, 50])
+      if (!expired) assert.deepEqual(visit.map(value => value.payload.context_token), [token, token], 'An unexpired startup context is reused')
+      else {
+        assert.equal(visit.some(value => value.payload.context_token === token), false, 'The expired token is never transmitted')
+        assert.equal(fresh(visit).length, 1, 'One fresh bootstrap renews the context')
+        assert.equal(visit[1].payload.context_token, visit[0].response.context_token, 'Later pages continue the renewed context')
+      }
+      assert.equal(await h.page.getByRole('button', { name: 'Retry search', exact: true }).count(), 0)
+    } finally { await h.close() }
+  }
+})
+
+test('WebSocket refresh after expiry renews once and rebuilds pagination from page zero', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  const lifetime = controlDiscoveryLifetime(h)
+  try {
+    lifetime.shortly(); await h.start()
+    await h.page.getByRole('button', { name: 'Load more', exact: true }).click(); await h.idle()
+    const first = searches(h).find(value => value.payload.view === 'list'), token = first.response.context_token
+    assert.deepEqual(searches(h).filter(value => value.payload.view === 'list').map(value => value.payload.offset), [0, 50])
+    assert.equal(searches(h).filter(value => value.payload.view === 'list')[1].payload.context_token, token, 'Load more reuses the unexpired context')
+    await lifetime.lapse(first.response)
+    const before = searches(h).length
+    await pushChange(h); await h.idle()
+    const refresh = searches(h).slice(before)
+    assert.equal(refresh.some(value => value.payload.context_token === token), false, 'The expired token is never transmitted')
+    assert.equal(fresh(refresh).length, 1)
+    assert.deepEqual(refresh.map(value => [value.payload.offset, value.payload.context_token ?? null]), [[0, null], [50, refresh[0].response.context_token]])
+    assert.equal(await loaded(h), '64')
+    assert.equal(await h.page.getByRole('button', { name: 'Retry search', exact: true }).count(), 0)
+  } finally { await h.close() }
+})
+
+test('expired continuations and queued count and page demand coalesce into one fresh bootstrap', { timeout: 60000 }, async () => {
+  // A path that is also a subject sends its branch and terminal pages together.
+  const h = await openDiscovery(undefined, values => [...values, { ...values[3], id: 'docs-root', subject: 'docs', subjects: [{ subject_kind: 'file', subject: 'docs' }] }])
+  const lifetime = controlDiscoveryLifetime(h)
+  const row = path => h.page.locator('[data-tree-path=' + JSON.stringify(path) + ']')
+  try {
+    lifetime.shortly(); await openProjects(h)
+    const count = searches(h).find(value => value.payload.view === 'count'), startup = count.response.context_token
+    await lifetime.lapse(count.response)
+    const held = h.gate(r => r.payload?.view === 'count' && !r.payload.context_token, { hold: true })
+    const before = searches(h).length
+    await pushChange(h)
+    await h.bounded(held.arrived, 5000, 'Renewed count bootstrap held')
+    await h.page.getByRole('button', { name: 'Observations', exact: true }).click()
+    await h.page.locator('#observation-panel').waitFor()
+    held.release(); await h.idle()
+    const queued = searches(h).slice(before)
+    assert.equal(queued.some(value => value.payload.context_token === startup), false)
+    assert.equal(fresh(queued).length, 1, 'Queued page demand waits for the renewed count context')
+    assert.deepEqual(queued.slice(1).map(value => [value.payload.view, value.payload.context_token]), [['list', queued[0].response.context_token]])
+    assert.equal(await loaded(h), '50')
+
+    lifetime.shortly()
+    await h.page.getByRole('button', { name: 'Subject Tree', exact: true }).click(); await h.idle()
+    const root = fresh(searches(h)).at(-1), treeToken = root.response.context_token
+    await lifetime.lapse(root.response)
+    const expansion = searches(h).length
+    await revealObservationRow(h.page, row('docs')); await row('docs').locator('.observation-tree-chevron').click(); await h.idle()
+    const renewed = searches(h).slice(expansion)
+    assert.equal(renewed.some(value => value.payload.context_token === treeToken), false, 'Concurrent expired continuations send nothing')
+    assert.equal(fresh(renewed).length, 1, 'Concurrent continuations share one bootstrap')
+    assert.equal(discoverySelection(h, renewed[0]).view, 'tree'); assert.equal(discoverySelection(h, renewed[0]).prefix, '')
+    const current = renewed[0].response.context_token
+    assert.ok(renewed.some(value => value.payload.view === 'tree' && value.payload.prefix === 'docs' && value.payload.context_token === current))
+    assert.ok(renewed.some(value => value.payload.terminal?.subject === 'docs' && value.payload.context_token === current))
+    assert.equal(await row('docs').getAttribute('aria-expanded'), 'true')
+    assert.equal(await h.page.getByRole('button', { name: 'Retry search', exact: true }).count(), 0)
+  } finally { await h.close() }
+})
+
+test('delayed continuation rejection after a query change cannot restart or overwrite newer results', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  try {
+    await h.start()
+    const token = searches(h).find(value => value.payload.view === 'list').response.context_token
+    const held = h.gate(r => r.payload?.context_token === token, { hold: true, error: 409 })
+    await pushChange(h)
+    await h.bounded(held.arrived, 5000, 'Old continuation held')
+    await h.page.locator('#observation-query').fill('Cache evidence'); await h.page.locator('#observation-query').press('Enter')
+    await h.page.waitForFunction(() => document.querySelectorAll('.observation-card').length === 2)
+    const before = searches(h).length
+    held.release(); await h.idle()
+    assert.equal(searches(h).length, before, 'A delayed old-context 409 starts no recovery')
+    assert.equal(await h.page.locator('.observation-card').count(), 2)
+    assert.equal(await h.page.getByRole('button', { name: 'Retry search', exact: true }).count(), 0)
+    assert.equal(discoverySelection(h, searches(h).at(-1)).content_query, 'Cache evidence')
+  } finally { await h.close() }
+})
+
+test('persistent fresh 409 stops after one recovery, pauses automatic reads and recovers by explicit retry', { timeout: 60000 }, async () => {
+  const h = await openDiscovery()
+  let failing = false
+  try {
+    await interceptDiscovery(h, async (route, outcome) => {
+      if (failing && !outcome.receipt.payload.context_token) await route.fulfill({ status: 409, json: { error: 'discovery_restart_required' } })
+      else await route.fallback()
+    })
+    await h.start()
+    const token = searches(h).find(value => value.payload.view === 'list').response.context_token
+    failing = true; h.discovery.expire(token)
+    const before = searches(h).length
+    await pushChange(h); await h.idle()
+    const retry = h.page.getByRole('button', { name: 'Retry search', exact: true })
+    await retry.waitFor({ timeout: 5000 })
+    await h.page.waitForTimeout(300); await h.idle()
+    assert.deepEqual(searches(h).slice(before).map(value => [value.payload.context_token ?? null, value.status]), [[token, 409], [null, 409]], 'One rejected continuation and one rejected bootstrap')
+    assert.equal(await loaded(h), '50', 'Displayed results remain')
+    await pushChange(h); await h.idle(); await h.page.waitForTimeout(300); await h.idle()
+    assert.equal(searches(h).length, before + 2, 'Automatic refresh stays paused')
+    await retry.click(); await h.idle()
+    assert.equal(searches(h).length, before + 3, 'Explicit retry makes one fresh attempt')
+    assert.equal(await retry.count(), 1)
+    failing = false
+    await retry.click(); await h.idle()
+    assert.equal(searches(h).length, before + 4)
+    assert.equal(await retry.count(), 0)
+    assert.equal(await loaded(h), '50')
+    assert.equal(searches(h).at(-1).status, 200)
   } finally { await h.close() }
 })

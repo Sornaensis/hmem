@@ -98,6 +98,7 @@ import ObservationPreferences as Preferences
 import ObservationTree
 import Process
 import Task
+import Time
 import Ports exposing (copyToClipboard)
 import Set
 import Spinner
@@ -148,7 +149,7 @@ init =
     , modeSubjectQueries = Dict.empty
     , filterComposing = False
     , clearViewportToken = 0
-    , discovery = { sessionId = "", runtimeToken = 1, runtimePending = False, generation = 0, query = Nothing, owner = "", context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, physical = [], error = Nothing, failedCount = False }
+    , discovery = { sessionId = "", runtimeToken = 1, runtimePending = False, generation = 0, query = Nothing, owner = "", context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, physical = [], error = Nothing, failedCount = False, expiry = Nothing, recovery = Nothing }
     , modeScrolls = Dict.empty
     , preferenceScroll = Nothing
     , filterDebounce = Nothing
@@ -245,7 +246,7 @@ retireDiscoveryDraft state =
         query = discoveryQuery (draftQuery state)
     in
     if discovery.query == Just query then state
-    else { state | discovery = { discovery | query = Just query, generation = discovery.generation + 1, context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, error = Nothing } }
+    else { state | discovery = { discovery | query = Just query, generation = discovery.generation + 1, context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, error = Nothing, recovery = Nothing } }
 
 
 discoveryCountKey : ObservationDiscoveryRequest -> String
@@ -272,7 +273,48 @@ sendDiscovery request model =
                     _ -> state
             in
             ( { model | observations = { started | discovery = { discovery | physical = request :: discovery.physical } }, dataLoading = {loading | startupAdmission = admission} }
-            , Api.fetchObservationDiscovery model.flags.apiUrl (discoveryWireQuery request) (GotObservationDiscovery request) )
+            , Api.fetchObservationDiscoveryBefore (discoveryDeadline request discovery) model.flags.apiUrl (discoveryWireQuery request)
+                (Maybe.map (GotObservationDiscovery request) >> Maybe.withDefault (ObservationDiscoveryExpired request)) )
+
+
+{-| Only a continuation of the exact token whose receipt clock was read has a
+local deadline. Bootstraps and unverified tokens leave expiry to the server.
+-}
+discoveryDeadline : ObservationDiscoveryRequest -> ObservationDiscoveryState -> Maybe Int
+discoveryDeadline request discovery =
+    case ( request.contextToken, discovery.expiry ) of
+        ( Just token, Just expiry ) -> if expiry.token == token then Just expiry.deadline else Nothing
+        _ -> Nothing
+
+
+-- Renew a little early so a continuation does not expire in transit.
+discoveryExpiryMargin : Int
+discoveryExpiryMargin =
+    5000
+
+
+{-| Trust expires_at only if it is still ahead of the local clock when the
+context is first received; otherwise clock skew leaves expiry to the server.
+-}
+acceptDiscoveryClock : String -> Time.Posix -> Model -> ( Model, Cmd Msg )
+acceptDiscoveryClock token now model =
+    let
+        discovery = model.observations.discovery
+        deadline = discovery.context |> Maybe.andThen (\context -> if context.token == token then parseTimestamp context.expiresAt else Nothing)
+            |> Maybe.map (\parsed -> (parsed.second - 62135596800) * 1000 - discoveryExpiryMargin)
+            |> Maybe.andThen (\value -> if value > Time.posixToMillis now then Just value else Nothing)
+    in
+    if (discovery.context |> Maybe.map .token) /= Just token then ( model, Cmd.none )
+    else ( updateObservation (\state -> { state | discovery = { discovery | expiry = Maybe.map (\value -> { token = token, deadline = value }) deadline } }) model, Cmd.none )
+
+
+{-| Automatic requests stay paused after a discovery failure until explicit
+retry or a new owner or applied query retires the failed attempt.
+-}
+discoveryPaused : Model -> Bool
+discoveryPaused model =
+    let discovery = model.observations.discovery in
+    discovery.error /= Nothing && discovery.owner == treeOwner model && discovery.query == Just (discoveryQuery (querySnapshot model.observations))
 
 
 pumpDiscovery : Model -> ( Model, Cmd Msg )
@@ -292,16 +334,20 @@ requestDiscovery destination model =
         query = discoveryQuery (querySnapshot state)
         owner = treeOwner model
         matching = old.owner == owner && old.query == Just query
-        current = if matching then old else { old | owner = owner, query = Just query, generation = old.generation + 1, context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, error = Nothing }
+        current = if matching then old else { old | owner = owner, query = Just query, generation = old.generation + 1, context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, error = Nothing, recovery = Nothing }
         guarded = { model | observations = { state | discovery = current } }
         base = { workspaceId = Maybe.withDefault "" model.selectedWorkspaceId, epoch = model.sessionRequestEpoch, owner = owner, sessionId = current.sessionId
             , generation = current.generation, query = query, contextToken = Maybe.map .token current.context, destination = destination
             , countGeneration = state.counts.generation, workspaceCountGeneration = state.workspaceCounts.generation }
+        laterFlatPage = case destination of
+            DiscoveryFlat _ _ _ offset -> offset > 0
+            _ -> False
     in
     if model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || filtersPending state || current.error /= Nothing then ( guarded, Cmd.none )
     else case current.context of
         Just _ -> sendDiscovery base guarded
-        Nothing -> case current.bootstrap of
+        -- Earlier pages came from a retired context; rebuild from page zero.
+        Nothing -> if laterFlatPage && current.recovery /= Nothing then restartResultsFromZero guarded else case current.bootstrap of
             Just bootstrapRequest ->
                 case ( bootstrapRequest.destination, destination ) of
                     ( DiscoveryCount _ _, DiscoveryCount _ _ ) -> pumpDiscovery guarded
@@ -422,8 +468,11 @@ workspaceTotalUsesVisibleDiscovery model =
         && List.any visible state.discovery.physical
 
 
-acceptDiscovery : ObservationDiscoveryRequest -> Result Http.Error Api.ObservationDiscoveryResponse -> Model -> ( Model, Cmd Msg )
-acceptDiscovery request result incoming =
+{-| `expired` marks a continuation resolved locally at its deadline; it was
+never sent. Each callback releases only its own physical and startup admission.
+-}
+acceptDiscovery : Bool -> ObservationDiscoveryRequest -> Result Http.Error Api.ObservationDiscoveryResponse -> Model -> ( Model, Cmd Msg )
+acceptDiscovery expired request result incoming =
     let
         state = incoming.observations
         current = state.discovery
@@ -444,30 +493,61 @@ acceptDiscovery request result incoming =
                 let tree = model.observations.tree in
                 ( updateObservation (\currentState -> { currentState | tree = { tree | physical = List.filter ((/=) treeRequest) tree.physical } }) model, Cmd.none )
             _ -> settleDiscoveryPage request (Err Http.NetworkError) model
-    else case result of
-        Err (Http.BadStatus 409) ->
-            case request.destination of
-                DiscoveryCount _ _ ->
-                    let reset = {discovery | context = Nothing, bootstrap = Nothing, generation = discovery.generation + 1, error = Nothing}
-                        pending counts = {counts | active = Nothing, current = False, pending = True, error = Nothing}
-                    in syncDiscoveryCounts {model | observations = {releasedState | discovery = reset, counts = pending releasedState.counts, workspaceCounts = pending releasedState.workspaceCounts, resultsStale = True}}
-                _ -> restartDiscoveryPage request discovery state model
-        Err error ->
-            let message = if error == Http.BadStatus 429 then "Search capacity is busy. Retry the current filters." else "Observation search failed. Retry the current filters."
-                failed = { discovery | bootstrap = Nothing, afterBootstrap = case request.destination of
-                    DiscoveryCount _ _ -> discovery.afterBootstrap
+    else
+    let
+        fail error message base =
+            let failed = { base | bootstrap = Nothing, afterBootstrap = case request.destination of
+                    DiscoveryCount _ _ -> base.afterBootstrap
                     _ -> Nothing
-                    , generation = if request.contextToken == Nothing then discovery.generation + 1 else discovery.generation, error = Just message, failedCount = case request.destination of
+                    , generation = if request.contextToken == Nothing then base.generation + 1 else base.generation, error = Just message, failedCount = case request.destination of
                     DiscoveryCount _ _ -> True
                     _ -> False }
                 settleCount counts = if counts.current then counts else { counts | pending = False, active = Nothing, error = Just "Observation search did not complete. Retry the current filters." }
-            in settleDiscoveryDestinations request discovery.afterBootstrap (Err error) { model | observations = { state | discovery = failed, counts = settleCount releasedState.counts, workspaceCounts = settleCount releasedState.workspaceCounts } }
+            in settleDiscoveryDestinations request base.afterBootstrap (Err error) { model | observations = { state | discovery = failed, counts = settleCount releasedState.counts, workspaceCounts = settleCount releasedState.workspaceCounts } }
+        -- A context renewed automatically must make progress before a server
+        -- rejection of it can renew again; local expiry is genuine aging.
+        recoverable = case request.contextToken of
+            Just token -> expired || (discovery.recovery |> Maybe.andThen .token) /= Just token
+            Nothing -> False
+    in
+    case result of
+        Err (Http.BadStatus 409) ->
+            if not recoverable then
+                let
+                    -- Pages read from the rejected context must rebuild from
+                    -- page zero after an explicit retry.
+                    marker = { generation = discovery.generation + 1, token = Nothing }
+                in
+                fail (Http.BadStatus 409) "Observation search expired and could not restart. Retry the current filters."
+                    { discovery | context = Nothing, expiry = Nothing
+                    , recovery = if request.contextToken == Nothing then Maybe.map (always marker) discovery.recovery else Just marker
+                    , generation = discovery.generation + (if request.contextToken == Nothing then 0 else 1) }
+            else
+            let renewed = { discovery | context = Nothing, expiry = Nothing, bootstrap = Nothing, generation = discovery.generation + 1, error = Nothing
+                    , recovery = Just { generation = discovery.generation + 1, token = Nothing } }
+            in
+            case request.destination of
+                DiscoveryCount _ _ ->
+                    let pending counts = {counts | active = Nothing, current = False, pending = True, error = Nothing}
+                    -- The renewed context cannot extend pages read from the old
+                    -- one, so the active view also rebuilds from page zero.
+                    in syncDiscoveryCounts {model | observations = {releasedState | discovery = renewed, counts = pending releasedState.counts, workspaceCounts = pending releasedState.workspaceCounts, resultsStale = True, refreshPending = releasedState.refreshPending || releasedState.requestMode /= ObservationMatchMode}}
+                _ -> restartDiscoveryPage request renewed state model
+        Err error ->
+            fail error (if error == Http.BadStatus 429 then "Search capacity is busy. Retry the current filters." else "Observation search failed. Retry the current filters.") discovery
         Ok response ->
             if List.length response.page.items > 50 || (response.page.tree |> Maybe.map (\tree -> List.length tree.items > 50) |> Maybe.withDefault False) || response.page.counts.workspaceId /= request.workspaceId || (request.contextToken /= Nothing && request.contextToken /= Just response.contextToken) then
-                acceptDiscovery request (Err (Http.BadBody "Discovery response did not match this workspace or context")) incoming
+                acceptDiscovery False request (Err (Http.BadBody "Discovery response did not match this workspace or context")) incoming
             else
                 let
-                    settled = { discovery | bootstrap = Nothing, afterBootstrap = Nothing, error = Nothing, context = Just { token = response.contextToken, expiresAt = response.expiresAt, retrieval = response.retrieval } }
+                    recovery = case ( request.contextToken, discovery.recovery ) of
+                        ( Nothing, Just renewal ) -> if renewal.generation == request.generation then Just { renewal | token = Just response.contextToken } else Nothing
+                        ( Just token, Just renewal ) -> if renewal.token == Just token then Nothing else discovery.recovery
+                        _ -> Nothing
+                    settled = { discovery | bootstrap = Nothing, afterBootstrap = Nothing, error = Nothing, recovery = recovery
+                        , expiry = if request.contextToken == Nothing then Nothing else discovery.expiry
+                        , context = Just { token = response.contextToken, expiresAt = response.expiresAt, retrieval = response.retrieval } }
+                    clock = if request.contextToken == Nothing then Task.perform (ObservationDiscoveryClock response.contextToken) Time.now else Cmd.none
                     scoped = state.counts
                     workspace = state.workspaceCounts
                     countOwner = Just { workspaceId = request.workspaceId, sessionEpoch = request.epoch, actor = countActor incoming, token = 0, generation = 0, fingerprint = "" }
@@ -475,14 +555,22 @@ acceptDiscovery request result incoming =
                     totals = response.page.counts
                     workspaceCounts = if request.workspaceCountGeneration /= workspace.generation then releasedState.workspaceCounts else { workspace | owner = countOwner, value = Just { totals | matchCount = totals.totalCount }, valueFingerprint = "workspace:" ++ request.workspaceId, settledFingerprint = "workspace:" ++ request.workspaceId, current = True, pending = False, error = Nothing, active = Nothing }
                     accepted = { model | observations = { releasedState | discovery = {settled | afterBootstrap = Nothing}, counts = counts, workspaceCounts = workspaceCounts } }
-                in case (request.destination, discovery.afterBootstrap) of
-                    (DiscoveryCount _ _, Just destination) -> requestDiscovery destination accepted
-                    _ -> settleDiscoveryDestinations request discovery.afterBootstrap (Ok response) accepted
+                    ( next, command ) = case (request.destination, discovery.afterBootstrap) of
+                        (DiscoveryCount _ _, Just destination) -> requestDiscovery destination accepted
+                        _ -> settleDiscoveryDestinations request discovery.afterBootstrap (Ok response) accepted
+                in ( next, Cmd.batch [ command, clock ] )
 
 
-restartDiscoveryPage request discovery state model =
+restartResultsFromZero : Model -> ( Model, Cmd Msg )
+restartResultsFromZero model =
+    refreshActiveResultsRaw (updateObservation (\state -> { state | loading = False, expectedOffset = Nothing, refreshPass = Nothing, refreshPending = False, refreshError = Nothing, failedRequest = Nothing }) model)
+
+
+{-| Rebuild the active view from page zero for a renewed context. Displayed
+results stay staged until the replacement pass completes.
+-}
+restartDiscoveryPage request retired state model =
     let
-        retired = { discovery | context = Nothing, bootstrap = Nothing, generation = discovery.generation + 1, error = Nothing }
         tree = state.tree
         reset = { state | discovery = retired, loading = False, facetLoading = False, refreshPass = Nothing, refreshPending = False, refreshError = Nothing, nextFilterToken = state.nextFilterToken + 1
             , requestGeneration = state.requestGeneration + 1, facetRequestGeneration = state.facetRequestGeneration + 1, tree = ObservationTree.retire ("discovery-restart-" ++ String.fromInt retired.generation) tree }
@@ -535,7 +623,7 @@ loadTreeTerminal subject offset model =
     case repositoryWorkspaceId model of
         Nothing -> (model, Cmd.none)
         Just workspaceId ->
-            if model.observations.discovery.context == Nothing || List.length model.observations.discovery.physical >= 4 || not (treeDemandAllowed subject.subject (Just subject.subjectKind) model) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (treeMode model.observations.requestMode) then (model, Cmd.none)
+            if model.observations.discovery.context == Nothing || discoveryPaused model || List.length model.observations.discovery.physical >= 4 || not (treeDemandAllowed subject.subject (Just subject.subjectKind) model) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (treeMode model.observations.requestMode) then (model, Cmd.none)
             else
                 let state = model.observations
                     owned = if state.tree.lifetime == treeLifetime model then state.tree else ObservationTree.retire (treeLifetime model) state.tree
@@ -731,7 +819,7 @@ loadTreeBranch prefix offset model =
     case repositoryWorkspaceId model of
         Nothing -> ( model, Cmd.none )
         Just workspaceId ->
-            if (prefix /= "" && model.observations.discovery.context == Nothing) || List.length model.observations.discovery.physical >= 4 || not (treeDemandAllowed prefix Nothing model) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (List.member model.observations.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then ( model, Cmd.none )
+            if ((prefix /= "" || (offset > 0 && model.observations.discovery.recovery /= Nothing)) && model.observations.discovery.context == Nothing) || discoveryPaused model || List.length model.observations.discovery.physical >= 4 || not (treeDemandAllowed prefix Nothing model) || model.auth.status /= AuthReady || not (Permissions.canReadCurrentWorkspace model) || model.workspaceAdmin.authorizationPending /= Nothing || filtersPending model.observations || not (List.member model.observations.requestMode [ ObservationFacetMode, ObservationExactSubjectMode ]) then ( model, Cmd.none )
             else
                 let
                     state = model.observations
@@ -943,7 +1031,7 @@ syncDiscoveryCounts incoming =
         changedOwner = old.owner /= "" && old.owner /= treeOwner incoming
         retire counts = { counts | owner = Nothing, active = Nothing, pending = True, current = False, error = Nothing }
         state = if changedOwner then
-            { previous | discovery = {old | owner = treeOwner incoming, query = Just (discoveryQuery (querySnapshot previous)), context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, generation = old.generation + 1, error = Nothing, failedCount = False}
+            { previous | discovery = {old | owner = treeOwner incoming, query = Just (discoveryQuery (querySnapshot previous)), context = Nothing, bootstrap = Nothing, afterBootstrap = Nothing, generation = old.generation + 1, error = Nothing, failedCount = False, recovery = Nothing}
                 , counts = retire previous.counts, workspaceCounts = retire previous.workspaceCounts }
             else previous
         model = { incoming | observations = state }
@@ -1076,7 +1164,7 @@ retireSessionState previous =
         , nextLinkToken = previous.nextLinkToken + 1
         , nextPreferenceRequest = previous.nextPreferenceRequest + 1
         , nextFilterToken = previous.nextFilterToken + 1
-        , discovery = let discovery = previous.discovery in { discovery | context = Nothing, bootstrap = Nothing, owner = "", query = Nothing, generation = discovery.generation + 1, error = Nothing }
+        , discovery = let discovery = previous.discovery in { discovery | context = Nothing, bootstrap = Nothing, owner = "", query = Nothing, generation = discovery.generation + 1, error = Nothing, recovery = Nothing }
         , tree = let fresh = ObservationTree.init in { fresh | physical = previous.tree.physical, nextToken = previous.tree.nextToken + 1 }
     }
 
@@ -1223,7 +1311,11 @@ updateRaw msg model =
     case msg of
         ObservationDiscoveryRuntimeReceived payload -> acceptDiscoveryRuntime payload model
 
-        GotObservationDiscovery request result -> acceptDiscovery request result model
+        GotObservationDiscovery request result -> acceptDiscovery False request result model
+
+        ObservationDiscoveryExpired request -> acceptDiscovery True request (Err (Http.BadStatus 409)) model
+
+        ObservationDiscoveryClock token now -> acceptDiscoveryClock token now model
 
         GotWorkspaceObservationCounts guard result ->
             acceptCounts True guard result model
@@ -1268,6 +1360,9 @@ updateRaw msg model =
 
         LoadObservationTreePage prefix kind ->
             let state = model.observations in
+            -- A rejected context cannot continue a page; rebuild from the root.
+            if discoveryPaused model && state.discovery.context == Nothing && not (filtersPending state) then startTree True (clearDiscoveryError model)
+            else
             case kind of
                 Nothing ->
                     let branch = Dict.get prefix state.tree.branches
@@ -2511,6 +2606,10 @@ refreshActiveResultsRaw model =
     in
     if model.activeTab /= ObservationsTab && state.requestMode == ObservationFlatMode then
         (updateObservation (\current -> {current | resultsStale = True, refreshPending = True, refreshPass = Maybe.map (\pass -> {pass | invalidated = True}) current.refreshPass}) model, Cmd.none)
+    else if state.requestMode /= ObservationMatchMode && state.refreshPass == Nothing && discoveryPaused model then
+        -- Keep the demand for an explicit retry instead of starting a pass
+        -- whose discovery read is paused.
+        (updateObservation (\current -> {current | resultsStale = True, refreshPending = True}) model, Cmd.none)
     else if treeMode state.requestMode && state.filterDebounce == Nothing && filterValidationError state == Nothing then
         if List.any (\request -> request.lifetime == state.tree.lifetime) state.tree.physical then
             (updateObservation (\current -> {current | refreshPending = True}) model, Cmd.none)

@@ -113,6 +113,23 @@ export function discoverySelection(h, receipt) {
   return {...filters, ...(payload.terminal || {}), prefix:payload.prefix || '', offset:payload.offset, limit:payload.limit, view:payload.view}
 }
 
+// Discovery lifetimes use the browser's real wall clock (faked timers perturb
+// change-stream delivery). shortly() makes the next contexts expire locally
+// three seconds after creation, past the client's five-second renewal margin;
+// lapse() waits for that deadline and restores long lifetimes.
+export function controlDiscoveryLifetime(h) {
+  let lifetime = 3600000
+  h.discovery.configure({ expiresAt: () => new Date(Date.now() + lifetime).toISOString() })
+  return {
+    shortly() { lifetime = 8000 },
+    async lapse(response) {
+      lifetime = 3600000
+      const deadline = Date.parse(response.expires_at) - 5000
+      await h.bounded((async () => { while (Date.now() <= deadline + 100) await h.page.waitForTimeout(25) })(), 10000, 'Discovery context lapse')
+    }
+  }
+}
+
 // Controlled route middleware owns a real discovery request/envelope. Reserve
 // its generation before any callback delay; fallback sends that prepared reply.
 export async function interceptDiscovery(h, handler) {

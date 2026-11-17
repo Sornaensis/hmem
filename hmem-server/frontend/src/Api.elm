@@ -61,6 +61,7 @@ module Api exposing
     , observationDiscoveryBody
     , observationDiscoveryDecoder
     , fetchObservationDiscovery
+    , fetchObservationDiscoveryBefore
     , ObservationCountQuery
     , observationCountsDecoder
     , fetchObservationCounts
@@ -683,6 +684,47 @@ observationDiscoveryDecoder =
 fetchObservationDiscovery : String -> ObservationDiscoveryQuery -> (Result Http.Error ObservationDiscoveryResponse -> msg) -> Cmd msg
 fetchObservationDiscovery apiUrl query toMsg =
     Http.post { url = apiUrl ++ "/api/v1/observations/discovery", body = Http.jsonBody (observationDiscoveryBody query), expect = Http.expectJson toMsg observationDiscoveryDecoder }
+
+
+{-| Read the clock immediately before transmitting a continuation. At or after
+the local deadline the request resolves to Nothing without sending its token.
+-}
+fetchObservationDiscoveryBefore : Maybe Int -> String -> ObservationDiscoveryQuery -> (Maybe (Result Http.Error ObservationDiscoveryResponse) -> msg) -> Cmd msg
+fetchObservationDiscoveryBefore deadline apiUrl query toMsg =
+    case deadline of
+        Nothing ->
+            fetchObservationDiscovery apiUrl query (Just >> toMsg)
+
+        Just millis ->
+            Time.now
+                |> Task.andThen
+                    (\now ->
+                        if Time.posixToMillis now >= millis then
+                            Task.succeed Nothing
+
+                        else
+                            Http.task
+                                { method = "POST"
+                                , headers = []
+                                , url = apiUrl ++ "/api/v1/observations/discovery"
+                                , body = Http.jsonBody (observationDiscoveryBody query)
+                                , resolver = Http.stringResolver (resolveJson observationDiscoveryDecoder)
+                                , timeout = Nothing
+                                }
+                                |> Task.map (Ok >> Just)
+                                |> Task.onError (Err >> Just >> Task.succeed)
+                    )
+                |> Task.perform toMsg
+
+
+resolveJson : Decoder a -> Http.Response String -> Result Http.Error a
+resolveJson decoder response =
+    case response of
+        Http.BadUrl_ url -> Err (Http.BadUrl url)
+        Http.Timeout_ -> Err Http.Timeout
+        Http.NetworkError_ -> Err Http.NetworkError
+        Http.BadStatus_ metadata _ -> Err (Http.BadStatus metadata.statusCode)
+        Http.GoodStatus_ _ body -> D.decodeString decoder body |> Result.mapError (D.errorToString >> Http.BadBody)
 
 
 type alias ObservationSubjectTreeNode =

@@ -54,11 +54,11 @@ const CLASSES = {
 function classifyStatements(rows) {
   const classes = {}
   for (const [name, re] of Object.entries(CLASSES)) {
-    const hit = rows.filter(r => re.test(r.query))
+    const hit = rows.filter(r => re.test(r.query ?? ''))
     classes[name] = { statements: hit.length, calls: hit.reduce((a, r) => a + Number(r.calls), 0), total_ms: r1(hit.reduce((a, r) => a + Number(r.total_ms), 0)) }
   }
   return { classes, total_calls: rows.reduce((a, r) => a + Number(r.calls), 0),
-    top: [...rows].sort((a, b) => b.calls - a.calls).slice(0, 8).map(r => ({ queryid: r.queryid ?? null, calls: Number(r.calls), total_ms: Number(r.total_ms), query: r.query.slice(0, 160) })) }
+    top: [...rows].sort((a, b) => b.calls - a.calls).slice(0, 8).map(r => ({ queryid: r.queryid ?? null, calls: Number(r.calls), total_ms: Number(r.total_ms), query: (r.query ?? '').slice(0, 160) })) }
 }
 
 // Health deltas between two /api/v1/health bodies (null when a GET failed).
@@ -94,6 +94,8 @@ function selfTest() {
   check(s.top[1].queryid === '-9007199254740993' && s.top[1].query === long.slice(0, 160), 'queryid kept as text, query shortened')
   const prefix = classifyStatements(rows.map(r => ({ ...r, query: r.query.slice(0, 160) })))
   check(prefix.classes.outbox_scan.calls === 0 && prefix.classes.authorization.calls === 0, 'a 160-character prefix misses both markers')
+  const hidden = classifyStatements([...rows, { queryid: '4', query: null, calls: 9, total_ms: 1 }])
+  check(hidden.total_calls === 24 && hidden.top[0].queryid === '4' && hidden.top[0].query === '' && hidden.classes.outbox_scan.calls === 5, 'null query text tolerated')
   const pool = (active, max, n) => ({ active_connections: active, max_connections: max, checkout: { checkouts: 100 * n, unattributed: 10 * n, capacity_waits: n,
     wait_total_ms: 1.25 * n, hold_total_ms: 50.5 * n, connects: n, wait_max_ms: 9, wait_buckets: [] } })
   const admission = (n, inFlight) => ({ concurrency: 15, heavy_concurrency: 4, queue_limit: 64, queue_timeout_ms: 5000, in_flight: inFlight, heavy_in_flight: 0,
@@ -518,10 +520,10 @@ async function run() {
     stuck.late_checkpoint_ms = lateCheckpoint ? r1(lateCheckpoint.at - lateStart) : null
     await holderDone; await writer; await sampling
     await sleep(1500)
+    stuck.lock_waiters_after_release = waiters()
     Object.assign(stuck, healthDelta(stuckHealth, await health()))
     stuck.release_ms = r1(released - sStart)
     stuck.lock_waiters = { max: Math.max(0, ...waiterSamples.map(x => x.n)), last_seen_ms: r1(Math.max(0, ...waiterSamples.filter(x => x.n > 0).map(x => x.at - sStart))) }
-    stuck.lock_waiters_after_release = waiters()
     // Per write: the slowest healthy observer's commit-to-frame time.
     const perWrite = stuckWrites.filter(w => w.status === 200).map(w => {
       const arrivals = hot.map(o => o.frames.find(f => f.rid === w.rid)?.at)

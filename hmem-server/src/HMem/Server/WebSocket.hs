@@ -2,6 +2,9 @@ module HMem.Server.WebSocket
   ( -- * State
     WSState
   , newWSState
+  , newWSStateWithDeliveryPool
+  , deliveryPoolOf
+  , deliveryPoolFor
   , withNativeWebSocketSettings
   , runPlainWithNativeWebSockets
   , beginWebSocketShutdown
@@ -49,7 +52,7 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.Int (Int64)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.List (find, nub)
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -101,6 +104,9 @@ data WSState = WSState
   , activityConnections :: !(TVar (Map UUID ActivityClient))
   , nativeTransport :: !NativeTransport
   , telemetry :: !WebSocketTelemetry
+  -- | The separate pool for leased delivery work and the dispatcher, or
+  -- Nothing to share the caller's main pool (tests and the harness only).
+  , deliveryPool :: !(Maybe (Pool Hasql.Connection))
   }
 
 data WSClient = WSClient
@@ -182,13 +188,33 @@ data ActivityClient = ActivityClient
   , activityRetired :: !(TVar Bool)
   }
 
--- | Create a fresh (empty) WebSocket state.
+-- | Create a fresh (empty) WebSocket state whose delivery shares the main
+-- pool passed to the middleware and dispatcher.
 newWSState :: IO WSState
-newWSState = do
+newWSState = newWSStateUsing Nothing
+
+-- | Create a fresh (empty) WebSocket state whose leased delivery turns and
+-- change-stream dispatcher use the given pool. Pre-admission authorization
+-- stays on the main pool. The caller destroys this pool only after the
+-- dispatcher has stopped and the WebSocket drain was clean.
+newWSStateWithDeliveryPool :: Pool Hasql.Connection -> IO WSState
+newWSStateWithDeliveryPool = newWSStateUsing . Just
+
+newWSStateUsing :: Maybe (Pool Hasql.Connection) -> IO WSState
+newWSStateUsing delivery = do
   transport <- newNativeTransport
   WSState <$> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty
     <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> pure transport
-    <*> nativeTelemetry transport
+    <*> nativeTelemetry transport <*> pure delivery
+
+-- | The separate delivery pool, if this state has one.
+deliveryPoolOf :: WSState -> Maybe (Pool Hasql.Connection)
+deliveryPoolOf st = st.deliveryPool
+
+-- | The pool for delivery work: the state's delivery pool, otherwise the
+-- given main pool.
+deliveryPoolFor :: Pool Hasql.Connection -> WSState -> Pool Hasql.Connection
+deliveryPoolFor pool st = fromMaybe pool st.deliveryPool
 
 withNativeWebSocketSettings :: WSState -> Settings -> (Settings -> IO a) -> IO a
 withNativeWebSocketSettings st = withNativeTransportSettings st.nativeTransport
@@ -298,7 +324,7 @@ removeConnection st connId =
 -- fed only by committed durable outbox rows; REST handlers never call it.
 -- Canonical ticket connections are intentionally absent from this map.
 broadcastLegacyOutbox :: Pool Hasql.Connection -> WSState -> OutboxRecord -> IO ()
-broadcastLegacyOutbox pool st record = legacyOutboxActions pool st [record] >>= runDeliveryBatch
+broadcastLegacyOutbox pool st record = legacyOutboxActions (deliveryPoolFor pool st) st [record] >>= runDeliveryBatch
 
 legacyOutboxActions :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO [IO ()]
 legacyOutboxActions pool st records = do
@@ -629,6 +655,9 @@ wsApp authCfg pool st started pending = do
           Nothing -> acceptLegacyTicket ticketText
     Nothing -> classify TicketNone >> acceptWithoutTicket
     where
+    -- Pre-admission authorization uses the main pool; leased delivery turns
+    -- use the delivery pool.
+    delivery = deliveryPoolFor pool st
     rejectUnauthorized = rejectWith UpgradeRejectedUnauthorized (WS.rejectRequest pending "Unauthorized")
 
     acceptLegacyTicket ticketText
@@ -683,7 +712,7 @@ wsApp authCfg pool st started pending = do
           (uncurry (endCanonicalConnection st)) $ \(connId, client) -> do
             let serve = do
                   withLiveCanonicalClient st connId client $ \turn ->
-                    advanceCanonicalClientUnlocked pool st connId client (deliveryShouldYield turn)
+                    advanceCanonicalClientUnlocked delivery st connId client (deliveryShouldYield turn)
                   WS.withPingThread conn 30 (pure ()) $
                     withAsync (expireCanonicalConnection st connId client) $ \_ ->
                       sinkMessages conn
@@ -714,7 +743,7 @@ wsApp authCfg pool st started pending = do
             withAsync (expireActivity conn client) $ \_ -> do
               withLiveActivityClient client $ \_ -> do
                 STM.atomically $ modifyTVar' st.activityConnections (Map.insert identifier client)
-                live <- activityMaySend pool client
+                live <- activityMaySend delivery client
                 when live $ sendFrameUnlocked conn (object ["type" .= ("session_activity_ready" :: Text),"schema_version" .= (1::Int)])
               WS.withPingThread conn 30 (pure ()) (sinkMessages conn)
 
@@ -846,7 +875,8 @@ replaceInvalidations value _ = value
 -- Each client advances from its own opaque token, never from dispatcher
 -- process memory, eliminating the fetch/subscribe race on reconnect.
 dispatchCanonicalOutbox :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO ()
-dispatchCanonicalOutbox pool st records = do
+dispatchCanonicalOutbox mainPool st records = do
+  let pool = deliveryPoolFor mainPool st
   activity <- activityOutboxActions pool st records
   canonical <- canonicalOutboxActions pool st records
   runDeliveryBatch (activity <> canonical)
@@ -854,7 +884,8 @@ dispatchCanonicalOutbox pool st records = do
 -- Each population is disjoint: one physical owner receives one action for
 -- this shared bounded batch, rather than a new turn for every scope/record.
 dispatchOutboxBatch :: Pool Hasql.Connection -> WSState -> [OutboxRecord] -> IO ()
-dispatchOutboxBatch pool st records = do
+dispatchOutboxBatch mainPool st records = do
+  let pool = deliveryPoolFor mainPool st
   legacy <- legacyOutboxActions pool st records
   activity <- activityOutboxActions pool st records
   canonical <- canonicalOutboxActions pool st records
@@ -1188,7 +1219,8 @@ targetedWorkspaceUsers record = case jsonText "workspace_id" record.outboxEnvelo
       pure (workspace, userId)
 
 reauthorizeCanonicalConnections :: Pool Hasql.Connection -> WSState -> IO ()
-reauthorizeCanonicalConnections pool st = do
+reauthorizeCanonicalConnections mainPool st = do
+  let pool = deliveryPoolFor mainPool st
   activity <- Map.elems <$> readTVarIO st.activityConnections
   clients <- Map.toList <$> readTVarIO st.canonicalConnections
   let activityChecks =

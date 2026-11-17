@@ -16,6 +16,7 @@ module HMem.Server.TestHarness
   , withDeployedSandboxApp
   , withDeployedSandboxAppEnv
   , withDeployedSandboxAppContext
+  , withDeployedSandboxAppPools
   , withDeployedSandboxAppConfig
   , withDeployedSandboxAppLogged
   , withDeployedSandboxCrossOriginAppContext
@@ -57,7 +58,8 @@ import HMem.Types (Observation(..), ObservationUpdateResult(..), ReviewedObserva
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkApp)
 import HMem.Server.AuthTokens qualified as AuthTokens
-import HMem.Server.WebSocket (WSState, newWSState)
+import HMem.Server.WebSocket (WSState, newWSState, newWSStateWithDeliveryPool)
+import Data.Pool (destroyAllResources)
 
 data LocalSandboxApp = LocalSandboxApp
   { localEnv :: !TestEnv
@@ -268,6 +270,35 @@ withDeployedSandboxAppLogged requestLogger mkCfg action = withClearedAmbientSand
       , deployedApplication = app
       , deployedWSState = wsState
       }
+
+-- | The deployed sandbox served by a main pool of the given size and, when
+-- supplied, a separate delivery pool of the given size; Nothing shares the
+-- main pool as 'newWSState' does. The context's environment pool is the main
+-- pool. Pools are destroyed after the action, so it must stop any dispatcher
+-- and drain its listener first.
+withDeployedSandboxAppPools :: Int -> Maybe Int -> (DeployedSandboxApp -> IO a) -> IO a
+withDeployedSandboxAppPools mainSize deliverySize action = withClearedAmbientSandboxProfileEnv $
+  withTestEnv $ \baseEnv ->
+    bracket (DBPool.createPool baseEnv.testDb.testDbConnStr mainSize 5.0 30000) destroyAllResources $ \mainPool ->
+      withDelivery baseEnv deliverySize $ \delivery -> do
+        let env = baseEnv { pool = mainPool }
+            cfg = mkDeployedSandboxConfig env
+        tracker <- newAccessTracker mainPool 3600
+        wsState <- maybe newWSState newWSStateWithDeliveryPool delivery
+        if env.testDb.testDbUnsafeExternal
+          then fail "Deployed sandbox profile refuses unsafe external DB mode"
+          else pure ()
+        app <- mkApp id cfg.auth cfg.cors cfg.rateLimit mainPool tracker wsState cfg.web.webStaticDir True
+        action DeployedSandboxApp
+          { deployedEnv = env
+          , deployedConfig = cfg
+          , deployedApplication = app
+          , deployedWSState = wsState
+          }
+  where
+    withDelivery _ Nothing use = use Nothing
+    withDelivery env (Just size) use =
+      bracket (DBPool.createDeliveryPool env.testDb.testDbConnStr size 5.0 30000) DBPool.destroyDeliveryPool (use . Just)
 
 createDeployedSandboxUser :: TestEnv -> Bool -> Bool -> IO UUID
 createDeployedSandboxUser env = createDeployedSandboxUserWithMaybeSubject env Nothing

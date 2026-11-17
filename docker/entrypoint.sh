@@ -121,7 +121,8 @@ apply_defaults() {
   default_env HMEM_DB_NAME "hmem"
   default_env HMEM_DB_USER "hmem"
   default_env HMEM_DB_SSLMODE "disable"
-  default_env HMEM_POOL_SIZE "10"
+  default_env HMEM_POOL_SIZE "15"
+  default_env HMEM_POOL_DELIVERY_SIZE "10"
   default_env HMEM_POOL_IDLE_TIMEOUT "60"
   default_env HMEM_POOL_STATEMENT_TIMEOUT_MS "30000"
   default_env HMEM_LOG_LEVEL "info"
@@ -338,6 +339,7 @@ validate_common_config() {
   HMEM_SERVER_PORT=$(int_env HMEM_SERVER_PORT 1 65535); export HMEM_SERVER_PORT
   HMEM_DB_PORT=$(int_env HMEM_DB_PORT 1 65535); export HMEM_DB_PORT
   HMEM_POOL_SIZE=$(int_env HMEM_POOL_SIZE 1 1000); export HMEM_POOL_SIZE
+  HMEM_POOL_DELIVERY_SIZE=$(int_env HMEM_POOL_DELIVERY_SIZE 5 1000); export HMEM_POOL_DELIVERY_SIZE
   HMEM_POOL_IDLE_TIMEOUT=$(decimal_env HMEM_POOL_IDLE_TIMEOUT 1 3600); export HMEM_POOL_IDLE_TIMEOUT
   HMEM_POOL_STATEMENT_TIMEOUT_MS=$(int_env HMEM_POOL_STATEMENT_TIMEOUT_MS 1000 300000); export HMEM_POOL_STATEMENT_TIMEOUT_MS
   HMEM_LOG_MAX_SIZE_MB=$(int_env HMEM_LOG_MAX_SIZE_MB 1 10000); export HMEM_LOG_MAX_SIZE_MB
@@ -634,6 +636,7 @@ generate_config() {
 
     printf 'pool:\n'
     printf '  size: %s\n' "$HMEM_POOL_SIZE"
+    printf '  delivery_size: %s\n' "$HMEM_POOL_DELIVERY_SIZE"
     printf '  idle_timeout: %s\n' "$HMEM_POOL_IDLE_TIMEOUT"
     printf '  statement_timeout_ms: %s\n' "$HMEM_POOL_STATEMENT_TIMEOUT_MS"
 

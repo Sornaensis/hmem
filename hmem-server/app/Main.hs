@@ -53,7 +53,7 @@ import HMem.Server.Embedding.Worker
 import HMem.Server.LogRotation (preRotateLogFileIfNeeded)
 import HMem.Server.Logging (newLogger, parseLogLevel, logInfo, logWarn, jsonRequestLogger)
 import HMem.Server.Static (resolveStaticDir)
-import HMem.Server.WebSocket (newWSState, runPlainWithNativeWebSockets, withNativeWebSocketSettings, beginWebSocketShutdown, awaitWebSocketDrain, attachWebSocketTelemetryLog, detachWebSocketTelemetryLog)
+import HMem.Server.WebSocket (newWSState, newWSStateWithDeliveryPool, runPlainWithNativeWebSockets, withNativeWebSocketSettings, beginWebSocketShutdown, awaitWebSocketDrain, attachWebSocketTelemetryLog, detachWebSocketTelemetryLog)
 
 ------------------------------------------------------------------------
 -- CLI
@@ -63,6 +63,7 @@ data Opts = Opts
   { optPort    :: Maybe Int
   , optDbConn  :: Maybe String
   , optPool    :: Maybe Int
+  , optDeliveryPool :: Maybe Int
   , optTlsCert :: Maybe FilePath
   , optTlsKey  :: Maybe FilePath
   , optDev     :: Bool
@@ -82,10 +83,15 @@ optsParser = Opts
      <> metavar "CONNSTR"
      <> help "PostgreSQL connection string (default: from config)"
       ))
-  <*> optional (option auto
+  <*> optional (option (boundedInt 1 1000)
       ( long "pool-size"
      <> metavar "N"
-     <> help "Maximum database connections (default: from config or 10)"
+     <> help "Maximum main database connections, 1..1000 (default: from config or 15)"
+      ))
+  <*> optional (option (boundedInt 5 1000)
+      ( long "delivery-pool-size"
+     <> metavar "N"
+     <> help "Maximum change-stream delivery connections, 5..1000 (default: from config or 10)"
       ))
   <*> optional (strOption
       ( long "tls-cert"
@@ -101,6 +107,11 @@ optsParser = Opts
       ( long "dev"
      <> help "Dev mode: ephemeral PostgreSQL with seed data, logs to stderr"
       )
+
+boundedInt :: Int -> Int -> ReadM Int
+boundedInt lo hi = eitherReader $ \raw -> case reads raw of
+  [(parsed, "")] | parsed >= lo && parsed <= hi -> Right parsed
+  _ -> Left ("expected an integer in " <> show lo <> ".." <> show hi)
 
 ------------------------------------------------------------------------
 -- Main
@@ -300,13 +311,16 @@ runNormalMode opts = do
   let port    = fromMaybe cfg.server.port opts.optPort
       connStr = maybe (Config.connectionString cfg.database) T.pack opts.optDbConn
       poolSz  = fromMaybe cfg.pool.size opts.optPool
+      deliverySz = fromMaybe cfg.pool.deliverySize opts.optDeliveryPool
 
   pool <- Pool.createPool connStr poolSz cfg.pool.idleTimeout cfg.pool.statementTimeoutMs
   tracker <- newAccessTracker pool 5  -- flush access counts every 5 seconds
   pgvec <- Pool.checkPgvector pool
 
-  -- WebSocket state
-  wsState <- newWSState
+  -- WebSocket state. Change-stream delivery has its own single-stripe pool,
+  -- so a catch-up blocked in PostgreSQL cannot starve other delivery.
+  deliveryPool <- Pool.createDeliveryPool connStr deliverySz cfg.pool.idleTimeout cfg.pool.statementTimeoutMs
+  wsState <- newWSStateWithDeliveryPool deliveryPool
   streamWorker <- startChangeStreamWorker pool cfg.changeStream wsState
 
   -- Resolve static file directory for the web frontend
@@ -341,8 +355,10 @@ runNormalMode opts = do
         awaitWebSocketDrain wsState 5000000
         flushNow pool tracker
           `catch` \(_ :: SomeException) -> logWarn logger "failed to flush access tracker"
+        -- Reached only after the dispatcher stopped and the drain was clean.
         runAllReleases
           [ destroyAllResources pool
+          , Pool.destroyDeliveryPool deliveryPool
           , detachWebSocketTelemetryLog wsState `finally` cleanupLog
           ]
 

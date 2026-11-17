@@ -1,8 +1,9 @@
 {-# LANGUAGE BangPatterns #-}
 
 -- | Attribution of database pool and optional provider time to requests, and
--- process-wide pool checkout counters with fixed wait buckets. Contains no
--- identifiers. See docs/reference/request-performance.md.
+-- pool checkout counters with fixed wait buckets: one process-wide set for the
+-- main pools and a separate set per delivery pool. Contains no identifiers.
+-- See docs/reference/request-performance.md.
 module HMem.DB.RequestTiming
   ( -- * Per-request accumulation
     RequestTiming(..)
@@ -18,6 +19,14 @@ module HMem.DB.RequestTiming
   , connectCount
   , recordCheckout
   , recordHold
+  , CheckoutCounters
+  , mainCheckoutCounters
+  , newCheckoutCounters
+  , readCheckoutCounters
+  , recordConnectOn
+  , connectCountOn
+  , recordCheckoutOn
+  , recordHoldOn
     -- * Process-wide checkout counters
   , PoolCheckoutMetrics(..)
   , getPoolCheckoutMetrics
@@ -105,7 +114,8 @@ timeProviderCall action = do
 -- Process-wide checkout counters
 ------------------------------------------------------------------------
 
--- | Cumulative since process start; all pools in the process share them.
+-- | Cumulative since process start. The main pools in a process share one
+-- set ('getPoolCheckoutMetrics'); each delivery pool has its own.
 data PoolCheckoutMetrics = PoolCheckoutMetrics
   { checkouts             :: !Word64
   , unattributedCheckouts :: !Word64  -- ^ Checkouts on threads without a request timer.
@@ -134,33 +144,55 @@ capacityWaitThresholdNs = 1000000
 emptyMetrics :: PoolCheckoutMetrics
 emptyMetrics = PoolCheckoutMetrics 0 0 0 0 0 0 0 0 (0 <$ (0 : checkoutWaitBoundsNs))
 
-{-# NOINLINE metricsRef #-}
-metricsRef :: IORef PoolCheckoutMetrics
-metricsRef = unsafePerformIO (newIORef emptyMetrics)
+-- | One set of cumulative checkout counters.
+newtype CheckoutCounters = CheckoutCounters (IORef PoolCheckoutMetrics)
+
+-- | The process-wide counters shared by the main pools.
+{-# NOINLINE mainCheckoutCounters #-}
+mainCheckoutCounters :: CheckoutCounters
+mainCheckoutCounters = unsafePerformIO (CheckoutCounters <$> newIORef emptyMetrics)
+
+newCheckoutCounters :: IO CheckoutCounters
+newCheckoutCounters = CheckoutCounters <$> newIORef emptyMetrics
+
+readCheckoutCounters :: CheckoutCounters -> IO PoolCheckoutMetrics
+readCheckoutCounters (CheckoutCounters ref) = readIORef ref
 
 getPoolCheckoutMetrics :: IO PoolCheckoutMetrics
-getPoolCheckoutMetrics = readIORef metricsRef
+getPoolCheckoutMetrics = readCheckoutCounters mainCheckoutCounters
 
 timerConnectNs :: Maybe RequestTimer -> IO Word64
 timerConnectNs = maybe (pure 0) (fmap (.dbConnectNs) . readRequestTimer)
 
--- | Record a new connection. Pool acquisition runs on the requesting thread.
+-- | Record a new main-pool connection. Pool acquisition runs on the
+-- requesting thread.
 recordConnect :: Word64 -> IO ()
 recordConnect ns = do
   timer <- currentRequestTimer
-  atomicModifyIORef' metricsRef $ \m -> (m { connects = m.connects + 1, connectTotalNs = m.connectTotalNs + ns }, ())
+  recordConnectOn mainCheckoutCounters timer ns
+
+-- | Record a new connection in the given counters and, if any, timer.
+recordConnectOn :: CheckoutCounters -> Maybe RequestTimer -> Word64 -> IO ()
+recordConnectOn (CheckoutCounters ref) timer ns = do
+  atomicModifyIORef' ref $ \m -> (m { connects = m.connects + 1, connectTotalNs = m.connectTotalNs + ns }, ())
   addTiming timer $ \t -> t { dbConnectNs = t.dbConnectNs + ns }
 
 connectCount :: IO Word64
-connectCount = (.connects) <$> readIORef metricsRef
+connectCount = connectCountOn mainCheckoutCounters
 
--- | Record a completed checkout: its wait, the part spent connecting for this
--- request, and whether it is a capacity-wait candidate.
+connectCountOn :: CheckoutCounters -> IO Word64
+connectCountOn counters = (.connects) <$> readCheckoutCounters counters
+
+-- | Record a completed main-pool checkout: its wait, the part spent
+-- connecting for this request, and whether it is a capacity-wait candidate.
 recordCheckout :: Maybe RequestTimer -> Word64 -> Word64 -> Bool -> IO ()
-recordCheckout timer waitNs connectNs belowCapacity = do
+recordCheckout = recordCheckoutOn mainCheckoutCounters
+
+recordCheckoutOn :: CheckoutCounters -> Maybe RequestTimer -> Word64 -> Word64 -> Bool -> IO ()
+recordCheckoutOn (CheckoutCounters ref) timer waitNs connectNs belowCapacity = do
   let queued = waitNs - min waitNs connectNs
       capacity = belowCapacity && queued >= capacityWaitThresholdNs
-  atomicModifyIORef' metricsRef $ \m ->
+  atomicModifyIORef' ref $ \m ->
     ( m { checkouts = m.checkouts + 1
         , unattributedCheckouts = m.unattributedCheckouts + maybe 1 (const 0) timer
         , capacityWaits = m.capacityWaits + if capacity then 1 else 0
@@ -172,8 +204,11 @@ recordCheckout timer waitNs connectNs belowCapacity = do
   addTiming timer $ \t -> t { dbCheckouts = t.dbCheckouts + 1, dbWaitNs = t.dbWaitNs + waitNs }
 
 recordHold :: Maybe RequestTimer -> Word64 -> IO ()
-recordHold timer holdNs = do
-  atomicModifyIORef' metricsRef $ \m -> (m { holdTotalNs = m.holdTotalNs + holdNs }, ())
+recordHold = recordHoldOn mainCheckoutCounters
+
+recordHoldOn :: CheckoutCounters -> Maybe RequestTimer -> Word64 -> IO ()
+recordHoldOn (CheckoutCounters ref) timer holdNs = do
+  atomicModifyIORef' ref $ \m -> (m { holdTotalNs = m.holdTotalNs + holdNs }, ())
   addTiming timer $ \t -> t { dbHoldNs = t.dbHoldNs + holdNs }
 
 -- Strict in the whole spine so repeated updates cannot accumulate thunks.

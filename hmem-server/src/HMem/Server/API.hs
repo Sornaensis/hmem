@@ -74,7 +74,7 @@ import HMem.DB.Auth qualified as Auth
 import HMem.DB.Observation qualified as Observation
 import HMem.DB.Embedding qualified as Embedding
 import HMem.DB.Overview qualified as Overview
-import HMem.DB.Pool (DBException(..), PoolMetrics(..), getPoolMetrics, runSession)
+import HMem.DB.Pool (DBException(..), PoolMetrics(..), getPoolCheckoutMetricsFor, getPoolMetrics, getPoolMetricsFor, runSession)
 import HMem.DB.RequestTiming (PoolCheckoutMetrics(..), checkoutWaitBoundsNs, getPoolCheckoutMetrics)
 import HMem.DB.Project qualified as Project
 import HMem.DB.RequestContext (Principal(..), EffectiveActor(..), PrincipalAuthority(..), actorTypeToText, currentPrincipal, currentEffectiveActor, currentRequestContext, isBotRequest, withWorkspaceIdContext)
@@ -912,7 +912,7 @@ serverWithPrefixProofs = serverWithSessionReaders Nothing
 
 serverWithSessionReaders :: Maybe AgentSessions.ReaderCache -> Maybe Prefix.PrefixRegistry -> Config.AuthConfig -> Config.ChangeStreamConfig -> Maybe Discovery.ObservationDiscovery -> Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Bool -> Server HMemAPI
 serverWithSessionReaders readers prefixes authConfig changeStreamConfig discovery pool tracker wsState _ =
-       health pool tracker
+       health pool tracker wsState
   :<|> session authConfig pool
   :<|> sessionActivity pool
   :<|> activityTicket pool wsState
@@ -1023,18 +1023,24 @@ sessionWorkspace pool principal isSuperadmin workspaceId = do
                                , canRead = can Auth.WorkspaceRoleRead, canEdit = can Auth.WorkspaceRoleEdit
                                , canAdmin = can Auth.WorkspaceRoleAdmin }
 
-health :: Pool Hasql.Connection -> AccessTracker -> Handler Value
-health pool tracker = do
+health :: Pool Hasql.Connection -> AccessTracker -> WS.WSState -> Handler Value
+health pool tracker wsState = do
   database <- liftIO $ tryWithResource pool (\connection -> Session.run (Session.sql "SELECT 1") connection)
   buffered <- liftIO $ bufferSize tracker
   metrics <- liftIO getPoolMetrics
   checkout <- liftIO getPoolCheckoutMetrics
+  delivery <- liftIO $ forM (WS.deliveryPoolOf wsState) $ \deliveryPool ->
+    poolJson <$> getPoolMetricsFor deliveryPool <*> getPoolCheckoutMetricsFor deliveryPool
   pure $ object [ "status" .= (case database of Just (Right _) -> ("ok" :: Text); _ -> "degraded")
                 , "access_tracker" .= object ["buffered_count" .= buffered]
-                , "pool" .= object ["active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections
-                                   , "checkout" .= poolCheckoutJson checkout] ]
+                , "pool" .= poolJson metrics checkout
+                , "delivery_pool" .= delivery ]
+  where
+    poolJson metrics checkout = object
+      [ "active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections
+      , "checkout" .= poolCheckoutJson checkout ]
 
--- | Cumulative process-wide counters with fixed bucket labels; see
+-- | Cumulative counters of one pool handle with fixed bucket labels; see
 -- docs/reference/request-performance.md.
 poolCheckoutJson :: PoolCheckoutMetrics -> Value
 poolCheckoutJson m = object

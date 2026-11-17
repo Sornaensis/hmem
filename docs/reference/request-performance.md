@@ -3,7 +3,7 @@
 `hmem-server` attributes each request's latency to connection-pool checkout
 wait, connection hold time, optional embedding provider time and the remaining
 application work. The phase fields extend [request logging](request-logging.md);
-process-wide checkout counters are part of `GET /api/v1/health`. Neither records
+per-pool checkout counters are part of `GET /api/v1/health`. Neither records
 identifiers, paths or query values.
 
 ## Phases
@@ -24,15 +24,21 @@ entity queries concurrently and passes the request's timer to them, so its
 hold time can exceed its duration and the application residual is then a lower
 bound. Other work started on another thread is not attributed to the request;
 it is counted as `unattributed` below. Background workers, such as the access
-tracker flush, change-stream delivery and archive work, are unattributed.
+tracker flush and archive work, are unattributed. Change-stream delivery uses
+the separate delivery pool and is never attributed to a request, including the
+initial replay on a WebSocket upgrade.
 The health check's own non-blocking database probe is not a checkout, but a
 connection it opens is counted in `connects`, `connect_total_ms` and that
 request's `db_connect_ms`, with `db_checkouts` and `db_wait_ms` 0.
 
 ## Health counters
 
-`pool.checkout` in the health response is cumulative since process start for
-all pools in the process:
+The health response reports each pool separately. `pool` is the main pool used
+by HTTP requests, workers and WebSocket admission checks. `delivery_pool` is
+the change-stream delivery pool, used by delivery turns and the dispatcher;
+it is `null` only when delivery shares the main pool, as in some tests. Both
+have the same shape: `active_connections`, `max_connections` and `checkout`,
+which is cumulative since process start:
 
 | Field | Meaning |
 | --- | --- |
@@ -46,9 +52,11 @@ all pools in the process:
 per GHC capability up to the pool size, and a checkout can only use its
 thread's stripe. A capacity wait therefore shows that a stripe was full while
 another had idle capacity. The count is a lower bound: waits behind a full
-stripe while the whole pool is also in demand are not counted. The counters
-are process-wide, so they are only meaningful with one pool per process, as in
-the server.
+stripe while the whole pool is also in demand are not counted. The main pool
+counters are process-wide, so they are only meaningful with one main pool per
+process, as in the server. The delivery pool has a single stripe, so any idle
+connection serves any checkout and it records no capacity waits; its
+`unattributed` count equals its `checkouts`.
 
 ## Isolated baseline
 

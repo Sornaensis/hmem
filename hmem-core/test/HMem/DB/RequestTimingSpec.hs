@@ -12,7 +12,8 @@ import Data.Word (Word64)
 import Hasql.Session qualified as Session
 import Test.Hspec
 
-import HMem.DB.Pool (createPool, withConn)
+import HMem.DB.Pool (PoolMetrics(..), createDeliveryPool, createPool, destroyDeliveryPool, getPoolCheckoutMetricsFor, getPoolMetrics, getPoolMetricsFor, withConn)
+import System.Timeout (timeout)
 import HMem.DB.RequestTiming
 import HMem.DB.Search (searchAll)
 import HMem.DB.TestHarness
@@ -85,6 +86,57 @@ spec = around withTestEnv $ describe "request pool timing" $ do
       timing.dbWaitNs `shouldSatisfy` (>= timing.dbConnectNs)
       endMetrics.connects - startMetrics.connects `shouldSatisfy` (>= 1)
       endMetrics.connectTotalNs - startMetrics.connectTotalNs `shouldSatisfy` (>= timing.dbConnectNs)
+
+  it "serves a second same-capability delivery checkout immediately from its single stripe" $ \env -> do
+    caps <- getNumCapabilities
+    if caps < 2 then pendingWith "requires at least two capabilities" else
+      bracket (createDeliveryPool env.testDb.testDbConnStr 2 30 30000) destroyDeliveryPool $ \pool -> do
+        holding <- newEmptyMVar
+        release <- newEmptyMVar
+        holder <- asyncOn 0 (withConn pool $ \conn -> select1 conn >> putMVar holding () >> takeMVar release)
+        takeMVar holding
+        second <- timeout 2000000 (asyncOn 0 (withConn pool select1) >>= wait)
+        putMVar release ()
+        wait holder
+        second `shouldBe` Just ()
+        (.maxConnections) <$> getPoolMetricsFor pool `shouldReturn` 2
+
+  it "keeps delivery checkouts out of the main gauges, counters, capacity waits and request timers" $ \env ->
+    bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \mainPool ->
+      bracket (createDeliveryPool env.testDb.testDbConnStr 2 30 30000) destroyDeliveryPool $ \delivery -> do
+        mainStart <- getPoolCheckoutMetrics
+        mainGauges <- getPoolMetrics
+        deliveryStart <- getPoolCheckoutMetricsFor delivery
+        holding <- newEmptyMVar
+        release <- newEmptyMVar
+        timing <- withRequestTimer $ \timer -> do
+          withAsync (withInheritedRequestTimer (Just timer) $ withConn delivery $ \conn ->
+              select1 conn >> putMVar holding () >> takeMVar release) $ \holder -> do
+            takeMVar holding
+            (.activeConnections) <$> getPoolMetricsFor delivery `shouldReturn` 1
+            getPoolMetrics `shouldReturn` mainGauges
+            getPoolMetricsFor mainPool `shouldReturn` mainGauges
+            putMVar release ()
+            wait holder
+          withConn delivery select1
+          withConn delivery select1
+          withConn delivery $ \conn -> select1 conn >> threadDelay 5000
+          readRequestTimer timer
+        mainEnd <- getPoolCheckoutMetrics
+        deliveryEnd <- getPoolCheckoutMetricsFor delivery
+        timing `shouldBe` RequestTiming 0 0 0 0 0 0
+        mainEnd `shouldBe` mainStart
+        getPoolMetrics `shouldReturn` mainGauges
+        deliveryEnd.checkouts - deliveryStart.checkouts `shouldBe` 4
+        deliveryEnd.unattributedCheckouts - deliveryStart.unattributedCheckouts `shouldBe` 4
+        deliveryEnd.connects - deliveryStart.connects `shouldSatisfy` (>= 1)
+        deliveryEnd.holdTotalNs `shouldSatisfy` (> deliveryStart.holdTotalNs)
+        (.activeConnections) <$> getPoolMetricsFor delivery `shouldReturn` 0
+        -- A main-pool checkout is still attributed and counted as before.
+        attributed <- withRequestTimer $ \timer -> withConn mainPool select1 >> readRequestTimer timer
+        attributed.dbCheckouts `shouldBe` 1
+        mainAfter <- getPoolCheckoutMetrics
+        mainAfter.checkouts - mainEnd.checkouts `shouldBe` 1
 
   it "leaves forked work unattributed unless it inherits the request timer" $ \env -> do
     workspace <- createTestWorkspace env "request-timing-search"

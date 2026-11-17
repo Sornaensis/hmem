@@ -238,6 +238,33 @@ spec = do
       let overridden = applyChangeStreamEnvOverrides (Just "100") (Just "40") (Just "20") defaultConfig
       overridden.changeStream `shouldBe` ChangeStreamConfig 100 40 20
 
+  describe "pool configuration" $ do
+    it "defaults the main pool to 15 and the delivery pool to 10 connections" $ do
+      defaultConfig.pool `shouldBe` PoolConfig { size = 15, deliverySize = 10, idleTimeout = 60, statementTimeoutMs = 30000 }
+      mapM_ (\yaml -> case Yaml.decodeEither' yaml of
+        Left err -> expectationFailure (show err)
+        Right (cfg :: HMemConfig) -> cfg.pool `shouldBe` defaultConfig.pool)
+        ["{}", "pool: {}", "pool: {size: 15}", "pool: {delivery_size: 10}"]
+
+    it "reads and round-trips independently configured pool sizes" $ do
+      case Yaml.decodeEither' "pool: {size: 10, delivery_size: 15}" of
+        Left err -> expectationFailure (show err)
+        Right (cfg :: HMemConfig) -> do
+          (cfg.pool.size, cfg.pool.deliverySize) `shouldBe` (10, 15)
+          Aeson.eitherDecode (Aeson.encode cfg.pool) `shouldBe` Right cfg.pool
+          fst (validateConfig cfg) `shouldSatisfy` all (not . isInfixOf "pool.")
+
+    it "clamps the delivery pool to 5..1000 and the main pool to 1..1000 with warnings" $ do
+      let clamp main delivery = validateConfig defaultConfig { pool = defaultConfig.pool { size = main, deliverySize = delivery } }
+          (lowWarnings, low) = clamp 0 4
+          (highWarnings, high) = clamp 1001 1001
+      (low.pool.size, low.pool.deliverySize) `shouldBe` (1, 5)
+      (high.pool.size, high.pool.deliverySize) `shouldBe` (1000, 1000)
+      lowWarnings `shouldSatisfy` any (isInfixOf "pool.delivery_size: 4 is below minimum 5")
+      lowWarnings `shouldSatisfy` any (isInfixOf "pool.size: 0 is below minimum 1")
+      highWarnings `shouldSatisfy` any (isInfixOf "pool.delivery_size: 1001 exceeds maximum 1000")
+      (snd (clamp 1 5)).pool `shouldBe` defaultConfig.pool { size = 1, deliverySize = 5 }
+
   describe "validateConfig" $ do
     it "defaults change-stream retention and hand-off lifetimes" $ do
       defaultConfig.changeStream `shouldBe` ChangeStreamConfig

@@ -24,7 +24,7 @@ import System.IO (hPutStrLn, stderr)
 import HMem.Config (ChangeStreamConfig(..))
 import HMem.DB.ChangeStream (ChangeScope, OutboxRecord(..), OutboxBacklog(..), cleanupChangeStream, listDispatchScopes, listOutboxAfter, listRetentionScopes, outboxBacklog, pruneOutboxScopeBefore)
 import HMem.DB.Pool (DBException(..))
-import HMem.Server.WebSocket (WSState, dispatchOutboxBatch, canonicalReplayPending, flushWebSocketTelemetry, reauthorizeCanonicalConnections)
+import HMem.Server.WebSocket (WSState, deliveryPoolFor, dispatchOutboxBatch, canonicalReplayPending, flushWebSocketTelemetry, reauthorizeCanonicalConnections)
 import HMem.Server.WebSocketDelivery (DeliveryFailure(..), DeliveryCleanupFailure(..))
 
 data ChangeStreamMaintenance = ChangeStreamMaintenance
@@ -80,7 +80,7 @@ startChangeStreamWorkerWithObserver :: (ChangeStreamDispatchEvent -> IO ()) -> P
 startChangeStreamWorkerWithObserver = startObserved (pure ())
 
 startObserved :: IO () -> (ChangeStreamDispatchEvent -> IO ()) -> Pool Hasql.Connection -> ChangeStreamConfig -> WSState -> IO ChangeStreamWorker
-startObserved startupHook observe pool config wsState = mask_ $ do
+startObserved startupHook observe mainPool config wsState = mask_ $ do
   finished <- newEmptyMVar
   status <- newMVar (ChangeStreamMaintenance Nothing Nothing 0 Nothing Nothing 0)
   worker <- forkIOWithUnmask $ \unmask -> do
@@ -88,6 +88,9 @@ startObserved startupHook observe pool config wsState = mask_ $ do
     putMVar finished result
   pure (ChangeStreamWorker worker finished status)
   where
+    -- The dispatcher's scans, retention maintenance and every delivery turn
+    -- use the WebSocket state's delivery pool when it has one.
+    pool = deliveryPoolFor mainPool wsState
     loop status acknowledgements lastMaintenance lastScope maintenanceDueAt dispatchCursor sweepBusy lastAuthorization = do
       -- Emit WebSocket telemetry recorded since the previous turn.
       flushWebSocketTelemetry wsState

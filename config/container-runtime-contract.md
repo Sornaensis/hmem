@@ -50,9 +50,10 @@ Secrets that do not currently have hmem runtime env overrides, such as OIDC `cli
 | `HMEM_DB_PASSWORD` | unset | env override only | Required when the DB role needs a password. Do not write to YAML. |
 | `HMEM_DB_PASSWORD_FILE` | unset | none | Optional secret-file source for `HMEM_DB_PASSWORD`. |
 | `HMEM_DB_SSLMODE` | `disable` | env override only | Export to hmem instead of writing `database.sslmode`. Use `require`/`verify-full` for external TLS databases. |
-| `HMEM_POOL_SIZE` | `10` | `pool.size` | Valid range `1..1000`. |
-| `HMEM_POOL_IDLE_TIMEOUT` | `60` | `pool.idle_timeout` | Seconds; valid range `1..3600`. |
-| `HMEM_POOL_STATEMENT_TIMEOUT_MS` | `30000` | `pool.statement_timeout_ms` | Valid range `1000..300000`. |
+| `HMEM_POOL_SIZE` | `15` | `pool.size` | Main pool for HTTP, workers and WebSocket admission; valid range `1..1000`. |
+| `HMEM_POOL_DELIVERY_SIZE` | `10` | `pool.delivery_size` | Separate single-stripe change-stream delivery pool; valid range `5..1000`. |
+| `HMEM_POOL_IDLE_TIMEOUT` | `60` | `pool.idle_timeout` | Seconds, for both pools; valid range `1..3600`. |
+| `HMEM_POOL_STATEMENT_TIMEOUT_MS` | `30000` | `pool.statement_timeout_ms` | For both pools; valid range `1000..300000`. |
 | `HMEM_LOG_LEVEL` | `info` | `logging.level` | Accepted by server logger, e.g. `debug`, `info`, `warn`, `error`. |
 | `HMEM_LOG_MAX_SIZE_MB` | `10` | `logging.max_size_mb` | Valid range `1..10000`, subject to the private HOME rotation allocation bound below. |
 | `HMEM_LOG_BACKUP_COUNT` | `5` | `logging.backup_count` | Valid range `0..100`; `(backup_count + 1) * max_size_mb` must be at most 96 MiB, leaving 32 MiB of the 128 MiB HOME cap for config and headroom. |
@@ -64,6 +65,14 @@ Secrets that do not currently have hmem runtime env overrides, such as OIDC `cli
 | `HMEM_RATE_LIMIT_BURST` | `20` | `rate_limit.burst` | Valid range `1..100000`. |
 | `HMEM_TLS_CERT_FILE` | unset | `tls.cert_file` | TLS is enabled only when both cert and key are set. |
 | `HMEM_TLS_KEY_FILE` | unset | `tls.key_file` | Fail fast if only one TLS file is set. |
+
+Each server process opens up to the main plus delivery pool sizes, 25
+PostgreSQL connections by default. The main pool has one stripe per GHC
+capability up to its size, each holding an equal share rounded up, so with
+default sizes it can open at most 28 connections (at 14 capabilities); the
+delivery pool opens at most its configured size. PostgreSQL's default
+`max_connections` of 100 covers one server plus `hmem-ctl` commands. Add the
+budgets of all replicas and other clients before scaling out.
 
 The container healthcheck uses HTTPS when both TLS files are configured, and HTTP
 when neither is set. `HMEM_HEALTHCHECK_URL` overrides its default loopback URL. Certificate

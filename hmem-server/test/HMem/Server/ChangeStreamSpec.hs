@@ -12,7 +12,7 @@ import Data.Aeson.KeyMap qualified as KeyMap
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.FileEmbed (embedFile, makeRelativeToProject)
-import Data.Int (Int64)
+import Data.Int (Int32, Int64)
 import Data.Maybe (isJust)
 import Data.List (nub, sort)
 import Data.Map.Strict qualified as Map
@@ -67,12 +67,12 @@ import HMem.DB.Workspace qualified as WorkspaceDB
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withRequestContext, emptyRequestContext)
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), createTestWorkspace)
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
-import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, mkDeployedSandboxConfig, withDeployedSandboxAppContext, withDeployedSandboxAppLogged, withLocalSandboxAppContext)
+import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, mkDeployedSandboxConfig, withDeployedSandboxAppContext, withDeployedSandboxAppLogged, withDeployedSandboxAppPools, withLocalSandboxAppContext)
 import HMem.Server.Logging (jsonRequestLogger)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.ChangeStream (ChangeStreamWorker, ChangeStreamMaintenance(..), startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker, readChangeStreamMaintenance, retentionScopeTurn, retentionDue, ChangeStreamDispatchEvent(..), startChangeStreamWorkerWithObserver)
 import HMem.Server.Snapshot (materializeSnapshot, materializeSnapshotWithProfile)
-import HMem.Server.WebSocket (WSState, newWSState, withNativeWebSocketSettings, awaitWebSocketDrain, connectionCount, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections, attachWebSocketTelemetryLog, readWebSocketTelemetry)
+import HMem.Server.WebSocket (WSState, deliveryPoolFor, newWSState, withNativeWebSocketSettings, awaitWebSocketDrain, connectionCount, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections, attachWebSocketTelemetryLog, readWebSocketTelemetry)
 import HMem.Server.WebSocketTelemetry (DeliveryGauges(..), OutcomeStats(..), WebSocketTelemetrySnapshot(..))
 import HMem.Server.WebSocketDelivery (DeliveryCleanupFailure(..), DeliveryFailure(..))
 import HMem.Server.WebSocketTransport (newNativeTransport, runPlainSocket, runPlainSocketWith, withNativeTransportSettings)
@@ -1311,6 +1311,25 @@ spec = describe "canonical change-stream loopback" $ do
             `shouldSatisfy` maybe False (>= 750)
           (snapshot.delivery.leasesQuarantined, snapshot.delivery.physicalAdmitted) `shouldBe` (0, 0)
 
+  it "keeps healthy scopes delivering through the real dispatcher beside a catch-up blocked on a one-connection ordinary pool" $
+    blockedCatchUpBesideHealthyScope (Just 5) 3 >>= \retired -> retired `shouldBe` 1
+
+  it "reports the main pool unchanged and a separate delivery pool in health" $ do
+    withDeployedSandboxAppPools 2 (Just 5) $ \ctx -> do
+      health <- apiRequest ctx.deployedApplication methodGet "/api/v1/health" [] "" >>= decodeResponse :: IO Value
+      let poolKeys = fmap (\case Object fields -> sort (KeyMap.keys fields); _ -> []) . (`jsonField` health)
+          checkoutKeys name = case jsonField name health >>= jsonField "checkout" of
+            Just (Object fields) -> sort (KeyMap.keys fields)
+            _ -> []
+      poolKeys "pool" `shouldBe` Just ["active_connections", "checkout", "max_connections"]
+      poolKeys "delivery_pool" `shouldBe` Just ["active_connections", "checkout", "max_connections"]
+      checkoutKeys "delivery_pool" `shouldBe` checkoutKeys "pool"
+      (jsonField "pool" health >>= jsonField "max_connections") `shouldBe` Just (toJSON (2 :: Int))
+      (jsonField "delivery_pool" health >>= jsonField "max_connections") `shouldBe` Just (toJSON (5 :: Int))
+    withDeployedSandboxAppContext $ \ctx -> do
+      health <- apiRequest ctx.deployedApplication methodGet "/api/v1/health" [] "" >>= decodeResponse :: IO Value
+      jsonField "delivery_pool" health `shouldBe` Just Null
+
   it "retires the canonical owner when expiry output throws" $
     withDeployedSandboxAppContext $ \ctx -> do
       armed <- newIORef False
@@ -2263,6 +2282,109 @@ spec = describe "canonical change-stream loopback" $ do
       withDispatcherFixture ctx "fresh dispatcher" $ \fixture ->
         stopDispatcherFixture ctx "fresh explicit stop" fixture
 
+-- A canonical catch-up waits on its scope lock while the real dispatcher
+-- delivers writes in another scope to the given number of healthy peers. The
+-- main pool has one connection; the delivery pool has the given size, or is
+-- shared with the main pool. Returns the number of deadline retirements.
+blockedCatchUpBesideHealthyScope :: Maybe Int -> Int -> IO Int
+blockedCatchUpBesideHealthyScope deliverySize healthyCount =
+  withDeployedSandboxAppPools 1 deliverySize $ \ctx -> do
+    blockedWorkspace <- createTestWorkspace ctx.deployedEnv "blocked-catch-up-scope"
+    healthyWorkspace <- createTestWorkspace ctx.deployedEnv "healthy-delivery-scope"
+    let principal name = Principal
+          { actorType = ActorUser, actorId = name, actorLabel = name, authority = PrincipalSyntheticLocalSuperadmin }
+        ticketFor name scope = canonicalTicketFor ctx (principal name) scope (TrustedAudience ("local:" <> name))
+        st = ctx.deployedWSState
+        connectionString = ctx.deployedEnv.testDb.testDbConnStr
+        lockSql = "BEGIN; SELECT * FROM hmem_change_stream_lock('workspace', '"
+          <> Text.encodeUtf8 (UUID.toText blockedWorkspace.id) <> "')"
+    healthyTickets <- forM [1 .. healthyCount] $ \index ->
+      ticketFor ("healthy-peer-" <> T.pack (show index)) (WorkspaceScope healthyWorkspace.id)
+    blocked <- ticketFor "blocked-peer" (WorkspaceScope blockedWorkspace.id)
+    entered <- newEmptyMVar
+    release <- newEmptyMVar
+    disconnected <- newEmptyMVar
+    let holdScope holderPool = DBPool.withConn holderPool $ \connection ->
+          (do
+            Session.run (Session.sql lockSql) connection >>= either (fail . show) pure
+            holderPid <- Session.run (Session.statement () backendPidStatement) connection >>= either (fail . show) pure
+            putMVar entered holderPid
+            readMVar release)
+          `finally` void (Session.run (Session.sql "ROLLBACK") connection)
+        blockedPeer port =
+          WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket blocked.ticket) $ \conn -> do
+            result <- try @WS.ConnectionException (forever (void (WS.receiveData conn :: IO Text)))
+            putMVar disconnected (either (const True) (const False) result)
+        changeIds :: Chan Text -> Int -> IO [Text]
+        changeIds _ 0 = pure []
+        changeIds frames remaining = do
+          frame <- readChan frames >>= decodeFrame
+          case frameType frame of
+            Just "change" -> case jsonField "event" frame >>= jsonField "entity" >>= jsonField "id" of
+              Just (String identifier) -> (identifier :) <$> changeIds frames (remaining - 1)
+              other -> fail ("change frame without entity id: " <> show other)
+            -- Lossy cross-scope wakeups carry no canonical event.
+            Just "checkpoint" -> changeIds frames remaining
+            Just "session_activity_changed" -> changeIds frames remaining
+            other -> fail ("healthy peer received " <> show other)
+    bracket (DBPool.createPool connectionString 1 5.0 30000) destroyAllResources $ \observerPool ->
+     bracket (DBPool.createPool connectionString 1 5.0 30000) destroyAllResources $ \holderPool ->
+      bracket (DBPool.createPool connectionString 1 5.0 30000) destroyAllResources $ \writerPool -> (do
+        -- Replay pages blocked by the holder; retention's bounded scope lock
+        -- attempts use a different statement.
+        let lockWaiters holderPid = runSession observerPool (Session.statement holderPid replayLockWaitersStatement)
+            awaitLockWaiter holderPid = do
+              waiting <- lockWaiters holderPid
+              when (waiting /= 1) (threadDelay 20000 >> awaitLockWaiter holderPid)
+        writes <- withWebSocketApplication st ctx.deployedApplication $ \port ->
+          withDispatcherFixture ctx "blocked catch-up dispatcher" $ \_ -> do
+            let connect [] use = use []
+                connect (ticket:rest) use = withActivityFrames port ticket.ticket $ \frames ->
+                  connect rest (use . (frames :))
+            connect healthyTickets $ \peers -> do
+              forM_ peers $ \frames ->
+                (frameType <$> declaredPhase "healthy initial checkpoint" (readChan frames >>= decodeFrame))
+                  `shouldReturn` Just "checkpoint"
+              withAsync (holdScope holderPool) $ \holder -> do
+               holderPid <- declaredPhase "scope lock acquisition" (takeMVar entered)
+               withAsync (blockedPeer port) $ \peer -> do
+                declaredPhase "catch-up waits on the held scope lock" (awaitLockWaiter holderPid)
+                -- The blocked catch-up holds a delivery connection, not the
+                -- main pool's only connection.
+                timeout 1000000 (runSession ctx.deployedEnv.pool (Session.sql "SELECT 1"))
+                  `shouldReturn` Just ()
+                projects <- forM [1 .. 10 :: Int] $ \index ->
+                  Project.createProject writerPool
+                    (CreateProject healthyWorkspace.id Nothing ("healthy write " <> T.pack (show index)) Nothing Nothing Nothing)
+                let expected = map (UUID.toText . (.id)) projects
+                forM_ peers $ \frames ->
+                  declaredPhase "healthy peer receives every write in order" (changeIds frames 10) `shouldReturn` expected
+                declaredPhase "blocked peer retired" (takeMVar disconnected) `shouldReturn` True
+                declaredPhase "blocked peer closed" (wait peer)
+                -- Every healthy peer is still registered after all writes.
+                readWebSocketTelemetry st >>= \current -> current.canonicalClients `shouldBe` healthyCount
+                -- Release only after the cleanup join exhausted its budget.
+                void $ awaitTelemetry st "unfinished catch-up cleanup" $ \current ->
+                  outcomeCount current ("websocket_cleanup", "", "unfinished") == 1
+                lockWaiters holderPid `shouldReturn` 1
+                putMVar release ()
+                declaredPhase "scope lock release" (wait holder)
+                void $ awaitTelemetry st "retained catch-up reclaimed" $ \current ->
+                  outcomeCount current ("websocket_reclaim", "", "reclaimed") == 1
+                pure (length expected)
+        writes `shouldBe` 10
+        snapshot <- readWebSocketTelemetry st
+        map (outcomeCount snapshot)
+          [ ("websocket_cleanup", "", "unfinished"), ("websocket_reclaim", "", "reclaimed")
+          , ("websocket_replay", "live", "retired"), ("websocket_replay", "initial", "retired")
+          , ("websocket_turn", "", "retired_write_timeout") ]
+          `shouldBe` [1, 1, 0, 1, 0]
+        (snapshot.delivery.leasesQuarantined, snapshot.delivery.physicalAdmitted) `shouldBe` (0, 0)
+        active <- DBPool.getPoolMetricsFor (deliveryPoolFor ctx.deployedEnv.pool st)
+        active.activeConnections `shouldBe` 0
+        pure (outcomeCount snapshot ("websocket_turn", "", "retired_deadline")))
+        `finally` void (tryPutMVar release ())
+
 -- Joined cleanup is bounded even when a fixture assertion throws.
 newtype DispatcherFixture = DispatcherFixture ChangeStreamWorker
 
@@ -2336,6 +2458,15 @@ scopeLockWaitersStatement :: Statement.Statement () Int64
 scopeLockWaitersStatement = Statement.Statement
   "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%hmem_change_stream_lock%'"
   Enc.noParams (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True
+
+backendPidStatement :: Statement.Statement () Int32
+backendPidStatement = Statement.Statement "SELECT pg_backend_pid()"
+  Enc.noParams (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int4))) True
+
+replayLockWaitersStatement :: Statement.Statement Int32 Int64
+replayLockWaitersStatement = Statement.Statement
+  "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%retained_from_cursor FROM hmem_change_stream_lock%'"
+  (Enc.param (Enc.nonNullable Enc.int4)) (Dec.singleRow (Dec.column (Dec.nonNullable Dec.int8))) True
 
 rollbackRenameStatement :: Statement.Statement UUID.UUID ()
 rollbackRenameStatement = Statement.Statement

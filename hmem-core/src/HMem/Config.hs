@@ -107,8 +107,13 @@ data DatabaseConfig = DatabaseConfig
   , sslmode  :: !(Maybe Text)
   } deriving stock (Show, Eq)
 
+-- | @size@ bounds the main pool used by HTTP, workers and pre-admission
+-- WebSocket authorization; @deliverySize@ bounds the separate single-stripe
+-- change-stream delivery pool. Both pools share the idle and statement
+-- timeouts.
 data PoolConfig = PoolConfig
   { size               :: !Int
+  , deliverySize       :: !Int
   , idleTimeout        :: !Double
   , statementTimeoutMs :: !Int
   } deriving stock (Show, Eq)
@@ -431,13 +436,15 @@ instance ToJSON DatabaseConfig where
 
 instance FromJSON PoolConfig where
   parseJSON = Aeson.withObject "PoolConfig" $ \o -> PoolConfig
-    <$> o .:? "size" .!= 10
-    <*> o .:? "idle_timeout" .!= 60
-    <*> o .:? "statement_timeout_ms" .!= 30000
+    <$> o .:? "size" .!= defPool.size
+    <*> o .:? "delivery_size" .!= defPool.deliverySize
+    <*> o .:? "idle_timeout" .!= defPool.idleTimeout
+    <*> o .:? "statement_timeout_ms" .!= defPool.statementTimeoutMs
 
 instance ToJSON PoolConfig where
   toJSON pc = Aeson.object
     [ "size" .= pc.size
+    , "delivery_size" .= pc.deliverySize
     , "idle_timeout" .= pc.idleTimeout
     , "statement_timeout_ms" .= pc.statementTimeoutMs
     ]
@@ -707,7 +714,7 @@ defDatabase :: DatabaseConfig
 defDatabase = DatabaseConfig { host = "127.0.0.1", port = 54320, name = "hmem", user = Nothing, password = Nothing, sslmode = Nothing }
 
 defPool :: PoolConfig
-defPool = PoolConfig { size = 10, idleTimeout = 60, statementTimeoutMs = 30000 }
+defPool = PoolConfig { size = 15, deliverySize = 10, idleTimeout = 60, statementTimeoutMs = 30000 }
 
 defLogging :: LogConfig
 defLogging = LogConfig { level = "info", maxSizeMB = 10, backupCount = 5 }
@@ -1227,9 +1234,11 @@ validateConfig cfg = (warnings, corrected)
 
     validatePool p =
       let (ws1, sz) = clampField "pool.size" 1 1000 p.size
+          -- Four delivery leases plus the dispatcher's own checkout.
+          (ws4, ds) = clampField "pool.delivery_size" 5 1000 p.deliverySize
           (ws2, it) = clampFieldD "pool.idle_timeout" 1.0 3600.0 p.idleTimeout
           (ws3, st) = clampField "pool.statement_timeout_ms" 1000 300000 p.statementTimeoutMs
-      in  (ws1 <> ws2 <> ws3, PoolConfig { size = sz, idleTimeout = it, statementTimeoutMs = st })
+      in  (ws1 <> ws4 <> ws2 <> ws3, PoolConfig { size = sz, deliverySize = ds, idleTimeout = it, statementTimeoutMs = st })
 
     validateLog l =
       let (ws1, ms) = clampField "logging.max_size_mb" 1 10000 l.maxSizeMB

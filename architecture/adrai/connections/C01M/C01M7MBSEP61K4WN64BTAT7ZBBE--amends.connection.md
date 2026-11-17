@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M7MBSEP61K4WN64BTAT7ZBBE"
+relation = "amends"
+from_record = "R01M7MBSEP6DXYPZ7PE3MR8JF89"
+subject_adr = "A01M39QPB23CYS9QHCWQSATSJE9"
+to_records = ["R01M7HYTK2ZBNX4VH10BDXQXY2C"]
++++
+
+Complete unchanged quiet periodic sweeps locally within the five-minute proof lifetime; keep server verification for resume and receipts.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjbGF1ZGUtY29kZSIsImsiOiJsbG0iLCJtIjoiY2xhdWRlLW9wdXMtNS01In0sImIiOiI1ZjQ0MWMyNDJmODM4MmY5NTUxODEzZTgwMDE4ZmRjYzkwNDQ3NzU0IiwiaSI6InNoYTI1Njo2U3lVWVVVX2VoaVFaZzF0dnNsd2RTWEZyLU12MGFiODBhcXJXc0gtVWZBIiwiayI6ImNvbm5lY3Rpb24uYW1lbmRzIiwibyI6IkMwMU03TUJTRVA2MUs0V042NEJUQVQ3WkJCRSIsIm9wIjoiTzAxTTdNQlNFUDZEWFlQWjdQRTNNUjhKRjg5IiwicCI6WyJSMDFNN0hZVEsyWkJOWDRWSDEwQkRYUVhZMkMiXSwiciI6Im1hc3RlciIsInMiOiJzaGEyNTY6eENzcGNFcVlzNlFPb0k4cDNPWHdSeDBoRVNvQXVaWENHb3kweHBaXzREYyIsInQiOjE3OTQ5MDYwNDUxMjYsInYiOjEsIngiOiJhZHJhaS8xLjAuMCJ9 -->

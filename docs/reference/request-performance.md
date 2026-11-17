@@ -292,8 +292,10 @@ container or a later production sample, before implementation.
 In the [server performance qualification](server-performance-qualification.md),
 candidate 4's replay scans are the leading explanation for a foreground
 regression under WebSocket load, and candidate 2's one-connection stripes for
-healthy sockets retired beside a stuck catch-up. No ablation or matched run
-isolated either cause.
+healthy sockets retired beside a stuck catch-up. Its post-pool matched rerun,
+with a separate delivery pool, passes the per-route and stuck catch-up gates at
+pool sizes 15/10. Its scope-lock ablation does not confirm scope locks, and no
+cause is named for the earlier per-route regression.
 
 ## Sample limits
 

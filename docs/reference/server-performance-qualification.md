@@ -3,11 +3,13 @@
 [`tools/server-performance-qualification.json`](../../tools/server-performance-qualification.json)
 records the combined contention qualification of 17 November 2026. It compares
 the server at the performance review revision `7127a3d9` (before) with
-`8d5101d0` (after, server sources identical to the current `master`) on one
-matched workload in the throwaway Docker environment of the
-[container sample](request-performance.md#container-sample). It is **not a
-production sample**; the live system was not contacted. 2 of 8 gates fail;
-task acceptance is not met.
+`8d5101d0` (after) on one matched workload in the throwaway Docker environment
+of the [container sample](request-performance.md#container-sample). It is **not
+a production sample**; the live system was not contacted. 2 of 8 gates fail;
+task acceptance is not met. A later
+[production-default rerun](#production-default-rerun) of `f206ff72` passes the
+measured parts of all eight gates; the replay cut and revocation were not
+re-verified in that run.
 
 ## Matching
 
@@ -130,7 +132,69 @@ navigation, project overview, Observation search). The skip does not change
 foreground latency, so outbox reads no longer explain the regression. The
 leading remaining candidate is per-socket delivery scope locking waiting behind
 hot writers on one-connection pool stripes; it is not isolated. The stuck
-catch-up still retires healthy sockets in three of four after runs.
+catch-up still retires healthy sockets in three of four after runs. The
+[production-default rerun](#production-default-rerun) shows neither problem at
+production pool defaults, but it names no cause for this per-route regression
+at pool size 10.
+
+## Production-default rerun
+
+[`tools/postpool-qualification.json`](../../tools/postpool-qualification.json)
+records a matched rerun on 17 November 2026 of `f206ff72` (replay repair and
+separate delivery pool) against `7127a3d9` at the production pool defaults
+(main 15, delivery 10, GHC `-N`), on a freshly seeded volume of the same scale.
+A third, measurement-only image removes the scope lock from the three
+per-socket delivery calls (replay page read, acknowledgement, hidden rebase)
+and reads the scope counter row without locking instead. It drops
+serialization against revocation and retention pruning, so it is unsafe and
+was never committed. Runs were ordered before, after, ablation, ablation,
+after, before. The before image has one pool, so it ran with 15 connections
+(earlier receipts used 10) while after holds up to 25 (15 main, 10 delivery):
+the pass is at production defaults, not at equal total connections. Every run
+used a scratch copy of `combined.mjs` that adds output only (delivery-pool
+counters, pool gauges and two health GETs outside the lock hold); its hash and
+diff hash are in the receipt `inputs`.
+
+This is the matched rerun for tasks `033d1704` and `17e8cd32`. The final
+`073d6bfb` qualification will run on the build that includes task `37f4f786`
+(single-stripe main pool and fair HTTP admission, for hundreds of concurrent
+requests).
+
+| Gate | Before | After | Ablation |
+| --- | --- | --- | --- |
+| Foreground p95, pooled | 151.2, 157.6 ms | 162.5, 170.3 ms (+7.8%) | 195.2, 162.4 ms (+15.8%) |
+| Foreground p95, worst route | | search 1.035 | search 1.21, task update 1.14 |
+| Seeded capture append p95 | 77.1, 46.1 ms | 35.1, 34.8 ms (-43%) | 72.8, 50.1 ms (0%) |
+| Archive working set (≤ 128 MiB) | 118, 99 MiB | 57, 52 MiB | 53, 54 MiB |
+| Stalled reader retired, healthy progress | not retired; 26-61% delivered | retired; 100% delivered | retired; abl-1 1,917 of 1,918 by phase end, abl-2 100% |
+| Stuck catch-up beside healthy peers | delivery stalled up to 8 s | only the blocked owner retired (754-756 ms) and reclaimed; every write delivered; clean drain | not exercised (no lock wait) |
+| Snapshot item inserts | 4,547 | 18 | 18 |
+| Proofs and receipts | 44 verified, exact | same | same |
+| Idle authorization checks per 30 s | 22-28 | 0 | 0 |
+| Upgrade telemetry | logged as 500 | `upgrade_closed` | `upgrade_closed` |
+
+After passes the measured part of every gate. Cheap reads are now faster than
+before (task read 5.5-5.8 ms against 7.9-29.4 ms). The delivery pool had no
+capacity waits; the main pool's share of the foreground tail spent waiting was
+18-19%, against 35-42% in the replay repair rerun. That comparison sets main 15
+against the earlier receipt's 10 in a different absolute regime (before pooled
+p95 151-158 ms here, 88-96 ms there). The ablation cut per-phase scope-lock
+calls from 3,067-3,167 (13-16 s) to 48 snapshot calls but left cheap reads
+unchanged and heavy routes slower. It does not confirm scope locks as a cause.
+No cause is named for the earlier per-route regression at pool size 10.
+
+Limits: before-1's cheap reads were 2-8 times slower than before-2's. After
+still passes against before-2 alone (worst route 1.008, pooled 1.056). Unified
+search p95 varies from 156 to 317 ms across runs. Hot writes succeeded 1,920 of
+1,920 in both after runs but 1,918 in abl-1 and 1,914 in before-2; those
+failures are unexplained. The replay cut and revocation were not re-verified
+in this run.
+
+Open defect: a snapshot resync under contention returned an unexplained HTTP
+500 on both revisions (a shell resync in after-1 here, a full resync in one
+before run of the first qualification). Server logs were on tmpfs, so the
+cause was not captured. Reproduce it with persisted server logs before
+deployment or the final qualification.
 
 ## Production rollout decisions
 
@@ -138,8 +202,8 @@ These need separate decisions or scoped work; none is made by this receipt.
 
 | Decision | Condition |
 | --- | --- |
-| Deploy the change-stream delivery repairs ([candidate 4](request-performance.md#disposition)) | With the replay repair the pooled gate passes but seven routes still regress (see the [rerun](#replay-repair-rerun)); the remaining cause needs a scoped repair and a matched rerun first. |
-| Change pool striping ([candidate 2](request-performance.md#disposition)) or keep blocked database work outside delivery-turn budgets | Rerun the stuck case with production pool settings. |
+| Deploy the change-stream delivery repairs ([candidate 4](request-performance.md#disposition)) | At production pool defaults `f206ff72` passes the measured parts of all eight container gates (see the [production-default rerun](#production-default-rerun)). Open: the snapshot resync HTTP 500, and the final `073d6bfb` qualification. |
+| Change HTTP pool striping ([candidate 2](request-performance.md#disposition)) | Task `37f4f786` (single-stripe main pool and fair HTTP admission) for HTTP concurrency of hundreds of requests. The separate delivery pool already keeps healthy sockets progressing beside a stuck catch-up at 15/10. |
 | Accept idle polling cost at production scope count and outbox size (seven times this seed) | The dispatcher skip removes idle outbox reads; each turn still reads four scope counters. Measure passively after deployment. |
 | OIDC audiences, TLS, reverse proxies and production pool and RTS settings | Not covered by the container; confirm with passive production telemetry. |
 
@@ -169,4 +233,5 @@ node tools/perftest/combined.mjs --label <run>
 
 The runner writes one summary to `.tmp/perftest/combined` (or
 `PERFTEST_OUT`) and stops the server. The receipt's `commands` list the exact
-build, restore and focused-spec commands.
+build, restore and focused-spec commands. The production-default rerun ran a
+scratch runner copy, not the committed file (see its receipt `inputs`).

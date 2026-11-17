@@ -1,0 +1,1992 @@
+{
+ "format_version": 1,
+ "tasks": [
+  "033d1704-ee89-4361-bafd-46519b02791f",
+  "17e8cd32-75f2-4593-b859-ae3f5d6af675"
+ ],
+ "parent_task": "073d6bfb-a972-4c94-a8cf-4dbfdfd86c11",
+ "project": "5b1593f5-8081-45da-9c42-bc7a6be8149a",
+ "date": "2026-11-17",
+ "evidence_class": "CONTAINER EVIDENCE, NOT PRODUCTION. Same throwaway Docker method as tools/server-performance-qualification.json and tools/outbox-replay.qualification.json (compose project hmem-perftest, loopback only); the live system was not contacted.",
+ "outcome": "At production pool defaults (main 15, delivery 10, GHC -N) HEAD f206ff72 passes the measured parts of all eight combined gates (replay cut and revocation not re-verified) against the matched 7127a3d9 baseline: pooled foreground p95 1.078, every route <= 1.035, seeded capture append 0.567, and the stuck catch-up retires only the blocked owner while all four healthy hot sockets stay open and receive every write. The scope-lock ablation does not improve foreground latency (pooled 1.158, two routes over +10%), so it does not confirm scope locks as a cause; with no per-route regression left on HEAD there is nothing for it to explain at these settings.",
+ "owner": "Tasks 033d1704 and 17e8cd32 developer through review; parent 073d6bfb owns final combined re-qualification",
+ "retention": "Retain this compact receipt until 073d6bfb closes or a later matched rerun supersedes it. Raw run summaries, the seed manifest, scratch sources, build logs, secrets and the reduction scripts were task scratch and were removed at teardown.",
+ "inputs": {
+  "base_revision": "f206ff72a01482436ff22dca4eaee9844931384d",
+  "before": {
+   "revision": "7127a3d974e1792b0446bbfb3a61e0607e66a457",
+   "image": "hmem-perftest:7127a3d9 sha256:de8f1e5d5bdab38849ab845ff5d06e78f5403c7f8748dba660a921519aab39e5",
+   "hmem_server_sha256": "d27de8e76adf0345bc817cc8fcbb86e9e4b1fcb6a849aa666df4faf3546b88af",
+   "build": "git archive of 7127a3d9 with the HEAD Dockerfile plus two COPY lines restoring the 7127a3d9 hmem-core.cabal, hmem-server/package.yaml and hmem-server.cabal after a Stack dependency layer resolved from 8d5101d0 package metadata (identical to HEAD package metadata). The hmem-server binary hash equals the before image of tools/outbox-replay.qualification.json."
+  },
+  "after": {
+   "revision": "f206ff72a01482436ff22dca4eaee9844931384d",
+   "image": "hmem-perftest:f206ff72 sha256:5543cd5e51a43a6b9c965c21f0b45f233b0f20884a5e2cda8956cdb39f6b2583",
+   "hmem_server_sha256": "c3396b892093ade95f3e27588325efd6c5ed2516fa8e4c211374a9d1efeec248",
+   "build": "git archive of HEAD with the repository Dockerfile"
+  },
+  "ablation": {
+   "revision": "f206ff72a01482436ff22dca4eaee9844931384d",
+   "image": "hmem-perftest:f206ff72-abl sha256:61107fadfa54f605f7705b7f3ec060f2ca44228338c15a362214e4aae5f815ce",
+   "hmem_server_sha256": "2620e482250ff368723c3c4137affdd9970d14b26f84c8d12dac3dac023b4678",
+   "patch_sha256": "d0be0bc39a3beeefd7bd6287adfb81e81e25ec1ce67648f4a57dcbf8f85b58c1",
+   "patch": "MEASUREMENT ONLY, UNSAFE, NOT FOR COMMIT. hmem-core/src/HMem/DB/ChangeStream.hs: readReplayWindow (readReplayScanPage), acknowledgeReplayWithExpiry (acknowledgeReplayScan) and rebaseResumeTokenAfterHidden, the three calls the WebSocket canonical delivery path makes, replace SELECT ... FROM hmem_change_stream_lock($1,$2) with a plain SELECT authorization_epoch, next_cursor, retained_from_cursor FROM change_stream_scope_counters (same predicate, same columns, one round trip, falling back to the lock only if the row is missing). Ticket validation, HTTP replay, snapshots and retention keep the lock.",
+   "why_it_isolates": "Each per-socket transaction keeps its statements, bearer row lock (FOR UPDATE on the resume token), authorization check and outbox read; only the scope-row INSERT ... ON CONFLICT and FOR UPDATE are gone, so per-socket delivery neither waits behind scope writers nor blocks them.",
+   "guarantees_dropped": "Serialization of replay pages and acknowledgements against authorization-epoch changes (revocation) and against retention pruning, which takes the same scope lock; a page could pass authority checks across a concurrent revocation or miss records pruned mid-read."
+  },
+  "labels": "Every image carries hmem.perftest.revision (40-hex base SHA), hmem.perftest.owner=task-033d1704-17e8cd32 and hmem.perftest.dockerfile; after and ablation also hmem.perftest.variant, and the ablation hmem.perftest.patch=<patch sha256>.",
+  "sha256": {
+   "tools/perftest/combined.mjs (repository, workload definition)": "91086927a8ea14792698ac573b51e3b288c7aa37b22b16dda70ad8b89288212a",
+   "combined.mjs scratch copy used for every run": "402320f63d40053955cc5797fa88284b31f5ab07fb36162d476f14966a286830",
+   "runner diff (output only: delivery_pool counters, pool gauges, stuck-phase pool deltas, an ablation statement class; two health GETs outside the lock hold)": "7720cb19d9dfa36d903d1ba7536fab739931cb96b7a5e8bce8f380a80c3fd3cf",
+   "tools/perftest/perftest.mjs": "b581687897d42f7899e387b8d85ac46c4a16097f87ab7de315f4527f5ba32d68",
+   "tools/perftest/compose.yaml (HMEM_POOL_SIZE 15, HMEM_POOL_DELIVERY_SIZE 10)": "fc29823202bbe90c5165a1264d732486e314aeb869e161e835d4b29a63cdb173",
+   "Dockerfile (HEAD)": "f101f43e9144bd0bed01ae3a3b15aa06b18c60ef546396aded6e199bfa14337a",
+   "before Dockerfile.perftest (scratch)": "2702c405b773786330f7ff4f9033206586d1afbf73f4993794cbca579fc95a9b",
+   "seed manifest (scratch)": "c48d6fb9e72de257af784094caf405ac197d6a739eb41e957b937b314160d14a",
+   "reduction script (scratch)": "4907ffbc530535a095fec9f00dc2ebf04c05e5070e64147eaa0bab990b0d95a5",
+   "run driver (scratch)": "c488e2699685824245070a911f3ff12093ed88897f7c27788fa78ba2296da9df"
+  }
+ },
+ "environment": {
+  "host": "Windows 11 Pro 10.0.26200, Docker Desktop 29.6.1 (WSL2 kernel 6.18.33.2), 24 CPUs, 31.1 GiB; Node 24.15.0 client on the host",
+  "postgres": "postgres:17-bookworm sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0, PostgreSQL 17.11, compose settings (pg_stat_statements, track_io_timing)",
+  "stalled_observer": "node:24.18.0-bookworm sha256:5711a0d445a1af54af9589066c646df387d1831a608226f4cd694fc59e745059 (pre-existing image)",
+  "server": "tools/perftest/compose.yaml: HMEM_POOL_SIZE 15 and HMEM_POOL_DELIVERY_SIZE 10 (production defaults), 30 s statement timeout, default RTS (-N on 24 CPUs), local authentication, embeddings disabled. The before image has one pool and ignores HMEM_POOL_DELIVERY_SIZE, so it ran with 15 connections; earlier receipts ran it with 10.",
+  "seed": "A fresh volume seeded with perftest.mjs through the after image: 6 planning workspaces (1,500 projects, 9,153 tasks, 12,000 Observations); 562 terminated sessions (3,271,093,120 raw bytes, all 562 archives ready) and 12 active (347,544,869 bytes) in 33,825 chunks; 7,100 API task updates cloned 25 times and spread over 90 days. 5,023,069,875-byte database, 412,149 audit rows, 77,149 outbox rows (hot workspace counter 10,140). CREATE EXTENSION pg_stat_statements was run on the seed before the stopped volume (6,123,522,560 bytes) was copied once to hmem-perftest-pgdata-base; every run restored that copy (same byte count each time)."
+ },
+ "method": {
+  "matching": "Same seed copy, workload definition, compose file and host for all variants; each run starts a fresh server on a freshly restored volume. Counterbalanced order before-1, after-1, abl-1, abl-2, after-2, before-2 (mean position 3.5 each). Gates compare the mean of each variant's two runs with the before mean, as in the earlier receipts.",
+  "workload": "combined.mjs defaults (30 s idle, 120 s contention, 8 s stuck catch-up hold); see tools/server-performance-qualification.json method.workload.",
+  "measurement": "Client latency from the host. Database counts are pg_stat_statements calls per phase: outbox_scan = FROM change_stream_outbox, scope_lock = hmem_change_stream_lock (top-level statements only; writers take the lock inside plpgsql). Pool counters are health deltas per phase for pool (main) and delivery_pool. Pool wait share = mean db_wait_ms / mean complete_ms over the slowest 5% of joined foreground requests (main pool; the before image has no request phases or pool counters)."
+ },
+ "commands": [
+  "git archive <rev> | tar -x -C .tmp/perftest-postpool/{before,after,abl}-src; before: keep the 7127a3d9 package metadata under perftest-7127a3d9/, restore 8d5101d0 metadata in place, Dockerfile.perftest = HEAD Dockerfile plus the two COPY lines after the dependency layer; ablation: apply the patch to hmem-core/src/HMem/DB/ChangeStream.hs",
+  "docker build -f Dockerfile.perftest --target runtime --label hmem.perftest.revision=7127a3d974e1792b0446bbfb3a61e0607e66a457 --label hmem.perftest.owner=task-033d1704-17e8cd32 --label hmem.perftest.dockerfile=repo-Dockerfile-plus-hmem-core-cbits-and-8d5101d0-dependency-layer -t hmem-perftest:7127a3d9 .",
+  "docker build -f Dockerfile --target runtime --label hmem.perftest.revision=f206ff72a01482436ff22dca4eaee9844931384d [--label hmem.perftest.patch=<patch sha256>] --label hmem.perftest.variant={after,scope-lock-ablation} --label hmem.perftest.owner=task-033d1704-17e8cd32 --label hmem.perftest.dockerfile=repo-Dockerfile -t hmem-perftest:f206ff72[-abl] .",
+  "PERFTEST_DIR=.tmp/perftest-postpool/run PERFTEST_SECRETS=<run>/secrets.env PERFTEST_IMAGE=hmem-perftest:f206ff72 docker compose -p hmem-perftest -f tools/perftest/compose.yaml --env-file <run>/secrets.env up -d",
+  "node tools/perftest/perftest.mjs seed-planning --workspaces 6; seed-sessions --scale 1 --clients 8; seed-history --updates 7100 --clients 16 --primary-share 0.25; clone-history --factor 25; after all 562 archive jobs were ready: spread-history; manifest",
+  "compose stop; compose up -d postgres; CREATE EXTENSION IF NOT EXISTS pg_stat_statements; compose stop; docker volume create hmem-perftest-pgdata-base; docker run --rm -v hmem-perftest-pgdata:/from:ro -v hmem-perftest-pgdata-base:/to postgres:17-bookworm sh -c \"cp -a /from/. /to/\"",
+  "per run: compose down; docker run --rm -v hmem-perftest-pgdata:/to -v hmem-perftest-pgdata-base:/from:ro postgres:17-bookworm sh -c \"find /to -mindepth 1 -delete && cp -a /from/. /to/\"; PERFTEST_IMAGE=<tag> compose up -d; PERFTEST_OUT=.tmp/perftest-postpool/summaries node .tmp/perftest-postpool/combined.mjs --label <run>",
+  "reduction: a scratch script reduced each summary into runs[] and foreground_gate (ratio of the two-run means per route); it was removed at teardown"
+ ],
+ "runs": [
+  {
+   "run": "before-1",
+   "variant": "before",
+   "started_at": "2026-11-17T10:59:08.512Z",
+   "finished_at": "2026-11-17T11:02:21.001Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 12902,
+     "p50": 11.4,
+     "p95": 151.2,
+     "p99": 343.2,
+     "max": 641.5,
+     "failures": 0
+    },
+    "p95_by_route": {
+     "task_get": 29.4,
+     "task_update_fields": 348.8,
+     "task_list_query": 29.3,
+     "search_unified": 155.8,
+     "nav_root": 290.9,
+     "nav_project": 90.5,
+     "nav_focus": 129.1,
+     "planning_counts": 51.7,
+     "project_overview": 56.3,
+     "observation_list_query": 39.8
+    }
+   },
+   "seeded_append": {
+    "n": 1443,
+    "p95": 77.1
+   },
+   "proof_append_p95_ms": 92.2,
+   "hot_update_p95_ms": 325.5,
+   "contention_db": {
+    "ms": 120588.7,
+    "outbox_scan": {
+     "calls": 959,
+     "total_ms": 3956.6
+    },
+    "scope_lock": {
+     "calls": 993,
+     "total_ms": 1842.2
+    },
+    "replay_authority_calls": 993,
+    "statement_calls": 1907945,
+    "pool_checkout": null,
+    "delivery_pool_checkout": null,
+    "lock_wait_samples": 1,
+    "max_ungranted": 3
+   },
+   "idle_db": {
+    "ms": 30009.6,
+    "outbox_scan": 244,
+    "scope_lock_calls": 28,
+    "authorization_calls": 28,
+    "pool_checkout": null,
+    "delivery_pool_checkout": null,
+    "frames_received": 432
+   },
+   "foreground_tail": null,
+   "delivery": {
+    "hot_writes_ok": 1920,
+    "delivered_by_phase_end": [
+     1152,
+     1170,
+     1153,
+     1153
+    ],
+    "commit_to_frame_p95_ms": [
+     1201.3,
+     1227.6,
+     1191.4,
+     1190.9
+    ],
+    "closed": [
+     null,
+     null,
+     null,
+     null
+    ]
+   },
+   "stalled": {
+    "bytes_after_resume": 2303917,
+    "changes_after_resume": 1920
+   },
+   "stuck": {
+    "blocked_retired_ms": null,
+    "release_ms": 7704.4,
+    "writes": {
+     "during_hold": 31,
+     "after_release": 5,
+     "failed": 0,
+     "undelivered": 0,
+     "during_hold_p95": 7117.1,
+     "after_release_p95": 946.8
+    },
+    "observer_closures": [],
+    "late_upgrade_ok": true,
+    "late_checkpoint_ms": 17.3,
+    "after_release_upgrade_ok": true,
+    "after_release_checkpoint_ms": 18.7,
+    "lock_waiters_max": 1,
+    "pool_checkout": null,
+    "delivery_pool_checkout": null,
+    "pools_end": {
+     "pool": {
+      "active": 0,
+      "max": 15
+     },
+     "delivery_pool": null
+    }
+   },
+   "archive": {
+    "streams": [
+     {
+      "bytes": 86387903,
+      "receipt_match": true,
+      "ms": 40348.1
+     },
+     {
+      "bytes": 34812371,
+      "receipt_match": true,
+      "ms": 17499.9
+     }
+    ],
+    "incremental_mib": 118.1
+   },
+   "large_bodies_incremental_mib": 35.7,
+   "snapshots": [
+    {
+     "ws": "W0",
+     "profile": "full_v1",
+     "items": 4547,
+     "item_inserts": 4547,
+     "scope_lock_calls": 47,
+     "writer_max_ms": 823.9
+    },
+    {
+     "ws": "W0",
+     "profile": "workspace_shell_v1",
+     "items": 1,
+     "item_inserts": 1,
+     "scope_lock_calls": 2,
+     "writer_max_ms": 36
+    },
+    {
+     "ws": "HOT",
+     "profile": "full_v1",
+     "items": 4473,
+     "item_inserts": 4473,
+     "scope_lock_calls": 46,
+     "writer_max_ms": 780.8
+    }
+   ],
+   "recovery": {
+    "full_hot_ms": 1759.1,
+    "shell_measured_ms": 8.7
+   },
+   "evidence": {
+    "proofs_verified": 44,
+    "terminate_sha_match": "4/4",
+    "ranges": "3/3,3/3,1/1,1/1",
+    "proof_max_ms": 461.5
+   },
+   "websocket_events": {
+    "request_log:/api/v1/ws:500:-:-": 27
+   },
+   "contention_rss_max_mib": 413.2,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 741.3,
+    "warnings": 0
+   }
+  },
+  {
+   "run": "after-1",
+   "variant": "after",
+   "started_at": "2026-11-17T11:02:43.970Z",
+   "finished_at": "2026-11-17T11:05:56.151Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 13380,
+     "p50": 10.8,
+     "p95": 162.5,
+     "p99": 333.8,
+     "max": 594.7,
+     "failures": 0
+    },
+    "p95_by_route": {
+     "task_get": 5.5,
+     "task_update_fields": 354.3,
+     "task_list_query": 11.2,
+     "search_unified": 177.4,
+     "nav_root": 287.1,
+     "nav_project": 19.8,
+     "nav_focus": 21.1,
+     "planning_counts": 5.7,
+     "project_overview": 15.2,
+     "observation_list_query": 13.9
+    }
+   },
+   "seeded_append": {
+    "n": 1450,
+    "p95": 35.1
+   },
+   "proof_append_p95_ms": 46.9,
+   "hot_update_p95_ms": 351.6,
+   "contention_db": {
+    "ms": 120877.4,
+    "outbox_scan": {
+     "calls": 2337,
+     "total_ms": 131.1
+    },
+    "scope_lock": {
+     "calls": 3067,
+     "total_ms": 13424
+    },
+    "replay_authority_calls": 3067,
+    "statement_calls": 2020008,
+    "pool_checkout": {
+     "checkouts": 187802,
+     "unattributed": 13278,
+     "capacity_waits": 7246,
+     "wait_total_ms": 120640.7,
+     "hold_total_ms": 613883.4,
+     "connects": 8
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 6377,
+     "unattributed": 6377,
+     "capacity_waits": 0,
+     "wait_total_ms": 35.4,
+     "hold_total_ms": 22705.3,
+     "connects": 3
+    },
+    "lock_wait_samples": 2,
+    "max_ungranted": 2
+   },
+   "idle_db": {
+    "ms": 30001.3,
+    "outbox_scan": 0,
+    "scope_lock_calls": 0,
+    "authorization_calls": 0,
+    "pool_checkout": {
+     "checkouts": 3549,
+     "unattributed": 3549,
+     "capacity_waits": 0,
+     "wait_total_ms": 11.2,
+     "hold_total_ms": 4028.4,
+     "connects": 0
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 172,
+     "unattributed": 172,
+     "capacity_waits": 0,
+     "wait_total_ms": 0.2,
+     "hold_total_ms": 109.7,
+     "connects": 0
+    },
+    "frames_received": 0
+   },
+   "foreground_tail": {
+    "n": 669,
+    "complete_ms": 107.2,
+    "db_wait_ms": 20.5,
+    "db_hold_ms": 90.3,
+    "pool_wait_share": 0.191
+   },
+   "delivery": {
+    "hot_writes_ok": 1920,
+    "delivered_by_phase_end": [
+     1920,
+     1920,
+     1920,
+     1920
+    ],
+    "commit_to_frame_p95_ms": [
+     982.6,
+     978.5,
+     981.5,
+     978.8
+    ],
+    "closed": [
+     null,
+     null,
+     null,
+     null
+    ]
+   },
+   "stalled": {
+    "bytes_after_resume": 320632,
+    "changes_after_resume": 261
+   },
+   "stuck": {
+    "blocked_retired_ms": 755.9,
+    "release_ms": 8119,
+    "writes": {
+     "during_hold": 31,
+     "after_release": 7,
+     "failed": 0,
+     "undelivered": 0,
+     "during_hold_p95": 1050.3,
+     "after_release_p95": 896.4
+    },
+    "observer_closures": [
+     {
+      "name": "blocked",
+      "code": 1006,
+      "ms": 755.9
+     }
+    ],
+    "late_upgrade_ok": true,
+    "late_checkpoint_ms": 8.5,
+    "after_release_upgrade_ok": true,
+    "after_release_checkpoint_ms": 22.8,
+    "lock_waiters_max": 1,
+    "pool_checkout": {
+     "checkouts": 1629,
+     "unattributed": 1272,
+     "capacity_waits": 2,
+     "wait_total_ms": 7.6,
+     "hold_total_ms": 3186,
+     "connects": 0
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 232,
+     "unattributed": 232,
+     "capacity_waits": 0,
+     "wait_total_ms": 4.9,
+     "hold_total_ms": 8377.3,
+     "connects": 1
+    },
+    "pools_end": {
+     "pool": {
+      "active": 0,
+      "max": 15
+     },
+     "delivery_pool": {
+      "active": 0,
+      "max": 10
+     }
+    }
+   },
+   "archive": {
+    "streams": [
+     {
+      "bytes": 86387903,
+      "receipt_match": true,
+      "ms": 41094.3
+     },
+     {
+      "bytes": 34812371,
+      "receipt_match": true,
+      "ms": 16971
+     }
+    ],
+    "incremental_mib": 56.7
+   },
+   "large_bodies_incremental_mib": 19.6,
+   "snapshots": [
+    {
+     "ws": "W0",
+     "profile": "full_v1",
+     "items": 4547,
+     "item_inserts": 18,
+     "scope_lock_calls": 47,
+     "writer_max_ms": 266.4
+    },
+    {
+     "ws": "W0",
+     "profile": "workspace_shell_v1",
+     "items": 1,
+     "item_inserts": 1,
+     "scope_lock_calls": 2,
+     "writer_max_ms": 53.9
+    },
+    {
+     "ws": "HOT",
+     "profile": "full_v1",
+     "items": 4473,
+     "item_inserts": 18,
+     "scope_lock_calls": 46,
+     "writer_max_ms": 281.3
+    }
+   ],
+   "recovery": {
+    "full_hot_ms": 1474.9,
+    "shell_measured_ms": "resync_workspace_shell_v1 failed with HTTP 500 Something went wrong"
+   },
+   "evidence": {
+    "proofs_verified": 44,
+    "terminate_sha_match": "4/4",
+    "ranges": "3/3,3/3,1/1,1/1",
+    "proof_max_ms": 442.9
+   },
+   "websocket_events": {
+    "websocket_upgrade:accepted:canonical": 27,
+    "websocket_replay:completed:initial": 26,
+    "session_prefix_proof:verified": 44,
+    "request_log:/api/v1/ws:null:upgrade_closed:upgrade": 27,
+    "websocket_turn:retired_write_timeout": 1,
+    "websocket_replay:retired:live": 1,
+    "websocket_connection:closed:canonical": 27,
+    "websocket_turn:retired_deadline": 1,
+    "websocket_cleanup:unfinished": 1,
+    "websocket_replay:retired:initial": 1,
+    "websocket_reclaim:reclaimed": 1
+   },
+   "contention_rss_max_mib": 352.3,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 490.9,
+    "warnings": 0
+   }
+  },
+  {
+   "run": "abl-1",
+   "variant": "abl",
+   "started_at": "2026-11-17T11:06:22.698Z",
+   "finished_at": "2026-11-17T11:09:36.612Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 11370,
+     "p50": 11.1,
+     "p95": 195.2,
+     "p99": 458.5,
+     "max": 905,
+     "failures": 0
+    },
+    "p95_by_route": {
+     "task_get": 5.7,
+     "task_update_fields": 462.6,
+     "task_list_query": 11.7,
+     "search_unified": 316.6,
+     "nav_root": 282.3,
+     "nav_project": 23.7,
+     "nav_focus": 23.1,
+     "planning_counts": 5.6,
+     "project_overview": 15.7,
+     "observation_list_query": 14.7
+    }
+   },
+   "seeded_append": {
+    "n": 1363,
+    "p95": 72.8
+   },
+   "proof_append_p95_ms": 94.1,
+   "hot_update_p95_ms": 475.5,
+   "contention_db": {
+    "ms": 120216.2,
+    "outbox_scan": {
+     "calls": 1837,
+     "total_ms": 120.7
+    },
+    "scope_lock": {
+     "calls": 48,
+     "total_ms": 220.2
+    },
+    "replay_authority_calls": 2355,
+    "statement_calls": 1857612,
+    "pool_checkout": {
+     "checkouts": 173332,
+     "unattributed": 11800,
+     "capacity_waits": 6786,
+     "wait_total_ms": 146097.2,
+     "hold_total_ms": 625448.6,
+     "connects": 2
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 5176,
+     "unattributed": 5176,
+     "capacity_waits": 0,
+     "wait_total_ms": 5.8,
+     "hold_total_ms": 10261.1,
+     "connects": 0
+    },
+    "lock_wait_samples": 0,
+    "max_ungranted": 0
+   },
+   "idle_db": {
+    "ms": 30013.8,
+    "outbox_scan": 0,
+    "scope_lock_calls": 0,
+    "authorization_calls": 0,
+    "pool_checkout": {
+     "checkouts": 3516,
+     "unattributed": 3516,
+     "capacity_waits": 0,
+     "wait_total_ms": 12.7,
+     "hold_total_ms": 4556.3,
+     "connects": 1
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 179,
+     "unattributed": 179,
+     "capacity_waits": 0,
+     "wait_total_ms": 0.2,
+     "hold_total_ms": 135.2,
+     "connects": 0
+    },
+    "frames_received": 0
+   },
+   "foreground_tail": {
+    "n": 569,
+    "complete_ms": 122.6,
+    "db_wait_ms": 27.5,
+    "db_hold_ms": 99.8,
+    "pool_wait_share": 0.224
+   },
+   "delivery": {
+    "hot_writes_ok": 1918,
+    "delivered_by_phase_end": [
+     1917,
+     1917,
+     1917,
+     1917
+    ],
+    "commit_to_frame_p95_ms": [
+     995.7,
+     992.8,
+     992.7,
+     993.8
+    ],
+    "closed": [
+     null,
+     null,
+     null,
+     null
+    ]
+   },
+   "stalled": {
+    "bytes_after_resume": 295365,
+    "changes_after_resume": 241
+   },
+   "stuck": {
+    "blocked_retired_ms": null,
+    "release_ms": 7706.7,
+    "writes": {
+     "during_hold": 30,
+     "after_release": 6,
+     "failed": 0,
+     "undelivered": 0,
+     "during_hold_p95": 982.1,
+     "after_release_p95": 869.8
+    },
+    "observer_closures": [],
+    "late_upgrade_ok": true,
+    "late_checkpoint_ms": 9.1,
+    "after_release_upgrade_ok": true,
+    "after_release_checkpoint_ms": 601.7,
+    "lock_waiters_max": 0,
+    "pool_checkout": {
+     "checkouts": 1771,
+     "unattributed": 1432,
+     "capacity_waits": 48,
+     "wait_total_ms": 451.4,
+     "hold_total_ms": 3376.9,
+     "connects": 0
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 247,
+     "unattributed": 247,
+     "capacity_waits": 0,
+     "wait_total_ms": 0.3,
+     "hold_total_ms": 342.9,
+     "connects": 0
+    },
+    "pools_end": {
+     "pool": {
+      "active": 0,
+      "max": 15
+     },
+     "delivery_pool": {
+      "active": 0,
+      "max": 10
+     }
+    }
+   },
+   "archive": {
+    "streams": [
+     {
+      "bytes": 86387903,
+      "receipt_match": true,
+      "ms": 44508.6
+     },
+     {
+      "bytes": 34812371,
+      "receipt_match": true,
+      "ms": 17779.3
+     }
+    ],
+    "incremental_mib": 53.1
+   },
+   "large_bodies_incremental_mib": 19.8,
+   "snapshots": [
+    {
+     "ws": "W0",
+     "profile": "full_v1",
+     "items": 4547,
+     "item_inserts": 18,
+     "scope_lock_calls": 47,
+     "writer_max_ms": 290.8
+    },
+    {
+     "ws": "W0",
+     "profile": "workspace_shell_v1",
+     "items": 1,
+     "item_inserts": 1,
+     "scope_lock_calls": 2,
+     "writer_max_ms": 37.8
+    },
+    {
+     "ws": "HOT",
+     "profile": "full_v1",
+     "items": 4473,
+     "item_inserts": 18,
+     "scope_lock_calls": 46,
+     "writer_max_ms": 296.5
+    }
+   ],
+   "recovery": {
+    "full_hot_ms": 1169,
+    "shell_measured_ms": 28.9
+   },
+   "evidence": {
+    "proofs_verified": 44,
+    "terminate_sha_match": "4/4",
+    "ranges": "3/3,3/3,1/1,1/1",
+    "proof_max_ms": 613
+   },
+   "websocket_events": {
+    "websocket_upgrade:accepted:canonical": 27,
+    "websocket_replay:completed:initial": 27,
+    "session_prefix_proof:verified": 44,
+    "request_log:/api/v1/ws:null:upgrade_closed:upgrade": 27,
+    "websocket_turn:retired_write_timeout": 1,
+    "websocket_replay:retired:live": 1,
+    "websocket_connection:closed:canonical": 27
+   },
+   "contention_rss_max_mib": 346.5,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 675.6,
+    "warnings": 0
+   }
+  },
+  {
+   "run": "abl-2",
+   "variant": "abl",
+   "started_at": "2026-11-17T11:10:00.877Z",
+   "finished_at": "2026-11-17T11:13:15.872Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 13049,
+     "p50": 11,
+     "p95": 162.4,
+     "p99": 340.1,
+     "max": 711.7,
+     "failures": 0
+    },
+    "p95_by_route": {
+     "task_get": 5.8,
+     "task_update_fields": 354.1,
+     "task_list_query": 9.8,
+     "search_unified": 205.7,
+     "nav_root": 292.2,
+     "nav_project": 20.9,
+     "nav_focus": 22.4,
+     "planning_counts": 5.9,
+     "project_overview": 16.9,
+     "observation_list_query": 14.1
+    }
+   },
+   "seeded_append": {
+    "n": 1429,
+    "p95": 50.1
+   },
+   "proof_append_p95_ms": 62.1,
+   "hot_update_p95_ms": 356.4,
+   "contention_db": {
+    "ms": 120270.2,
+    "outbox_scan": {
+     "calls": 1956,
+     "total_ms": 128.7
+    },
+    "scope_lock": {
+     "calls": 48,
+     "total_ms": 249.4
+    },
+    "replay_authority_calls": 2583,
+    "statement_calls": 1957739,
+    "pool_checkout": {
+     "checkouts": 182795,
+     "unattributed": 10412,
+     "capacity_waits": 9141,
+     "wait_total_ms": 160846.5,
+     "hold_total_ms": 595631,
+     "connects": 7
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 5403,
+     "unattributed": 5403,
+     "capacity_waits": 0,
+     "wait_total_ms": 33.3,
+     "hold_total_ms": 9144,
+     "connects": 3
+    },
+    "lock_wait_samples": 0,
+    "max_ungranted": 0
+   },
+   "idle_db": {
+    "ms": 30007.9,
+    "outbox_scan": 0,
+    "scope_lock_calls": 0,
+    "authorization_calls": 0,
+    "pool_checkout": {
+     "checkouts": 3503,
+     "unattributed": 3503,
+     "capacity_waits": 0,
+     "wait_total_ms": 11.9,
+     "hold_total_ms": 4980.8,
+     "connects": 0
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 172,
+     "unattributed": 172,
+     "capacity_waits": 0,
+     "wait_total_ms": 0.2,
+     "hold_total_ms": 140.7,
+     "connects": 0
+    },
+    "frames_received": 0
+   },
+   "foreground_tail": {
+    "n": 653,
+    "complete_ms": 100.1,
+    "db_wait_ms": 21.5,
+    "db_hold_ms": 82,
+    "pool_wait_share": 0.215
+   },
+   "delivery": {
+    "hot_writes_ok": 1920,
+    "delivered_by_phase_end": [
+     1920,
+     1920,
+     1920,
+     1920
+    ],
+    "commit_to_frame_p95_ms": [
+     973.4,
+     972.1,
+     971.5,
+     972.1
+    ],
+    "closed": [
+     null,
+     null,
+     null,
+     null
+    ]
+   },
+   "stalled": {
+    "bytes_after_resume": 1702479,
+    "changes_after_resume": 1399
+   },
+   "stuck": {
+    "blocked_retired_ms": null,
+    "release_ms": 8246.1,
+    "writes": {
+     "during_hold": 32,
+     "after_release": 5,
+     "failed": 0,
+     "undelivered": 0,
+     "during_hold_p95": 1055.4,
+     "after_release_p95": 1032.8
+    },
+    "observer_closures": [],
+    "late_upgrade_ok": true,
+    "late_checkpoint_ms": 8.5,
+    "after_release_upgrade_ok": true,
+    "after_release_checkpoint_ms": 391.8,
+    "lock_waiters_max": 0,
+    "pool_checkout": {
+     "checkouts": 1741,
+     "unattributed": 1393,
+     "capacity_waits": 0,
+     "wait_total_ms": 5.3,
+     "hold_total_ms": 3090.2,
+     "connects": 0
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 231,
+     "unattributed": 231,
+     "capacity_waits": 0,
+     "wait_total_ms": 0.2,
+     "hold_total_ms": 328.1,
+     "connects": 0
+    },
+    "pools_end": {
+     "pool": {
+      "active": 0,
+      "max": 15
+     },
+     "delivery_pool": {
+      "active": 0,
+      "max": 10
+     }
+    }
+   },
+   "archive": {
+    "streams": [
+     {
+      "bytes": 86387903,
+      "receipt_match": true,
+      "ms": 46559.6
+     },
+     {
+      "bytes": 34812371,
+      "receipt_match": true,
+      "ms": 16287.8
+     }
+    ],
+    "incremental_mib": 53.6
+   },
+   "large_bodies_incremental_mib": 14,
+   "snapshots": [
+    {
+     "ws": "W0",
+     "profile": "full_v1",
+     "items": 4547,
+     "item_inserts": 18,
+     "scope_lock_calls": 47,
+     "writer_max_ms": 588.1
+    },
+    {
+     "ws": "W0",
+     "profile": "workspace_shell_v1",
+     "items": 1,
+     "item_inserts": 1,
+     "scope_lock_calls": 2,
+     "writer_max_ms": 44.9
+    },
+    {
+     "ws": "HOT",
+     "profile": "full_v1",
+     "items": 4473,
+     "item_inserts": 18,
+     "scope_lock_calls": 46,
+     "writer_max_ms": 257
+    }
+   ],
+   "recovery": {
+    "full_hot_ms": 926.9,
+    "shell_measured_ms": 27.9
+   },
+   "evidence": {
+    "proofs_verified": 44,
+    "terminate_sha_match": "4/4",
+    "ranges": "3/3,3/3,1/1,1/1",
+    "proof_max_ms": 321.5
+   },
+   "websocket_events": {
+    "websocket_upgrade:accepted:canonical": 27,
+    "websocket_replay:completed:initial": 27,
+    "session_prefix_proof:verified": 44,
+    "request_log:/api/v1/ws:null:upgrade_closed:upgrade": 27,
+    "websocket_turn:retired_write_timeout": 1,
+    "websocket_replay:retired:live": 1,
+    "websocket_connection:closed:canonical": 27
+   },
+   "contention_rss_max_mib": 340.6,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 1090.7,
+    "warnings": 0
+   }
+  },
+  {
+   "run": "after-2",
+   "variant": "after",
+   "started_at": "2026-11-17T11:13:45.816Z",
+   "finished_at": "2026-11-17T11:17:00.445Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 12801,
+     "p50": 11.2,
+     "p95": 170.3,
+     "p99": 342.3,
+     "max": 622.8,
+     "failures": 0
+    },
+    "p95_by_route": {
+     "task_get": 5.8,
+     "task_update_fields": 362.5,
+     "task_list_query": 10.1,
+     "search_unified": 269.4,
+     "nav_root": 282.4,
+     "nav_project": 18.8,
+     "nav_focus": 22.2,
+     "planning_counts": 5.8,
+     "project_overview": 16.5,
+     "observation_list_query": 14.5
+    }
+   },
+   "seeded_append": {
+    "n": 1457,
+    "p95": 34.8
+   },
+   "proof_append_p95_ms": 36.5,
+   "hot_update_p95_ms": 357,
+   "contention_db": {
+    "ms": 121073.1,
+    "outbox_scan": {
+     "calls": 2400,
+     "total_ms": 137.6
+    },
+    "scope_lock": {
+     "calls": 3167,
+     "total_ms": 15574.6
+    },
+    "replay_authority_calls": 3167,
+    "statement_calls": 1955795,
+    "pool_checkout": {
+     "checkouts": 181129,
+     "unattributed": 9947,
+     "capacity_waits": 7228,
+     "wait_total_ms": 160066.1,
+     "hold_total_ms": 621639,
+     "connects": 5
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 6605,
+     "unattributed": 6605,
+     "capacity_waits": 0,
+     "wait_total_ms": 7.6,
+     "hold_total_ms": 25940,
+     "connects": 0
+    },
+    "lock_wait_samples": 6,
+    "max_ungranted": 2
+   },
+   "idle_db": {
+    "ms": 30005.9,
+    "outbox_scan": 0,
+    "scope_lock_calls": 0,
+    "authorization_calls": 0,
+    "pool_checkout": {
+     "checkouts": 3523,
+     "unattributed": 3523,
+     "capacity_waits": 0,
+     "wait_total_ms": 12,
+     "hold_total_ms": 4388,
+     "connects": 0
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 173,
+     "unattributed": 173,
+     "capacity_waits": 0,
+     "wait_total_ms": 0.2,
+     "hold_total_ms": 132.6,
+     "connects": 0
+    },
+    "frames_received": 0
+   },
+   "foreground_tail": {
+    "n": 641,
+    "complete_ms": 113.5,
+    "db_wait_ms": 20.3,
+    "db_hold_ms": 96.1,
+    "pool_wait_share": 0.179
+   },
+   "delivery": {
+    "hot_writes_ok": 1920,
+    "delivered_by_phase_end": [
+     1920,
+     1920,
+     1920,
+     1920
+    ],
+    "commit_to_frame_p95_ms": [
+     981.1,
+     974.5,
+     976.5,
+     973.5
+    ],
+    "closed": [
+     null,
+     null,
+     null,
+     null
+    ]
+   },
+   "stalled": {
+    "bytes_after_resume": 293032,
+    "changes_after_resume": 239
+   },
+   "stuck": {
+    "blocked_retired_ms": 754,
+    "release_ms": 7937.9,
+    "writes": {
+     "during_hold": 32,
+     "after_release": 5,
+     "failed": 0,
+     "undelivered": 0,
+     "during_hold_p95": 946.5,
+     "after_release_p95": 1138.1
+    },
+    "observer_closures": [
+     {
+      "name": "blocked",
+      "code": 1006,
+      "ms": 754
+     }
+    ],
+    "late_upgrade_ok": true,
+    "late_checkpoint_ms": 6.5,
+    "after_release_upgrade_ok": true,
+    "after_release_checkpoint_ms": 21.4,
+    "lock_waiters_max": 1,
+    "pool_checkout": {
+     "checkouts": 1649,
+     "unattributed": 1301,
+     "capacity_waits": 3,
+     "wait_total_ms": 35.3,
+     "hold_total_ms": 3165.9,
+     "connects": 0
+    },
+    "delivery_pool_checkout": {
+     "checkouts": 277,
+     "unattributed": 277,
+     "capacity_waits": 0,
+     "wait_total_ms": 10.7,
+     "hold_total_ms": 8519.6,
+     "connects": 2
+    },
+    "pools_end": {
+     "pool": {
+      "active": 0,
+      "max": 15
+     },
+     "delivery_pool": {
+      "active": 0,
+      "max": 10
+     }
+    }
+   },
+   "archive": {
+    "streams": [
+     {
+      "bytes": 86387903,
+      "receipt_match": true,
+      "ms": 41361.8
+     },
+     {
+      "bytes": 34812371,
+      "receipt_match": true,
+      "ms": 16314.2
+     }
+    ],
+    "incremental_mib": 51.6
+   },
+   "large_bodies_incremental_mib": 15.8,
+   "snapshots": [
+    {
+     "ws": "W0",
+     "profile": "full_v1",
+     "items": 4547,
+     "item_inserts": 18,
+     "scope_lock_calls": 47,
+     "writer_max_ms": 560
+    },
+    {
+     "ws": "W0",
+     "profile": "workspace_shell_v1",
+     "items": 1,
+     "item_inserts": 1,
+     "scope_lock_calls": 2,
+     "writer_max_ms": 43.6
+    },
+    {
+     "ws": "HOT",
+     "profile": "full_v1",
+     "items": 4473,
+     "item_inserts": 18,
+     "scope_lock_calls": 46,
+     "writer_max_ms": 501
+    }
+   ],
+   "recovery": {
+    "full_hot_ms": 852.9,
+    "shell_measured_ms": 8.8
+   },
+   "evidence": {
+    "proofs_verified": 44,
+    "terminate_sha_match": "4/4",
+    "ranges": "3/3,3/3,1/1,1/1",
+    "proof_max_ms": 443.6
+   },
+   "websocket_events": {
+    "websocket_upgrade:accepted:canonical": 27,
+    "websocket_replay:completed:initial": 26,
+    "session_prefix_proof:verified": 44,
+    "websocket_turn:retired_write_timeout": 1,
+    "websocket_replay:retired:live": 1,
+    "websocket_connection:closed:canonical": 27,
+    "request_log:/api/v1/ws:null:upgrade_closed:upgrade": 27,
+    "websocket_turn:retired_deadline": 1,
+    "websocket_turn:retired_closing": 1,
+    "websocket_cleanup:unfinished": 1,
+    "websocket_replay:retired:initial": 1,
+    "websocket_reclaim:reclaimed": 1
+   },
+   "contention_rss_max_mib": 349.4,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 1046.9,
+    "warnings": 0
+   }
+  },
+  {
+   "run": "before-2",
+   "variant": "before",
+   "started_at": "2026-11-17T11:17:34.088Z",
+   "finished_at": "2026-11-17T11:20:47.629Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 13103,
+     "p50": 11.1,
+     "p95": 157.6,
+     "p99": 350.6,
+     "max": 738.8,
+     "failures": 0
+    },
+    "p95_by_route": {
+     "task_get": 7.9,
+     "task_update_fields": 365.8,
+     "task_list_query": 12.6,
+     "search_unified": 275.7,
+     "nav_root": 282.5,
+     "nav_project": 29.1,
+     "nav_focus": 30.9,
+     "planning_counts": 6.5,
+     "project_overview": 19.6,
+     "observation_list_query": 14.6
+    }
+   },
+   "seeded_append": {
+    "n": 1442,
+    "p95": 46.1
+   },
+   "proof_append_p95_ms": 43.6,
+   "hot_update_p95_ms": 350.5,
+   "contention_db": {
+    "ms": 122930.3,
+    "outbox_scan": {
+     "calls": 436,
+     "total_ms": 1725.9
+    },
+    "scope_lock": {
+     "calls": 475,
+     "total_ms": 921.9
+    },
+    "replay_authority_calls": 475,
+    "statement_calls": 1912241,
+    "pool_checkout": null,
+    "delivery_pool_checkout": null,
+    "lock_wait_samples": 1,
+    "max_ungranted": 4
+   },
+   "idle_db": {
+    "ms": 30011.5,
+    "outbox_scan": 238,
+    "scope_lock_calls": 22,
+    "authorization_calls": 22,
+    "pool_checkout": null,
+    "delivery_pool_checkout": null,
+    "frames_received": 390
+   },
+   "foreground_tail": null,
+   "delivery": {
+    "hot_writes_ok": 1914,
+    "delivered_by_phase_end": [
+     504,
+     504,
+     522,
+     504
+    ],
+    "commit_to_frame_p95_ms": [
+     1148.3,
+     1158.8,
+     1164.5,
+     1165.1
+    ],
+    "closed": [
+     null,
+     null,
+     null,
+     null
+    ]
+   },
+   "stalled": {
+    "bytes_after_resume": 2284614,
+    "changes_after_resume": 1914
+   },
+   "stuck": {
+    "blocked_retired_ms": null,
+    "release_ms": 7902.1,
+    "writes": {
+     "during_hold": 31,
+     "after_release": 5,
+     "failed": 0,
+     "undelivered": 0,
+     "during_hold_p95": 8069.8,
+     "after_release_p95": 991.9
+    },
+    "observer_closures": [],
+    "late_upgrade_ok": true,
+    "late_checkpoint_ms": 10,
+    "after_release_upgrade_ok": true,
+    "after_release_checkpoint_ms": 17.4,
+    "lock_waiters_max": 1,
+    "pool_checkout": null,
+    "delivery_pool_checkout": null,
+    "pools_end": {
+     "pool": {
+      "active": 1,
+      "max": 15
+     },
+     "delivery_pool": null
+    }
+   },
+   "archive": {
+    "streams": [
+     {
+      "bytes": 86387903,
+      "receipt_match": true,
+      "ms": 82765.9
+     },
+     {
+      "bytes": 34812371,
+      "receipt_match": true,
+      "ms": 16884.7
+     }
+    ],
+    "incremental_mib": 98.7
+   },
+   "large_bodies_incremental_mib": 17.6,
+   "snapshots": [
+    {
+     "ws": "W0",
+     "profile": "full_v1",
+     "items": 4547,
+     "item_inserts": 4547,
+     "scope_lock_calls": 47,
+     "writer_max_ms": 854.3
+    },
+    {
+     "ws": "W0",
+     "profile": "workspace_shell_v1",
+     "items": 1,
+     "item_inserts": 1,
+     "scope_lock_calls": 2,
+     "writer_max_ms": 37.4
+    },
+    {
+     "ws": "HOT",
+     "profile": "full_v1",
+     "items": 4473,
+     "item_inserts": 4473,
+     "scope_lock_calls": 46,
+     "writer_max_ms": 899
+    }
+   ],
+   "recovery": {
+    "full_hot_ms": 1957.2,
+    "shell_measured_ms": 7.1
+   },
+   "evidence": {
+    "proofs_verified": 44,
+    "terminate_sha_match": "4/4",
+    "ranges": "3/3,3/3,1/1,1/1",
+    "proof_max_ms": 330.9
+   },
+   "websocket_events": {
+    "request_log:/api/v1/ws:500:-:-": 27
+   },
+   "contention_rss_max_mib": 390.1,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 759,
+    "warnings": 0
+   }
+  }
+ ],
+ "foreground_gate": {
+  "after": {
+   "before_pooled_p95_ms": [
+    151.2,
+    157.6
+   ],
+   "after_pooled_p95_ms": [
+    162.5,
+    170.3
+   ],
+   "pooled_ratio_of_means": 1.078,
+   "pooled_margin": 0.022,
+   "seeded_append": {
+    "before_p95_ms": 61.6,
+    "after_p95_ms": 35,
+    "ratio": 0.567,
+    "margin": 0.533
+   },
+   "routes_over_limit": [],
+   "worst_route": "search_unified",
+   "by_route": {
+    "task_get": {
+     "before_p95_ms": 18.7,
+     "after_p95_ms": 5.7,
+     "ratio": 0.303
+    },
+    "task_update_fields": {
+     "before_p95_ms": 357.3,
+     "after_p95_ms": 358.4,
+     "ratio": 1.003
+    },
+    "task_list_query": {
+     "before_p95_ms": 21,
+     "after_p95_ms": 10.6,
+     "ratio": 0.508
+    },
+    "search_unified": {
+     "before_p95_ms": 215.8,
+     "after_p95_ms": 223.4,
+     "ratio": 1.035
+    },
+    "nav_root": {
+     "before_p95_ms": 286.7,
+     "after_p95_ms": 284.8,
+     "ratio": 0.993
+    },
+    "nav_project": {
+     "before_p95_ms": 59.8,
+     "after_p95_ms": 19.3,
+     "ratio": 0.323
+    },
+    "nav_focus": {
+     "before_p95_ms": 80,
+     "after_p95_ms": 21.7,
+     "ratio": 0.271
+    },
+    "planning_counts": {
+     "before_p95_ms": 29.1,
+     "after_p95_ms": 5.8,
+     "ratio": 0.198
+    },
+    "project_overview": {
+     "before_p95_ms": 38,
+     "after_p95_ms": 15.9,
+     "ratio": 0.418
+    },
+    "observation_list_query": {
+     "before_p95_ms": 27.2,
+     "after_p95_ms": 14.2,
+     "ratio": 0.522
+    }
+   }
+  },
+  "ablation": {
+   "before_pooled_p95_ms": [
+    151.2,
+    157.6
+   ],
+   "after_pooled_p95_ms": [
+    195.2,
+    162.4
+   ],
+   "pooled_ratio_of_means": 1.158,
+   "pooled_margin": -0.058,
+   "seeded_append": {
+    "before_p95_ms": 61.6,
+    "after_p95_ms": 61.5,
+    "ratio": 0.998,
+    "margin": 0.102
+   },
+   "routes_over_limit": [
+    "task_update_fields",
+    "search_unified"
+   ],
+   "worst_route": "search_unified",
+   "by_route": {
+    "task_get": {
+     "before_p95_ms": 18.7,
+     "after_p95_ms": 5.8,
+     "ratio": 0.308
+    },
+    "task_update_fields": {
+     "before_p95_ms": 357.3,
+     "after_p95_ms": 408.4,
+     "ratio": 1.143
+    },
+    "task_list_query": {
+     "before_p95_ms": 21,
+     "after_p95_ms": 10.8,
+     "ratio": 0.513
+    },
+    "search_unified": {
+     "before_p95_ms": 215.8,
+     "after_p95_ms": 261.2,
+     "ratio": 1.21
+    },
+    "nav_root": {
+     "before_p95_ms": 286.7,
+     "after_p95_ms": 287.3,
+     "ratio": 1.002
+    },
+    "nav_project": {
+     "before_p95_ms": 59.8,
+     "after_p95_ms": 22.3,
+     "ratio": 0.373
+    },
+    "nav_focus": {
+     "before_p95_ms": 80,
+     "after_p95_ms": 22.8,
+     "ratio": 0.284
+    },
+    "planning_counts": {
+     "before_p95_ms": 29.1,
+     "after_p95_ms": 5.8,
+     "ratio": 0.198
+    },
+    "project_overview": {
+     "before_p95_ms": 38,
+     "after_p95_ms": 16.3,
+     "ratio": 0.43
+    },
+    "observation_list_query": {
+     "before_p95_ms": 27.2,
+     "after_p95_ms": 14.4,
+     "ratio": 0.529
+    }
+   }
+  },
+  "against_faster_before_run_only": "before-1 cheap reads were 2-8x slower than before-2 (task_get 29.4 vs 7.9 ms). Against before-2 alone, after stays within the limit on every route (largest nav_root 1.008, task_update_fields 0.98, search_unified 0.81, cheap reads 0.66-0.97), pooled 1.056 and seeded append 0.76; ablation exceeds it on task_update_fields (1.116) and pooled (1.135)."
+ },
+ "gates": [
+  {
+   "name": "Ordinary foreground p95 <= +10% pooled and per route, including seeded capture append",
+   "limit": "ratio of means <= 1.10",
+   "before": {
+    "pooled_p95_ms": [
+     151.2,
+     157.6
+    ],
+    "seeded_append_p95_ms": [
+     77.1,
+     46.1
+    ]
+   },
+   "after": {
+    "result": "PASS",
+    "pooled_ratio": 1.078,
+    "pooled_margin": 0.022,
+    "max_route_ratio": 1.035,
+    "max_route": "search_unified",
+    "route_margin": 0.065,
+    "seeded_append_ratio": 0.567,
+    "seeded_append_margin": 0.533
+   },
+   "ablation": {
+    "result": "FAIL",
+    "pooled_ratio": 1.158,
+    "pooled_margin": -0.058,
+    "routes_over_limit": {
+     "task_update_fields": 1.143,
+     "search_unified": 1.21
+    },
+    "seeded_append_ratio": 0.998,
+    "seeded_append_margin": 0.102
+   }
+  },
+  {
+   "name": "Archive incremental working set",
+   "limit": "<= 128 MiB",
+   "before_mib": [
+    118.1,
+    98.7
+   ],
+   "after": {
+    "result": "PASS",
+    "mib": [
+     56.7,
+     51.6
+    ],
+    "margin_mib": 71.3
+   },
+   "ablation": {
+    "result": "PASS",
+    "mib": [
+     53.1,
+     53.6
+    ],
+    "margin_mib": 74.4
+   },
+   "note": "Two concurrent streams of 86.4 and 34.8 MB under contention, receipts matched in every run; not the fixed-budget 1 MiB/100 MiB/1 GiB series."
+  },
+  {
+   "name": "Stalled observer retired, healthy observers progress",
+   "limit": "stalled socket retired by the 250 ms write deadline; healthy observers receive every committed change",
+   "before": {
+    "result": "FAIL (baseline)",
+    "stalled_changes_after_resume": [
+     1920,
+     1914
+    ],
+    "healthy_delivered_of_1920": [
+     [
+      1152,
+      1170,
+      1153,
+      1153
+     ],
+     [
+      504,
+      504,
+      522,
+      504
+     ]
+    ]
+   },
+   "after": {
+    "result": "PASS",
+    "retired_write_timeout": [
+     1,
+     1
+    ],
+    "stalled_bytes_after_resume": [
+     320632,
+     293032
+    ],
+    "healthy_delivered": [
+     "1920/1920/1920/1920 of 1920",
+     "1920/1920/1920/1920 of 1920"
+    ],
+    "commit_to_frame_p95_ms_max": [
+     982.6,
+     981.1
+    ]
+   },
+   "ablation": {
+    "result": "PASS",
+    "retired_write_timeout": [
+     1,
+     1
+    ],
+    "stalled_bytes_after_resume": [
+     295365,
+     1702479
+    ],
+    "healthy_delivered": [
+     "1917/1917/1917/1917 of 1918",
+     "1920/1920/1920/1920 of 1920"
+    ]
+   }
+  },
+  {
+   "name": "Stuck canonical catch-up beside healthy peers (033d1704 acceptance)",
+   "limit": "admission open, dispatch continues, stuck owner retired and reclaimed, clean drain, healthy sockets not retired, all writes delivered",
+   "before": {
+    "result": "FAIL (baseline): every socket kept, but delivery to healthy peers stalled for the hold",
+    "during_hold_p95_ms": [
+     7117.1,
+     8069.8
+    ]
+   },
+   "after": {
+    "result": "PASS (2 of 2 runs)",
+    "parts": {
+     "admission_open": "PASS (late upgrade ok, checkpoint 8.5 and 6.5 ms)",
+     "dispatch_continues": "PASS (during-hold commit-to-frame p95 1,050 and 947 ms on all four hot sockets)",
+     "stuck_owner_retired": "PASS (blocked socket closed at 756 and 754 ms; retired_deadline 1, replay retired:initial 1)",
+     "reclaimed": "PASS (cleanup unfinished 1, reclaim 1)",
+     "clean_drain": "PASS (exit 130, no warnings, delivery_pool active 0 after the phase)",
+     "healthy_not_retired": "PASS (only the blocked socket closed; hot sockets open)",
+     "all_writes_delivered": "PASS (31+7 and 32+5 writes, 0 undelivered)"
+    },
+    "stuck_phase_pool_checkout": [
+     {
+      "checkouts": 1629,
+      "unattributed": 1272,
+      "capacity_waits": 2,
+      "wait_total_ms": 7.6,
+      "hold_total_ms": 3186,
+      "connects": 0
+     },
+     {
+      "checkouts": 1649,
+      "unattributed": 1301,
+      "capacity_waits": 3,
+      "wait_total_ms": 35.3,
+      "hold_total_ms": 3165.9,
+      "connects": 0
+     }
+    ],
+    "stuck_phase_delivery_pool_checkout": [
+     {
+      "checkouts": 232,
+      "unattributed": 232,
+      "capacity_waits": 0,
+      "wait_total_ms": 4.9,
+      "hold_total_ms": 8377.3,
+      "connects": 1
+     },
+     {
+      "checkouts": 277,
+      "unattributed": 277,
+      "capacity_waits": 0,
+      "wait_total_ms": 10.7,
+      "hold_total_ms": 8519.6,
+      "connects": 2
+     }
+    ],
+    "note": "after-2 also logged one websocket_turn retired_closing event; no healthy observer closed, so it is not a healthy-socket retirement, but the log did not identify its socket."
+   },
+   "ablation": {
+    "result": "NOT EXERCISED",
+    "note": "The ablation removes the scope-lock wait this case depends on: the blocked catch-up never waited (lock waiters 0), stayed open and received frames, and no socket was retired. Its numbers are not evidence for this gate."
+   }
+  },
+  {
+   "name": "Snapshot write round trips and replay cut",
+   "limit": "fewer snapshot write round trips; cut preserved",
+   "before": {
+    "item_inserts_full_measured": [
+     4547,
+     4547
+    ],
+    "writer_max_ms": [
+     823.9,
+     899
+    ]
+   },
+   "after": {
+    "result": "PASS (round trips)",
+    "item_inserts_full_measured": [
+     18,
+     18
+    ],
+    "writer_max_ms": [
+     281.3,
+     560
+    ]
+   },
+   "ablation": {
+    "result": "PASS (round trips)",
+    "item_inserts_full_measured": [
+     18,
+     18
+    ],
+    "writer_max_ms": [
+     296.5,
+     588.1
+    ]
+   },
+   "note": "Scope-lock calls per full snapshot are unchanged (47 and 46). The cut was not re-verified here (no focused spec run). after-1's shell resync of the measured workspace under contention failed once with HTTP 500 (application_failed 1); its cause was not captured before teardown. The 073d6bfb receipt recorded a similar single before-revision resync 500."
+  },
+  {
+   "name": "Proof and evidence receipts",
+   "limit": "every proof verified, exact terminate receipts and byte-identical evidence",
+   "result": "PASS for all variants",
+   "statistic": {
+    "proofs_verified": 44,
+    "terminate_sha_match": "4/4",
+    "evidence_ranges": "3/3,3/3,1/1,1/1",
+    "archive_stream_receipts": "2/2"
+   }
+  },
+  {
+   "name": "No idle authorization per empty retained scope",
+   "limit": "not per scope",
+   "before": {
+    "authorization_calls_30s": [
+     28,
+     22
+    ],
+    "idle_outbox_reads": [
+     244,
+     238
+    ]
+   },
+   "after": {
+    "result": "PASS",
+    "authorization_calls_30s": [
+     0,
+     0
+    ],
+    "idle_outbox_reads": [
+     0,
+     0
+    ]
+   },
+   "ablation": {
+    "result": "PASS",
+    "authorization_calls_30s": [
+     0,
+     0
+    ],
+    "idle_outbox_reads": [
+     0,
+     0
+    ]
+   },
+   "note": "23 sockets, 16 empty scopes. Local trusted principals only; the grant-user path relies on focused specs."
+  },
+  {
+   "name": "Truthful upgrade telemetry",
+   "limit": "upgrades not reported as HTTP failures",
+   "before": "27 of 27 WebSocket requests logged with status 500",
+   "after": {
+    "result": "PASS",
+    "ws_request_log": "27 of 27 status null, outcome upgrade_closed"
+   },
+   "ablation": {
+    "result": "PASS",
+    "ws_request_log": "27 of 27 status null, outcome upgrade_closed"
+   }
+  }
+ ],
+ "observations": {
+  "scope_lock_per_contention_phase": {
+   "before": [
+    {
+     "calls": 993,
+     "total_ms": 1842.2
+    },
+    {
+     "calls": 475,
+     "total_ms": 921.9
+    }
+   ],
+   "after": [
+    {
+     "calls": 3067,
+     "total_ms": 13424
+    },
+    {
+     "calls": 3167,
+     "total_ms": 15574.6
+    }
+   ],
+   "ablation": [
+    {
+     "calls": 48,
+     "total_ms": 220.2
+    },
+    {
+     "calls": 48,
+     "total_ms": 249.4
+    }
+   ],
+   "note": "Ablation residue is snapshot locking only (2 statements). Its replacement read was not counted: the runner truncates statement text to 160 characters before matching and the marker comment lies beyond that. Replay-authority calls, one per per-socket transaction, show those transactions still ran: after 3,067-3,167, ablation 2,355-2,583, before 475-993."
+  },
+  "outbox_reads": {
+   "contention": {
+    "before": [
+     959,
+     436
+    ],
+    "after": [
+     2337,
+     2400
+    ],
+    "ablation": [
+     1837,
+     1956
+    ]
+   },
+   "contention_total_ms": {
+    "before": [
+     3956.6,
+     1725.9
+    ],
+    "after": [
+     131.1,
+     137.6
+    ],
+    "ablation": [
+     120.7,
+     128.7
+    ]
+   },
+   "idle_30s": {
+    "before": [
+     244,
+     238
+    ],
+    "after": [
+     0,
+     0
+    ],
+    "ablation": [
+     0,
+     0
+    ]
+   }
+  },
+  "pool_wait_share_foreground_tail": {
+   "after": [
+    0.191,
+    0.179
+   ],
+   "ablation": [
+    0.224,
+    0.215
+   ],
+   "earlier_after_at_pool_10": "0.35-0.42 (tools/outbox-replay.qualification.json)"
+  },
+  "capacity_waits_contention": {
+   "main_pool": {
+    "after": [
+     7246,
+     7228
+    ],
+    "ablation": [
+     6786,
+     9141
+    ]
+   },
+   "delivery_pool": {
+    "after": [
+     0,
+     0
+    ],
+    "ablation": [
+     0,
+     0
+    ]
+   }
+  },
+  "pool_wait_total_ms_contention": {
+   "main_pool": {
+    "after": [
+     120640.7,
+     160066.1
+    ],
+    "ablation": [
+     146097.2,
+     160846.5
+    ]
+   },
+   "delivery_pool": {
+    "after": [
+     35.4,
+     7.6
+    ],
+    "ablation": [
+     5.8,
+     33.3
+    ]
+   }
+  },
+  "memory_contention_max_mib": {
+   "before": [
+    413.2,
+    390.1
+   ],
+   "after": [
+    352.3,
+    349.4
+   ],
+   "ablation": [
+    346.5,
+    340.6
+   ]
+  },
+  "regime": "Heavy routes (task_update_fields 349-463 ms, nav_root 282-292 ms, search_unified 156-317 ms at p95) are slower in every variant than in tools/outbox-replay.qualification.json, and before pooled p95 is 151-158 ms against 88-96 ms there. That receipt ran before with 10 connections and on another day; this one cannot separate pool size from host state. after cheap reads (task_get 5.5-5.8 ms, planning_counts 5.7-5.8 ms) are faster than both before here and before there (7.6 and 7.7 ms)."
+ },
+ "conclusions": {
+  "stuck_case_on_head_15_10": "PASS in both after runs (033d1704 acceptance: healthy sockets in other scopes keep every write and are not retired; the stuck owner is retired and reclaimed; the drain is clean).",
+  "per_route_on_head": "PASS: no route above 1.035 (ratio of means); also within the limit against the faster before run alone.",
+  "scope_lock_ablation": "Not confirmed. Removing the per-socket scope locks (3,067-3,167 calls and 13.4-15.6 s per phase down to 48 snapshot calls) leaves cheap-read p95 equal to after and does not reduce pooled or heavy-route p95 (ablation pooled 1.158, task_update_fields 1.143, search_unified 1.21; abl-1 is the slowest run of the set). At these settings HEAD has no per-route regression for the ablation to explain, and this receipt does not attribute the earlier pool-10 regression to any cause."
+ },
+ "limitations": [
+  "Two runs per variant on one shared host. before-1 cheap reads were 2-8x slower than before-2, so per-route before means are inflated; the faster-run-only comparison is reported and still passes for after.",
+  "search_unified p95 ranges 156-317 ms across runs of every variant; its gate margin is within run-to-run spread.",
+  "The before image ran with 15 connections because the compose file now pins production defaults; earlier receipts used 10, so absolute numbers are not comparable across receipts.",
+  "The runner copy differs from tools/perftest/combined.mjs in output only (recorded diff hash); the workload definition is unchanged. Its ablation statement class missed every call because of statement-text truncation.",
+  "The stuck case for the ablation is not evidence: the ablation removes the lock wait the case depends on.",
+  "after-1 had one HTTP 500 on a shell resync under contention; logs were on tmpfs and its cause was not captured.",
+  "Closed-loop foreground clients: completed requests per run were 12,902-13,103 (before), 12,801-13,380 (after) and 11,370-13,049 (ablation); hot writes were open-loop and matched (1,914-1,920).",
+  "Delivery latency starts at the write response, so it is a lower bound; RSS is sampled once per second.",
+  "Local authentication makes every principal the trusted superadmin; revocation and per-user reauthorization rely on focused specs, which were not run here. The replay cut was not re-verified.",
+  "Admission limits were not approached (27 sockets in one audience). MCP follower diagnostics were not collected."
+ ],
+ "dispositions": {
+  "qualified_in_container": [
+   "Ordinary foreground p95 pooled and per route within 10% at production pool defaults",
+   "Stuck catch-up with healthy peers progressing at 15/10",
+   "Stalled-observer retirement",
+   "Batched snapshot writes",
+   "Proof, terminate and evidence receipts",
+   "Archive streaming working set",
+   "Idle authorization and idle outbox reads",
+   "Upgrade telemetry"
+  ],
+  "not_qualified": [
+   "Production topology, OIDC audiences, TLS and reverse proxies",
+   "Replay cut and revocation paths in this container run (focused specs only)",
+   "The single shell-resync HTTP 500 in after-1 (cause not captured)"
+  ],
+  "scope_lock_repair": "Not proposed: the ablation does not confirm scope locks as a cause."
+ },
+ "teardown": "compose down; volumes hmem-perftest-pgdata and hmem-perftest-pgdata-base removed; images hmem-perftest:7127a3d9, hmem-perftest:f206ff72 and hmem-perftest:f206ff72-abl removed; network hmem-perftest-net removed by compose; .tmp/perftest-postpool (sources, secrets, summaries, logs, scripts) deleted. Verified empty: docker ps -a, volume ls and network ls filtered on hmem-perftest, docker images hmem-perftest. hmem-local-tei and other containers and images were not touched; BuildKit cache retained; no git worktree was created."
+}

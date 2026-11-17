@@ -36,7 +36,8 @@ request's `db_connect_ms`, with `db_checkouts` and `db_wait_ms` 0.
 The health response reports each pool separately. `pool` is the main pool used
 by HTTP requests, workers and WebSocket admission checks. `delivery_pool` is
 the change-stream delivery pool, used by delivery turns and the dispatcher;
-it is `null` only when delivery shares the main pool, as in some tests. Both
+it is `null` only when delivery shares the main pool, as in some tests and
+`hmem-server --dev`, which ignores `--delivery-pool-size`. Both
 have the same shape: `active_connections`, `max_connections` and `checkout`,
 which is cumulative since process start:
 
@@ -55,7 +56,7 @@ another had idle capacity. The count is a lower bound: waits behind a full
 stripe while the whole pool is also in demand are not counted. The main pool
 counters are process-wide, so they are only meaningful with one main pool per
 process, as in the server. The delivery pool has a single stripe, so any idle
-connection serves any checkout and it records no capacity waits; its
+connection serves any checkout and it normally records no capacity waits; its
 `unattributed` count equals its `checkouts`.
 
 ## Isolated baseline

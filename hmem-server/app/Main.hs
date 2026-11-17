@@ -91,7 +91,7 @@ optsParser = Opts
   <*> optional (option (boundedInt 5 1000)
       ( long "delivery-pool-size"
      <> metavar "N"
-     <> help "Maximum change-stream delivery connections, 5..1000 (default: from config or 10)"
+     <> help "Maximum change-stream delivery connections, 5..1000 (default: from config or 10; ignored with --dev, where delivery shares the main pool)"
       ))
   <*> optional (strOption
       ( long "tls-cert"

@@ -66,11 +66,12 @@ Secrets that do not currently have hmem runtime env overrides, such as OIDC `cli
 | `HMEM_TLS_CERT_FILE` | unset | `tls.cert_file` | TLS is enabled only when both cert and key are set. |
 | `HMEM_TLS_KEY_FILE` | unset | `tls.key_file` | Fail fast if only one TLS file is set. |
 
-Each server process opens up to the main plus delivery pool sizes, 25
+Each server process budgets the main plus delivery pool sizes, nominally 25
 PostgreSQL connections by default. The main pool has one stripe per GHC
 capability up to its size, each holding an equal share rounded up, so with
 default sizes it can open at most 28 connections (at 14 capabilities); the
-delivery pool opens at most its configured size. PostgreSQL's default
+delivery pool opens at most its configured size, so the process opens at
+most 38. PostgreSQL's default
 `max_connections` of 100 covers one server plus `hmem-ctl` commands. Add the
 budgets of all replicas and other clients before scaling out.
 

@@ -21,6 +21,7 @@ import TimestampDisplay
 import Test exposing (..)
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
+import Time
 import Types exposing (..)
 import Url
 
@@ -863,6 +864,7 @@ suite = describe "automatic observation refresh and scoped preferences"
         Expect.equal [ True, False, False, False, False ] (List.map (\json -> D.decodeString Api.observationCountsDecoder json |> Result.toMaybe |> (/=) Nothing)
             [ value "0" "0", value "-1" "0", value "2.5" "1", value "9007199254740992" "0", value "1" "2" ])
     , describe "authoritative discovery counts" discoveryCountTests
+    , describe "discovery context expiry and bounded recovery" discoveryExpiryTests
     , test "discovery continuations omit creation predicates and generation while retaining the typed page selector" <| \_ ->
         let filters = {subjectQuery = "src/", contentQuery = "cache", subjectKind = Just Api.SubjectFile, subject = Nothing, gitSha = Nothing, currentGitSha = Nothing, historyGitSha = Nothing}
             query = {workspaceId = workspaceId, searchSession = "10000000-0000-4000-8000-000000000001", generation = 7, contextToken = Just "accepted", filters = filters, view = "list", prefix = "", terminal = Just {subjectKind = Api.SubjectFile, subject = "src/Main.elm"}, limit = 50, offset = 50}
@@ -1374,6 +1376,65 @@ discoveryCountTests =
             [ \_ -> Expect.equal (Just 9) (Maybe.map .matchCount failed.observations.counts.value)
             , \_ -> Expect.equal True (failed.observations.discovery.error /= Nothing)
             , \_ -> Expect.equal True ((Maybe.map .generation retry.observations.discovery.bootstrap |> Maybe.withDefault 0) > (Maybe.map .generation started.observations.discovery.bootstrap |> Maybe.withDefault 0)) ] ()
+    ]
+
+
+expireDiscovery request current =
+    project current (O.update (ObservationDiscoveryExpired request) current |> Tuple.first)
+
+
+isFresh request = request.contextToken == Nothing
+
+
+discoveryExpiryTests =
+    [ test "receipt clock trusts only a future expires_at for the current token" <| \_ ->
+        let accepted = bootstrap model |> acceptBootstrap 300 9
+            token = accepted.observations.discovery.context |> Maybe.map .token |> Maybe.withDefault ""
+            clock millis value = update (ObservationDiscoveryClock value (Time.millisToPosix millis)) accepted |> Tuple.first |> .observations |> .discovery |> .expiry
+        in Expect.all
+            [ \_ -> clock 0 token |> Expect.equal (Just { token = token, deadline = 4070908795000 })
+            , \_ -> clock 4070908795000 token |> Expect.equal Nothing
+            , \_ -> clock 0 "retired" |> Expect.equal accepted.observations.discovery.expiry ] ()
+    , test "a locally expired continuation sends one fresh bootstrap, keeps results and ignores its late duplicate" <| \_ ->
+        let accepted = bootstrap model |> acceptBootstrap 300 9
+            started = O.refreshActiveResults accepted |> Tuple.first
+            continuation = List.head started.observations.discovery.physical
+            renewed = continuation |> Maybe.map (\request -> expireDiscovery request started) |> Maybe.withDefault started
+            late = continuation |> Maybe.map (\request -> expireDiscovery request renewed) |> Maybe.withDefault renewed
+        in Expect.all
+            [ \_ -> Maybe.map isFresh continuation |> Expect.equal (Just False)
+            , \_ -> List.map isFresh renewed.observations.discovery.physical |> Expect.equal [ True ]
+            , \_ -> renewed.observations.discovery.error |> Expect.equal Nothing
+            , \_ -> renewed.observations.orderedIds |> Expect.equal accepted.observations.orderedIds
+            , \_ -> renewed.observations.refreshPass /= Nothing |> Expect.equal True
+            , \_ -> ( late.observations.discovery.generation, late.observations.discovery.physical ) |> Expect.equal ( renewed.observations.discovery.generation, renewed.observations.discovery.physical ) ] ()
+    , test "a renewed context rejected before progress pauses instead of renewing again until explicit retry" <| \_ ->
+        let accepted = bootstrap model |> acceptBootstrap 300 9
+            started = O.refreshActiveResults accepted |> Tuple.first
+            rejected = List.head started.observations.discovery.physical |> Maybe.map (\request -> receiveDiscovery request (Err (Http.BadStatus 409)) started) |> Maybe.withDefault started
+            renewed = acceptBootstrap 300 9 rejected
+            again = O.refreshActiveResults renewed |> Tuple.first
+            paused = List.head again.observations.discovery.physical |> Maybe.map (\request -> receiveDiscovery request (Err (Http.BadStatus 409)) again) |> Maybe.withDefault again
+            quiet = O.refreshActiveResults paused |> Tuple.first |> project paused
+            retried = update RetryObservationResults quiet |> Tuple.first |> project quiet
+        in Expect.all
+            [ \_ -> List.map isFresh rejected.observations.discovery.physical |> Expect.equal [ True ]
+            , \_ -> List.map isFresh again.observations.discovery.physical |> Expect.equal [ False ]
+            , \_ -> ( paused.observations.discovery.physical, paused.observations.discovery.bootstrap, paused.observations.discovery.context ) |> Expect.equal ( [], Nothing, Nothing )
+            , \_ -> paused.observations.discovery.error /= Nothing |> Expect.equal True
+            , \_ -> quiet.observations.discovery.physical |> Expect.equal []
+            , \_ -> List.map isFresh retried.observations.discovery.physical |> Expect.equal [ True ] ] ()
+    , test "a fresh count bootstrap 409 settles a retryable count error without another request" <| \_ ->
+        let started = O.syncCounts { model | activeTab = ProjectsTab } |> Tuple.first
+            failed = started.observations.discovery.bootstrap |> Maybe.map (\request -> receiveDiscovery request (Err (Http.BadStatus 409)) started) |> Maybe.withDefault started
+            quiet = O.syncCounts { failed | observations = O.invalidateCounts failed.observations } |> Tuple.first
+            retried = update RetryWorkspaceObservationCounts failed |> Tuple.first
+        in Expect.all
+            [ \_ -> ( failed.observations.discovery.failedCount, failed.observations.discovery.bootstrap, failed.observations.discovery.physical ) |> Expect.equal ( True, Nothing, [] )
+            , \_ -> failed.observations.workspaceCounts.error /= Nothing |> Expect.equal True
+            , \_ -> quiet.observations.discovery.physical |> Expect.equal []
+            , \_ -> Set.size failed.dataLoading.startupAdmission.physical |> Expect.equal 0
+            , \_ -> List.map isFresh retried.observations.discovery.physical |> Expect.equal [ True ] ] ()
     ]
 
 

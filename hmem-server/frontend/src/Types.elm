@@ -736,7 +736,11 @@ type alias ObservationDiscoveryRequest =
 type alias ObservationDiscoveryState =
     { sessionId : String, runtimeToken : Int, runtimePending : Bool, generation : Int, query : Maybe ObservationAppliedQuery, owner : String
     , context : Maybe { token : String, expiresAt : String, retrieval : { mode : String, reason : Maybe String } }
-    , bootstrap : Maybe ObservationDiscoveryRequest, afterBootstrap : Maybe ObservationDiscoveryDestination, physical : List ObservationDiscoveryRequest, error : Maybe String, failedCount : Bool }
+    , bootstrap : Maybe ObservationDiscoveryRequest, afterBootstrap : Maybe ObservationDiscoveryDestination, physical : List ObservationDiscoveryRequest, error : Maybe String, failedCount : Bool
+    -- Local send deadline for the current token, trusted only after its first
+    -- receipt clock reading; recovery tracks one automatic renewal per context.
+    , expiry : Maybe { token : String, deadline : Int }
+    , recovery : Maybe { generation : Int, token : Maybe String } }
 
 
 type alias ObservationCountGuard =
@@ -1842,6 +1846,8 @@ type Msg
     | ClearObservationSearchText Bool
     | ObservationDiscoveryRuntimeReceived Encode.Value
     | GotObservationDiscovery ObservationDiscoveryRequest (Result Http.Error Api.ObservationDiscoveryResponse)
+    | ObservationDiscoveryExpired ObservationDiscoveryRequest
+    | ObservationDiscoveryClock String Time.Posix
     | ObservationFilterCompositionStart
     | ObservationFilterCompositionEnd Bool String
     | ObservationFiltersReady ObservationFilterDebounce

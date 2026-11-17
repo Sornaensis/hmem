@@ -1,0 +1,2188 @@
+{
+ "format_version": 1,
+ "task": "d68e3bd9-a3c5-4aba-9c53-24bad4cdc881",
+ "consumer_task": "fe98a2eb-da10-4c1e-ad9c-1f45295e101f",
+ "project": "5b1593f5-8081-45da-9c42-bc7a6be8149a",
+ "date": "2026-11-17",
+ "evidence_class": "CONTAINER EVIDENCE, NOT PRODUCTION. Throwaway Docker environment of tools/perftest/compose.yaml (compose project hmem-perftest, loopback-only published ports); the live system was not contacted. Runner validation and a before-repair baseline with one run per step; it is not the capacity qualification of fe98a2eb.",
+ "outcome": "Runner accepted: node --check, 25 rejected argument cases, a 50-client 20 s smoke step with a complete summary and 100% of requests joined to the request log. Baseline at f206ff72: 300 concurrent requests are sustained with no errors but only through unbounded pool queueing (2xx-only p95 8.5 s, p99 13.7 s, which are also the all-outcome figures because every request was 2xx); the first client timeouts appear at 500. The main pool (15 connections) saturates first, with timeline buckets holding 61-69% of its connection time. The runner reproduces bucket saturation but not stripe capacity waits.",
+ "owner": "Task d68e3bd9 developer through review; consumer task fe98a2eb owns the capacity qualification (two runs per step) that supersedes this baseline.",
+ "retention": "Retain this compact receipt until fe98a2eb closes or a matched rerun supersedes it. Raw step summaries, seed state, secrets, the build context and scratch scripts were task scratch under .tmp/perftest and were removed at teardown.",
+ "inputs": {
+  "base_revision": "f206ff72a01482436ff22dca4eaee9844931384d",
+  "repository_head_at_handoff": "b37b0a4044b3c7d3d6a192d8898c8ec0f588e486 (review remediation handoff; the commits after the f206ff72 base, cc7aff4c and b37b0a40, change docs, receipts and the hmem-mcp session follower only, with no hmem-server or hmem-core source change)",
+  "image": {
+   "tag": "hmem-perftest:f206ff72",
+   "id": "sha256:87a2e3e026e914a88b02097440d65ff5c3408bc53f55e70b9781eab350b7b855",
+   "hmem_server_sha256": "c3396b892093ade95f3e27588325efd6c5ed2516fa8e4c211374a9d1efeec248",
+   "build": "git archive of f206ff72 with the repository Dockerfile, --target runtime; labels hmem.perftest.revision=f206ff72a01482436ff22dca4eaee9844931384d, hmem.perftest.owner=task-d68e3bd9, hmem.perftest.dockerfile=repo-Dockerfile. The binary hash equals the after image of tools/postpool-qualification.json."
+  },
+  "runner": {
+   "path": "tools/perftest/concurrency.mjs",
+   "sha256": "941427c86f00b97c6fc77d7572c951ffa07170f87ff3937dea17da87f61c9806 (after review remediation; not run against a container, see remediation)",
+   "smoke_sha256": "2795fa54437af8601ce3435f87e8432eecac7a0f44f640f60fae76c48b843ac2 (the runner that produced the smoke step)",
+   "baseline_sha256": "a59516c304ef31a5145a0f2f24f66a90a30829f41fcdf071ea6a079948826d1e (differs only in renaming the per-step output key client to client_mode; the smoke step ran the final file)"
+  },
+  "worker_image": "node:24.18.0-bookworm@sha256:5711a0d445a1af54af9589066c646df387d1831a608226f4cd694fc59e745059",
+  "postgres_image": "postgres:17-bookworm sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0, PostgreSQL 17.11"
+ },
+ "environment": {
+  "host": "Windows 11 Pro 10.0.26200, Docker Desktop 29.6.1, 24 CPUs, 31.1 GiB VM; Node 24.15.0 main process on the host",
+  "server": "tools/perftest/compose.yaml unchanged: HMEM_POOL_SIZE 15, HMEM_POOL_DELIVERY_SIZE 10 (production defaults), 30 s statement timeout, default RTS (-N on 24 CPUs), local authentication, embeddings disabled, rate limiting off; PostgreSQL max_connections 100, shared_buffers 128 MB",
+  "limits": {
+   "client": {
+    "platform": "win32 10.0.26200",
+    "cpus": 24,
+    "node": "v24.15.0",
+    "memory_bytes": 68207595520,
+    "dynamic_ports": "Protocol tcp Dynamic Port Range --------------------------------- Start Port : 49152 Number of Ports : 16384"
+   },
+   "server": {
+    "nproc": "24",
+    "somaxconn": "4096",
+    "tcp_max_syn_backlog": "2048",
+    "ulimit_n": "1048576",
+    "process_open_files": "Max open files 1048576 1048576 files",
+    "cmdline": "hmem-server",
+    "ghcrts": "unset",
+    "rts_info": ",(\"RTS way\", \"rts_thr\") ,(\"Flag -with-rtsopts\", \"-N\")",
+    "threads_idle": "Threads:\t157"
+   },
+   "postgres": {
+    "max_connections": "100",
+    "shared_buffers": "128MB",
+    "somaxconn": "4096"
+   },
+   "docker": "29.6.1 24 CPUs 33396793344 bytes Docker Desktop"
+  },
+  "clients": "Load workers ran as hmem-perftest-load-* containers of the worker image on hmem-perftest-net (Linux, ip_local_port_range 32768-60999, 1,048,576 open files), sharing the Docker VM CPUs with the server and PostgreSQL. The main process (health, samplers, 32 observers, 8 appenders) used the 127.0.0.1 published port."
+ },
+ "seed": "A fresh volume seeded through the f206ff72 image with perftest.mjs at the usual scale after CREATE EXTENSION pg_stat_statements: 6 planning workspaces; 562 terminated sessions (3,271,093,120 raw bytes, all archives ready) and 12 active; 7,100 API task updates cloned 25 times and spread over 90 days. Manifest before the runner: 5,048,604,339-byte database, 414,952 audit rows (86,736 in the measured workspace), 77,327 outbox rows, 9,155 tasks, 12,000 Observations. Runner development and smoke runs before the baseline added 83 small active capture sessions and about 80 tasks and changed task fields.",
+ "method": {
+  "clients": "closed loop, one request in flight per client, no think time, one keep-alive connection per client (node:http Agent maxSockets 1), clients spread round-robin over worker processes. Each step ramps clients evenly over 15 s and holds for 120 s; only requests started in the hold are measured; a 30 s cooldown separates steps.",
+  "mix": "Per-request weighted draw from config.weights over all six workspaces (mix client m uses workspace m mod 6). Task field and status updates (10%) target tasks partitioned per client, so no two clients write the same task; field titles are unique per run and statuses toggle todo/in_progress. The baseline runner set no status precondition and, after each step, restored to todo only the targets a client last set to in_progress; the remediated runner sets every status target to todo before the first step and restores every attempted target (see remediation).",
+  "discovery": "8 dedicated discovery clients in one per-run audience (bot identity), one search session each for the whole run: content list, continuation, subject tree; a rejected request waits 1 s.",
+  "background": "32 WebSocket observers (workspace scope, one audience, opened once for the run) and 8 capture appenders on fresh sessions (4-32 KiB every 250 ms), with one exact prefix proof per session after every step.",
+  "outcomes": "Each request is 2xx, a 4xx code with its error code, 429 with its error code, 503 server_busy (with Retry-After checked), other 5xx, refused, reset or client timeout (30 s).",
+  "server_evidence": "X-Request-Id join to the server request log (wait, hold, checkouts, and admission wait when logged); /api/v1/health every 5 s and at hold boundaries for pool, delivery_pool and http_admission; hmem-server /proc CPU, RSS and threads; docker stats for both containers; pg_stat_activity every 0.5 s; pg_stat_database and pg_stat_statements deltas over the hold; WebSocket telemetry events from the log.",
+  "validity": "A step is client-bound and invalid when any worker event-loop delay p99 exceeds 50 ms. Transport overhead (client time minus server complete_ms) and the in-flight gauge are also reported.",
+  "latency": "Every recorded latency distribution (pooled_2xx_ms, light_p95_2xx_ms, heavy_p95_2xx_ms, routes.*.latency_2xx_ms, capture.appends_2xx_ms) covers 2xx responses only. The raw samples were removed at teardown, so the all-outcome figures (*_all_ms_bounds) are derived from recorded counts: the only non-2xx outcomes were client timeouts, which end at 30 s and rank above every 2xx sample. A percentile whose rank falls among the timeouts is >=30000 (censored); otherwise it is the 2xx order statistic at at_2xx_quantile, bounded by the recorded 2xx percentiles around it (max <30000 when no upper statistic was recorded). With no timeouts the all-outcome value equals the 2xx value. The remediated runner records exact all-outcome percentiles (*_all_ms) with timeouts censored at the timeout.",
+  "config": {
+   "steps": [
+    300,
+    500,
+    1000
+   ],
+   "rampMs": 15000,
+   "holdMs": 120000,
+   "cooldownMs": 30000,
+   "timeoutMs": 30000,
+   "seed": 1,
+   "client": "network",
+   "workerImage": "node:24.18.0-bookworm@sha256:5711a0d445a1af54af9589066c646df387d1831a608226f4cd694fc59e745059",
+   "workers": "auto",
+   "discoveryClients": 8,
+   "discoveryAudiences": 1,
+   "observers": 32,
+   "appenders": 8,
+   "weights": {
+    "task_get": 18,
+    "nav_root": 6,
+    "nav_project": 11,
+    "nav_focus": 6,
+    "nav_batch": 4,
+    "planning_counts": 6,
+    "project_overview": 6,
+    "task_list_query": 7,
+    "search_unified": 6,
+    "observation_list_query": 9,
+    "observation_subject_tree": 4,
+    "timeline_events": 5,
+    "timeline_buckets_day": 1,
+    "timeline_buckets_week": 1,
+    "task_update_fields": 6,
+    "task_update_status": 4
+   },
+   "light": [
+    "task_get",
+    "nav_root",
+    "nav_project",
+    "nav_focus",
+    "planning_counts",
+    "project_overview",
+    "task_list_query",
+    "search_unified",
+    "observation_list_query",
+    "observation_subject_tree",
+    "timeline_events"
+   ],
+   "workspaces": 6,
+   "clientModel": "closed loop, one request in flight per client, no think time, one keep-alive connection per client (node:http Agent maxSockets 1), clients spread round-robin over worker processes"
+  }
+ },
+ "commands": [
+  "git archive f206ff72a01482436ff22dca4eaee9844931384d | tar -x -C .tmp/perftest/src; docker build -f Dockerfile --target runtime --label hmem.perftest.revision=f206ff72a01482436ff22dca4eaee9844931384d --label hmem.perftest.owner=task-d68e3bd9 --label hmem.perftest.dockerfile=repo-Dockerfile -t hmem-perftest:f206ff72 .",
+  "PERFTEST_IMAGE=hmem-perftest:f206ff72 docker compose -p hmem-perftest -f tools/perftest/compose.yaml --env-file .tmp/perftest/secrets.env up -d; CREATE EXTENSION IF NOT EXISTS pg_stat_statements",
+  "node tools/perftest/perftest.mjs seed-planning --workspaces 6; seed-sessions --scale 1 --clients 8; seed-history --updates 7100 --clients 16 --primary-share 0.25; clone-history --factor 25; after all 562 archive jobs were ready: spread-history; manifest",
+  "node tools/perftest/concurrency.mjs --steps 300,500,1000 --label baseline-f206ff72",
+  "node tools/perftest/concurrency.mjs --steps 50 --ramp-s 5 --hold-s 20 --cooldown-s 0 --label smoke-final2",
+  "reduction: a scratch script compacted the step summaries into smoke and steps below; it was removed at teardown"
+ ],
+ "smoke": {
+  "clients": 50,
+  "mix_clients": 42,
+  "discovery_clients": 8,
+  "workers": 2,
+  "valid": true,
+  "in_flight": {
+   "mean": 49.9,
+   "min": 50,
+   "p50": 50
+  },
+  "requests": 1743,
+  "throughput_rps": 87.2,
+  "outcomes": {
+   "2xx": 1743
+  },
+  "busy_without_retry_after": 0,
+  "pooled_2xx_ms": {
+   "n": 1432,
+   "p50": 63.7,
+   "p95": 3558.2,
+   "p99": 4938.9,
+   "max": 8754.6
+  },
+  "pooled_all_ms_bounds": {
+   "n": 1432,
+   "timeouts": 0,
+   "p50": 63.7,
+   "p95": 3558.2,
+   "p99": 4938.9,
+   "max": 8754.6
+  },
+  "light_p95_2xx_ms": 2584.3,
+  "light_p95_all_ms_bounds": 2584.3,
+  "heavy_p95_2xx_ms": 4544.6,
+  "heavy_p95_all_ms_bounds": 4544.6,
+  "fairness": {
+   "clients": 42,
+   "min": 8,
+   "mean": 34.1,
+   "max": 130,
+   "min_over_mean": 0.235,
+   "jain": 0.628,
+   "below_half_mean": 15
+  },
+  "client": {
+   "loop_p99_max_ms": 10.9,
+   "main_loop_p99_ms": 20.7,
+   "main_cpu_cores": 0.035,
+   "worker_cpu_cores_total": 0.086,
+   "connections_opened": 50,
+   "status_restore": {
+    "attempted": 59,
+    "restored": 59
+   }
+  },
+  "server": {
+   "pool": {
+    "checkouts": 11924,
+    "unattributed": 118,
+    "capacity_waits": 0,
+    "capacity_wait_share": 0,
+    "wait_total_s": 803.7,
+    "hold_total_s": 247.9,
+    "waits_over_1s": 128,
+    "waits_over_100ms": 829,
+    "wait_max_ms_process": 14895
+   },
+   "delivery_pool": {
+    "checkouts": 1542,
+    "capacity_waits": 0,
+    "wait_total_ms": 2.573
+   },
+   "pool_active_max": 14,
+   "http_admission": null,
+   "health_status": {
+    "200:degraded": 3,
+    "200:ok": 1
+   },
+   "health_probe_ms": {
+    "n": 4,
+    "p50": 1.4,
+    "p95": 2.4,
+    "p99": 2.4,
+    "max": 2.4
+   },
+   "rss_max_mib": 741,
+   "cpu_cores": 0.644,
+   "docker_cpu_pct": {
+    "hmem-perftest-server": {
+     "mean": 60.7,
+     "max": 88.6
+    },
+    "hmem-perftest-postgres": {
+     "mean": 1394.2,
+     "max": 1592.8
+    }
+   },
+   "restarted": false
+  },
+  "postgres": {
+   "backends_max": 19,
+   "active_max": 16,
+   "active_mean": 12.8,
+   "lock_wait_samples": 3,
+   "samples": 39,
+   "ungranted_max": 2,
+   "active_wait_events": {
+    "CPU:-": 452,
+    "IO:BuffileWrite": 11,
+    "IPC:ExecuteGather": 9,
+    "IO:BuffileRead": 9,
+    "Client:ClientRead": 7
+   },
+   "temp_bytes": 11110574888,
+   "deadlocks": 0,
+   "top_statements": [
+    {
+     "query": "WITH bounds AS ( SELECT date_trunc($4, $2 AT TIME ZONE $5) AS series_start, date",
+     "calls": 33,
+     "total_ms": 118256,
+     "mean_ms": 3583.5
+    },
+    {
+     "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space)",
+     "calls": 312,
+     "total_ms": 114573,
+     "mean_ms": 367.2
+    },
+    {
+     "query": "WITH RECURSIVE roots(root_id) AS (SELECT unnest($1::uuid[])), project_tree(root_",
+     "calls": 367,
+     "total_ms": 2612,
+     "mean_ms": 7.1
+    }
+   ]
+  },
+  "client_mode": "network",
+  "clock_offset_ms": [
+   0.6,
+   0.7
+  ],
+  "worker_env": {
+   "node": "v24.18.0",
+   "platform": "linux",
+   "cpus": 24,
+   "ports": "32768 60999",
+   "open_files": "1048576"
+  },
+  "websocket": {
+   "observers": 32,
+   "open_at_end": 32,
+   "writes": 139,
+   "expected": 732,
+   "delivered": 732,
+   "min_observer_fraction": 1,
+   "closed": [],
+   "commit_to_frame_ms": {
+    "n": 732,
+    "p50": 358.3,
+    "p95": 988.1,
+    "p99": 1185.5,
+    "max": 1267.6
+   },
+   "undelivered_by_route": {},
+   "frame_types": {
+    "session_activity_changed": 2190,
+    "change_unmatched:task_update_fields": 45,
+    "change_unmatched:other": 2236,
+    "checkpoint": 753,
+    "change": 732,
+    "change_unmatched:restore": 168
+   }
+  },
+  "websocket_events": {},
+  "capture": {
+   "appenders": 8,
+   "appends_2xx_ms": {
+    "n": 342,
+    "p50": 20.7,
+    "p95": 119.4,
+    "p99": 4042.2,
+    "max": 4268.6
+   },
+   "outcomes": {
+    "2xx": 342
+   },
+   "proofs": {
+    "verified": 8
+   }
+  },
+  "recovery": {
+   "ok_after_hold_ms": 3748.4,
+   "pool_active": 0,
+   "http_admission": null
+  },
+  "log": {
+   "joined": 1743,
+   "join_rate": 1
+  },
+  "routes": {
+   "discovery_content": {
+    "latency_2xx_ms": {
+     "n": 103,
+     "p50": 544.3,
+     "p95": 627.2,
+     "p99": 3801,
+     "max": 4232.6
+    },
+    "non_2xx": {},
+    "wait_mean": 125.4,
+    "hold_mean": 517.5,
+    "tail_wait_share": 0.762,
+    "transport_p95": 0.7
+   },
+   "discovery_continue": {
+    "latency_2xx_ms": {
+     "n": 104,
+     "p50": 553.1,
+     "p95": 623.3,
+     "p99": 4566,
+     "max": 4670
+    },
+    "non_2xx": {},
+    "wait_mean": 164.9,
+    "hold_mean": 524.5,
+    "tail_wait_share": 0.82,
+    "transport_p95": 0.6
+   },
+   "discovery_subject_tree": {
+    "latency_2xx_ms": {
+     "n": 104,
+     "p50": 30.7,
+     "p95": 381.7,
+     "p99": 405,
+     "max": 4116.3
+    },
+    "non_2xx": {},
+    "wait_mean": 67.2,
+    "hold_mean": 67.9,
+    "tail_wait_share": 0.715,
+    "transport_p95": 0.7
+   },
+   "nav_batch": {
+    "latency_2xx_ms": {
+     "n": 78,
+     "p50": 302.3,
+     "p95": 5869.1,
+     "p99": 8754.6,
+     "max": 8754.6
+    },
+    "non_2xx": {},
+    "wait_mean": 1652.5,
+    "hold_mean": 58.4,
+    "tail_wait_share": 0.992,
+    "transport_p95": 0.9
+   },
+   "nav_focus": {
+    "latency_2xx_ms": {
+     "n": 87,
+     "p50": 126.9,
+     "p95": 4992.3,
+     "p99": 7316.2,
+     "max": 7316.2
+    },
+    "non_2xx": {},
+    "wait_mean": 983.4,
+    "hold_mean": 19.8,
+    "tail_wait_share": 0.997,
+    "transport_p95": 0.7
+   },
+   "nav_project": {
+    "latency_2xx_ms": {
+     "n": 164,
+     "p50": 62.6,
+     "p95": 1179.4,
+     "p99": 4360.7,
+     "max": 5274
+    },
+    "non_2xx": {},
+    "wait_mean": 302.9,
+    "hold_mean": 15.7,
+    "tail_wait_share": 0.992,
+    "transport_p95": 0.8
+   },
+   "nav_root": {
+    "latency_2xx_ms": {
+     "n": 84,
+     "p50": 99,
+     "p95": 1487.1,
+     "p99": 4753.8,
+     "max": 4753.8
+    },
+    "non_2xx": {},
+    "wait_mean": 422.4,
+    "hold_mean": 52.9,
+    "tail_wait_share": 0.984,
+    "transport_p95": 0.6
+   },
+   "observation_list_query": {
+    "latency_2xx_ms": {
+     "n": 130,
+     "p50": 28.9,
+     "p95": 606.5,
+     "p99": 3178,
+     "max": 3636.8
+    },
+    "non_2xx": {},
+    "wait_mean": 172.5,
+    "hold_mean": 13.3,
+    "tail_wait_share": 0.991,
+    "transport_p95": 0.7
+   },
+   "observation_subject_tree": {
+    "latency_2xx_ms": {
+     "n": 45,
+     "p50": 55.4,
+     "p95": 580.3,
+     "p99": 682.3,
+     "max": 682.3
+    },
+    "non_2xx": {},
+    "wait_mean": 148.9,
+    "hold_mean": 37.9,
+    "tail_wait_share": 0.936,
+    "transport_p95": 0.7
+   },
+   "planning_counts": {
+    "latency_2xx_ms": {
+     "n": 94,
+     "p50": 13.8,
+     "p95": 556.4,
+     "p99": 3954.6,
+     "max": 3954.6
+    },
+    "non_2xx": {},
+    "wait_mean": 209.9,
+    "hold_mean": 4,
+    "tail_wait_share": 0.998,
+    "transport_p95": 1
+   },
+   "project_overview": {
+    "latency_2xx_ms": {
+     "n": 79,
+     "p50": 45.6,
+     "p95": 3574.3,
+     "p99": 4275.7,
+     "max": 4275.7
+    },
+    "non_2xx": {},
+    "wait_mean": 490.9,
+    "hold_mean": 13,
+    "tail_wait_share": 0.997,
+    "transport_p95": 1
+   },
+   "search_unified": {
+    "latency_2xx_ms": {
+     "n": 67,
+     "p50": 1463,
+     "p95": 4150,
+     "p99": 5373.1,
+     "max": 5373.1
+    },
+    "non_2xx": {},
+    "wait_mean": 2691.7,
+    "hold_mean": 19.8,
+    "tail_wait_share": 1.735,
+    "transport_p95": 0.7
+   },
+   "task_get": {
+    "latency_2xx_ms": {
+     "n": 262,
+     "p50": 20.2,
+     "p95": 583.7,
+     "p99": 2992.9,
+     "max": 4648.2
+    },
+    "non_2xx": {},
+    "wait_mean": 161,
+    "hold_mean": 4.1,
+    "tail_wait_share": 0.996,
+    "transport_p95": 1
+   },
+   "task_list_query": {
+    "latency_2xx_ms": {
+     "n": 108,
+     "p50": 26.1,
+     "p95": 578,
+     "p99": 3193.7,
+     "max": 3778.3
+    },
+    "non_2xx": {},
+    "wait_mean": 200.3,
+    "hold_mean": 7.4,
+    "tail_wait_share": 0.996,
+    "transport_p95": 1
+   },
+   "task_update_fields": {
+    "latency_2xx_ms": {
+     "n": 80,
+     "p50": 136,
+     "p95": 3281.9,
+     "p99": 5207.4,
+     "max": 5207.4
+    },
+    "non_2xx": {},
+    "wait_mean": 699.7,
+    "hold_mean": 62.5,
+    "tail_wait_share": 0.987,
+    "transport_p95": 0.7
+   },
+   "task_update_status": {
+    "latency_2xx_ms": {
+     "n": 59,
+     "p50": 115.9,
+     "p95": 1471.8,
+     "p99": 6241.1,
+     "max": 6241.1
+    },
+    "non_2xx": {},
+    "wait_mean": 381.7,
+    "hold_mean": 57.7,
+    "tail_wait_share": 0.977,
+    "transport_p95": 1
+   },
+   "timeline_buckets_day": {
+    "latency_2xx_ms": {
+     "n": 13,
+     "p50": 4079.1,
+     "p95": 4938.9,
+     "p99": 4938.9,
+     "max": 4938.9
+    },
+    "non_2xx": {},
+    "wait_mean": 85.9,
+    "hold_mean": 4136.4,
+    "tail_wait_share": 0,
+    "transport_p95": 0.5
+   },
+   "timeline_buckets_week": {
+    "latency_2xx_ms": {
+     "n": 18,
+     "p50": 3298.7,
+     "p95": 6168.6,
+     "p99": 6168.6,
+     "max": 6168.6
+    },
+    "non_2xx": {},
+    "wait_mean": 246.4,
+    "hold_mean": 3274.8,
+    "tail_wait_share": 0.518,
+    "transport_p95": 1
+   },
+   "timeline_events": {
+    "latency_2xx_ms": {
+     "n": 64,
+     "p50": 32.4,
+     "p95": 566.6,
+     "p99": 3540.9,
+     "max": 3540.9
+    },
+    "non_2xx": {},
+    "wait_mean": 137.2,
+    "hold_mean": 22.7,
+    "tail_wait_share": 0.983,
+    "transport_p95": 0.8
+   }
+  }
+ },
+ "steps": [
+  {
+   "clients": 300,
+   "mix_clients": 292,
+   "discovery_clients": 8,
+   "workers": 3,
+   "valid": true,
+   "in_flight": {
+    "mean": 299.9,
+    "min": 300,
+    "p50": 300
+   },
+   "requests": 15588,
+   "throughput_rps": 129.9,
+   "outcomes": {
+    "2xx": 15588
+   },
+   "busy_without_retry_after": 0,
+   "pooled_2xx_ms": {
+    "n": 14774,
+    "p50": 842.1,
+    "p95": 8522.6,
+    "p99": 13650.3,
+    "max": 26855.2
+   },
+   "pooled_all_ms_bounds": {
+    "n": 14774,
+    "timeouts": 0,
+    "p50": 842.1,
+    "p95": 8522.6,
+    "p99": 13650.3,
+    "max": 26855.2
+   },
+   "light_p95_2xx_ms": 6592.3,
+   "light_p95_all_ms_bounds": 6592.3,
+   "heavy_p95_2xx_ms": 13773.1,
+   "heavy_p95_all_ms_bounds": 13773.1,
+   "fairness": {
+    "clients": 292,
+    "min": 29,
+    "mean": 50.6,
+    "max": 89,
+    "min_over_mean": 0.573,
+    "jain": 0.93,
+    "below_half_mean": 0
+   },
+   "client": {
+    "loop_p99_max_ms": 11.1,
+    "main_loop_p99_ms": 20.7,
+    "main_cpu_cores": 0.024,
+    "worker_cpu_cores_total": 0.102,
+    "connections_opened": 300,
+    "status_restore": {
+     "attempted": 381,
+     "restored": 381
+    }
+   },
+   "server": {
+    "pool": {
+     "checkouts": 97056,
+     "unattributed": 701,
+     "capacity_waits": 0,
+     "capacity_wait_share": 0,
+     "wait_total_s": 36367,
+     "hold_total_s": 1774.1,
+     "waits_over_1s": 6426,
+     "waits_over_100ms": 32515,
+     "wait_max_ms_process": 14895
+    },
+    "delivery_pool": {
+     "checkouts": 9220,
+     "capacity_waits": 0,
+     "wait_total_ms": 17.273
+    },
+    "pool_active_max": 15,
+    "http_admission": null,
+    "health_status": {
+     "200:degraded": 24
+    },
+    "health_probe_ms": {
+     "n": 24,
+     "p50": 1.6,
+     "p95": 2.7,
+     "p99": 8.1,
+     "max": 8.1
+    },
+    "rss_max_mib": 665,
+    "cpu_cores": 0.844,
+    "docker_cpu_pct": {
+     "hmem-perftest-server": {
+      "mean": 83.8,
+      "max": 142.6
+     },
+     "hmem-perftest-postgres": {
+      "mean": 1515.2,
+      "max": 1798.8
+     }
+    },
+    "restarted": false
+   },
+   "postgres": {
+    "backends_max": 19,
+    "active_max": 19,
+    "active_mean": 14,
+    "lock_wait_samples": 62,
+    "samples": 238,
+    "ungranted_max": 5,
+    "active_wait_events": {
+     "CPU:-": 3008,
+     "Lock:advisory": 76,
+     "IO:BuffileWrite": 69,
+     "IO:BuffileRead": 50,
+     "IO:DataFileRead": 36
+    },
+    "temp_bytes": 97665020870,
+    "deadlocks": 0,
+    "top_statements": [
+     {
+      "query": "WITH bounds AS ( SELECT date_trunc($4, $2 AT TIME ZONE 'UTC') AS series_start, d",
+      "calls": 284,
+      "total_ms": 1090363,
+      "mean_ms": 3839.3
+     },
+     {
+      "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space)",
+      "calls": 818,
+      "total_ms": 322804,
+      "mean_ms": 394.6
+     },
+     {
+      "query": "SELECT hmem_lock_planning_lifecycle()",
+      "calls": 1501,
+      "total_ms": 36478,
+      "mean_ms": 24.3
+     }
+    ]
+   },
+   "client_mode": "network",
+   "clock_offset_ms": [
+    0.5,
+    0.5,
+    0.5
+   ],
+   "worker_env": {
+    "node": "v24.18.0",
+    "platform": "linux",
+    "cpus": 24,
+    "ports": "32768 60999",
+    "open_files": "1048576"
+   },
+   "websocket": {
+    "observers": 32,
+    "open_at_end": 32,
+    "writes": 1496,
+    "expected": 8007,
+    "delivered": 7966,
+    "min_observer_fraction": 0.983,
+    "closed": [],
+    "commit_to_frame_ms": {
+     "n": 7966,
+     "p50": -173,
+     "p95": 664.8,
+     "p99": 805.3,
+     "max": 976.2
+    },
+    "undelivered_by_route": {
+     "task_update_status": 41
+    },
+    "frame_types": {
+     "session_activity_changed": 21224,
+     "change_unmatched:other": 2930,
+     "change_unmatched:task_update_fields": 96,
+     "checkpoint": 4162,
+     "change_unmatched:task_update_status": 43,
+     "change": 7966,
+     "change_unmatched:restore": 1871
+    }
+   },
+   "websocket_events": {},
+   "capture": {
+    "appenders": 8,
+    "appends_2xx_ms": {
+     "n": 318,
+     "p50": 1431.8,
+     "p95": 8520.8,
+     "p99": 13386.3,
+     "max": 17412
+    },
+    "outcomes": {
+     "2xx": 318
+    },
+    "proofs": {
+     "verified": 8
+    }
+   },
+   "recovery": {
+    "ok_after_hold_ms": 16056.8,
+    "pool_active": 0,
+    "http_admission": null
+   },
+   "log": {
+    "joined": 15588,
+    "join_rate": 1
+   },
+   "routes": {
+    "discovery_content": {
+     "latency_2xx_ms": {
+      "n": 272,
+      "p50": 781.3,
+      "p95": 4852,
+      "p99": 5885.1,
+      "max": 10019.7
+     },
+     "non_2xx": {},
+     "wait_mean": 746,
+     "hold_mean": 563.3,
+     "tail_wait_share": 0.903,
+     "transport_p95": 0.8
+    },
+    "discovery_continue": {
+     "latency_2xx_ms": {
+      "n": 271,
+      "p50": 776.1,
+      "p95": 4837,
+      "p99": 5630.1,
+      "max": 8735
+     },
+     "non_2xx": {},
+     "wait_mean": 677.1,
+     "hold_mean": 563,
+     "tail_wait_share": 0.896,
+     "transport_p95": 0.6
+    },
+    "discovery_subject_tree": {
+     "latency_2xx_ms": {
+      "n": 271,
+      "p50": 269.9,
+      "p95": 4506.6,
+      "p99": 8601.5,
+      "max": 9528.9
+     },
+     "non_2xx": {},
+     "wait_mean": 918.2,
+     "hold_mean": 70.6,
+     "tail_wait_share": 0.978,
+     "transport_p95": 0.7
+    },
+    "nav_batch": {
+     "latency_2xx_ms": {
+      "n": 570,
+      "p50": 8803,
+      "p95": 19408.5,
+      "p99": 23076.1,
+      "max": 26855.2
+     },
+     "non_2xx": {},
+     "wait_mean": 9106.8,
+     "hold_mean": 60,
+     "tail_wait_share": 0.997,
+     "transport_p95": 1
+    },
+    "nav_focus": {
+     "latency_2xx_ms": {
+      "n": 907,
+      "p50": 3231.7,
+      "p95": 10068.2,
+      "p99": 14137.5,
+      "max": 21879.2
+     },
+     "non_2xx": {},
+     "wait_mean": 4187.9,
+     "hold_mean": 20.5,
+     "tail_wait_share": 0.998,
+     "transport_p95": 1
+    },
+    "nav_project": {
+     "latency_2xx_ms": {
+      "n": 1621,
+      "p50": 1660.9,
+      "p95": 8576.8,
+      "p99": 12445.1,
+      "max": 21204.4
+     },
+     "non_2xx": {},
+     "wait_mean": 2773.6,
+     "hold_mean": 16.6,
+     "tail_wait_share": 0.998,
+     "transport_p95": 0.9
+    },
+    "nav_root": {
+     "latency_2xx_ms": {
+      "n": 895,
+      "p50": 1663.9,
+      "p95": 8522.6,
+      "p99": 12390.8,
+      "max": 14178.2
+     },
+     "non_2xx": {},
+     "wait_mean": 2591.6,
+     "hold_mean": 56.3,
+     "tail_wait_share": 0.994,
+     "transport_p95": 0.8
+    },
+    "observation_list_query": {
+     "latency_2xx_ms": {
+      "n": 1315,
+      "p50": 343.5,
+      "p95": 4679.6,
+      "p99": 7117.9,
+      "max": 13279.4
+     },
+     "non_2xx": {},
+     "wait_mean": 1014.3,
+     "hold_mean": 13.8,
+     "tail_wait_share": 0.997,
+     "transport_p95": 1
+    },
+    "observation_subject_tree": {
+     "latency_2xx_ms": {
+      "n": 625,
+      "p50": 376.1,
+      "p95": 4857.1,
+      "p99": 8146.1,
+      "max": 9066.2
+     },
+     "non_2xx": {},
+     "wait_mean": 1074.9,
+     "hold_mean": 39.7,
+     "tail_wait_share": 0.994,
+     "transport_p95": 0.8
+    },
+    "planning_counts": {
+     "latency_2xx_ms": {
+      "n": 863,
+      "p50": 169.3,
+      "p95": 4145.7,
+      "p99": 5508.7,
+      "max": 9609.9
+     },
+     "non_2xx": {},
+     "wait_mean": 740.7,
+     "hold_mean": 4.3,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1.1
+    },
+    "project_overview": {
+     "latency_2xx_ms": {
+      "n": 879,
+      "p50": 1048.3,
+      "p95": 6929.7,
+      "p99": 9486.5,
+      "max": 16765
+     },
+     "non_2xx": {},
+     "wait_mean": 2084,
+     "hold_mean": 13.1,
+     "tail_wait_share": 0.998,
+     "transport_p95": 0.9
+    },
+    "search_unified": {
+     "latency_2xx_ms": {
+      "n": 841,
+      "p50": 3431.2,
+      "p95": 8162.1,
+      "p99": 11097.6,
+      "max": 14592.3
+     },
+     "non_2xx": {},
+     "wait_mean": 5451.2,
+     "hold_mean": 20.1,
+     "tail_wait_share": 1.294,
+     "transport_p95": 0.9
+    },
+    "task_get": {
+     "latency_2xx_ms": {
+      "n": 2701,
+      "p50": 383.4,
+      "p95": 4619.1,
+      "p99": 7640.4,
+      "max": 12664.8
+     },
+     "non_2xx": {},
+     "wait_mean": 1064.1,
+     "hold_mean": 4.3,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1
+    },
+    "task_list_query": {
+     "latency_2xx_ms": {
+      "n": 1051,
+      "p50": 381.2,
+      "p95": 4678.9,
+      "p99": 8114.9,
+      "max": 12643.5
+     },
+     "non_2xx": {},
+     "wait_mean": 1098.7,
+     "hold_mean": 8,
+     "tail_wait_share": 0.999,
+     "transport_p95": 0.9
+    },
+    "task_update_fields": {
+     "latency_2xx_ms": {
+      "n": 899,
+      "p50": 2257.1,
+      "p95": 9644.9,
+      "p99": 13572.3,
+      "max": 21379.7
+     },
+     "non_2xx": {},
+     "wait_mean": 3519.7,
+     "hold_mean": 81.1,
+     "tail_wait_share": 0.993,
+     "transport_p95": 0.9
+    },
+    "task_update_status": {
+     "latency_2xx_ms": {
+      "n": 597,
+      "p50": 1912.9,
+      "p95": 8827.5,
+      "p99": 16956.9,
+      "max": 21301.9
+     },
+     "non_2xx": {},
+     "wait_mean": 3053.1,
+     "hold_mean": 78.8,
+     "tail_wait_share": 0.993,
+     "transport_p95": 0.9
+    },
+    "timeline_buckets_day": {
+     "latency_2xx_ms": {
+      "n": 154,
+      "p50": 4543.8,
+      "p95": 8325.1,
+      "p99": 9178.3,
+      "max": 9648.4
+     },
+     "non_2xx": {},
+     "wait_mean": 677.2,
+     "hold_mean": 4287.6,
+     "tail_wait_share": 0.503,
+     "transport_p95": 1.1
+    },
+    "timeline_buckets_week": {
+     "latency_2xx_ms": {
+      "n": 130,
+      "p50": 3616.1,
+      "p95": 7549,
+      "p99": 8600.7,
+      "max": 12059.9
+     },
+     "non_2xx": {},
+     "wait_mean": 620.5,
+     "hold_mean": 3403.3,
+     "tail_wait_share": 0.593,
+     "transport_p95": 0.8
+    },
+    "timeline_events": {
+     "latency_2xx_ms": {
+      "n": 726,
+      "p50": 193.8,
+      "p95": 4262.2,
+      "p99": 5562.5,
+      "max": 12076.9
+     },
+     "non_2xx": {},
+     "wait_mean": 773.6,
+     "hold_mean": 18,
+     "tail_wait_share": 0.996,
+     "transport_p95": 0.9
+    }
+   }
+  },
+  {
+   "clients": 500,
+   "mix_clients": 492,
+   "discovery_clients": 8,
+   "workers": 4,
+   "valid": true,
+   "in_flight": {
+    "mean": 499.9,
+    "min": 500,
+    "p50": 500
+   },
+   "requests": 16388,
+   "throughput_rps": 136.6,
+   "outcomes": {
+    "2xx": 16360,
+    "timeout": 28
+   },
+   "busy_without_retry_after": 0,
+   "pooled_2xx_ms": {
+    "n": 15867,
+    "p50": 1791.6,
+    "p95": 11633.7,
+    "p99": 19559.4,
+    "max": 29677.1
+   },
+   "pooled_all_ms_bounds": {
+    "n": 15895,
+    "timeouts": 28,
+    "p50": {
+     "min": 1791.6,
+     "max": 11633.7,
+     "at_2xx_quantile": 0.5009
+    },
+    "p95": {
+     "min": 11633.7,
+     "max": 19559.4,
+     "at_2xx_quantile": 0.9517
+    },
+    "p99": {
+     "min": 19559.4,
+     "max": 29677.1,
+     "at_2xx_quantile": 0.9918
+    },
+    "max": ">=30000"
+   },
+   "light_p95_2xx_ms": 9831.5,
+   "light_p95_all_ms_bounds": 9831.5,
+   "heavy_p95_2xx_ms": 19384.1,
+   "heavy_p95_all_ms_bounds": {
+    "min": 19384.1,
+    "max": "<30000",
+    "at_2xx_quantile": 0.9609
+   },
+   "fairness": {
+    "clients": 492,
+    "min": 15,
+    "mean": 32.3,
+    "max": 53,
+    "min_over_mean": 0.464,
+    "jain": 0.945,
+    "below_half_mean": 3
+   },
+   "client": {
+    "loop_p99_max_ms": 11.1,
+    "main_loop_p99_ms": 20.7,
+    "main_cpu_cores": 0.02,
+    "worker_cpu_cores_total": 0.115,
+    "connections_opened": 529,
+    "status_restore": {
+     "attempted": 337,
+     "restored": 337
+    }
+   },
+   "server": {
+    "pool": {
+     "checkouts": 100716,
+     "unattributed": 505,
+     "capacity_waits": 0,
+     "capacity_wait_share": 0,
+     "wait_total_s": 60330.8,
+     "hold_total_s": 1740.3,
+     "waits_over_1s": 11047,
+     "waits_over_100ms": 64727,
+     "wait_max_ms_process": 14895
+    },
+    "delivery_pool": {
+     "checkouts": 8958,
+     "capacity_waits": 2,
+     "wait_total_ms": 23.754
+    },
+    "pool_active_max": 15,
+    "http_admission": null,
+    "health_status": {
+     "200:degraded": 24
+    },
+    "health_probe_ms": {
+     "n": 24,
+     "p50": 1.4,
+     "p95": 2.3,
+     "p99": 3.6,
+     "max": 3.6
+    },
+    "rss_max_mib": 668,
+    "cpu_cores": 0.88,
+    "docker_cpu_pct": {
+     "hmem-perftest-server": {
+      "mean": 85.7,
+      "max": 139.5
+     },
+     "hmem-perftest-postgres": {
+      "mean": 1512.3,
+      "max": 1784.7
+     }
+    },
+    "restarted": false
+   },
+   "postgres": {
+    "backends_max": 19,
+    "active_max": 19,
+    "active_mean": 14.1,
+    "lock_wait_samples": 63,
+    "samples": 234,
+    "ungranted_max": 4,
+    "active_wait_events": {
+     "CPU:-": 2944,
+     "IO:BuffileWrite": 76,
+     "Lock:advisory": 71,
+     "IO:BuffileRead": 62,
+     "IO:DataFileRead": 57
+    },
+    "temp_bytes": 109468896627,
+    "deadlocks": 0,
+    "top_statements": [
+     {
+      "query": "WITH bounds AS ( SELECT date_trunc($4, $2 AT TIME ZONE 'UTC') AS series_start, d",
+      "calls": 312,
+      "total_ms": 1198704,
+      "mean_ms": 3842
+     },
+     {
+      "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space)",
+      "calls": 493,
+      "total_ms": 191023,
+      "mean_ms": 387.5
+     },
+     {
+      "query": "SELECT hmem_lock_planning_lifecycle()",
+      "calls": 1567,
+      "total_ms": 40902,
+      "mean_ms": 26.1
+     }
+    ]
+   },
+   "client_mode": "network",
+   "clock_offset_ms": [
+    1.1,
+    1.1,
+    1.1,
+    1.2
+   ],
+   "worker_env": {
+    "node": "v24.18.0",
+    "platform": "linux",
+    "cpus": 24,
+    "ports": "32768 60999",
+    "open_files": "1048576"
+   },
+   "websocket": {
+    "observers": 32,
+    "open_at_end": 31,
+    "writes": 1550,
+    "expected": 8221,
+    "delivered": 8046,
+    "min_observer_fraction": 0.489,
+    "closed": [
+     1006
+    ],
+    "commit_to_frame_ms": {
+     "n": 8046,
+     "p50": -434.5,
+     "p95": 506.9,
+     "p99": 691,
+     "max": 942.9
+    },
+    "undelivered_by_route": {
+     "task_update_status": 88,
+     "task_update_fields": 87
+    },
+    "frame_types": {
+     "session_activity_changed": 20725,
+     "change_unmatched:task_update_status": 73,
+     "checkpoint": 4078,
+     "change_unmatched:task_update_fields": 214,
+     "change_unmatched:other": 2318,
+     "change": 8046,
+     "change_unmatched:restore": 1677
+    }
+   },
+   "websocket_events": {
+    "websocket_turn:retired_deadline": 1,
+    "websocket_replay:retired": 1,
+    "websocket_connection:closed": 1,
+    "websocket_cleanup:unfinished": 1,
+    "websocket_reclaim:reclaimed": 1
+   },
+   "capture": {
+    "appenders": 8,
+    "appends_2xx_ms": {
+     "n": 239,
+     "p50": 1939,
+     "p95": 10044.4,
+     "p99": 14727.9,
+     "max": 15002.1
+    },
+    "outcomes": {
+     "2xx": 239
+    },
+    "proofs": {
+     "verified": 8
+    }
+   },
+   "recovery": {
+    "ok_after_hold_ms": 15144.8,
+    "pool_active": 0,
+    "http_admission": null
+   },
+   "log": {
+    "joined": 16388,
+    "join_rate": 1
+   },
+   "routes": {
+    "discovery_content": {
+     "latency_2xx_ms": {
+      "n": 165,
+      "p50": 946.5,
+      "p95": 5299.5,
+      "p99": 8543.2,
+      "max": 8759.5
+     },
+     "non_2xx": {},
+     "wait_mean": 1369.9,
+     "hold_mean": 557.4,
+     "tail_wait_share": 0.919,
+     "transport_p95": 1.4
+    },
+    "discovery_continue": {
+     "latency_2xx_ms": {
+      "n": 165,
+      "p50": 924.8,
+      "p95": 7600,
+      "p99": 9898.6,
+      "max": 10097.6
+     },
+     "non_2xx": {},
+     "wait_mean": 1591.7,
+     "hold_mean": 546.2,
+     "tail_wait_share": 0.941,
+     "transport_p95": 1
+    },
+    "discovery_subject_tree": {
+     "latency_2xx_ms": {
+      "n": 163,
+      "p50": 444.9,
+      "p95": 5433,
+      "p99": 9249,
+      "max": 9809.3
+     },
+     "non_2xx": {},
+     "wait_mean": 1670,
+     "hold_mean": 70.7,
+     "tail_wait_share": 0.982,
+     "transport_p95": 0.8
+    },
+    "nav_batch": {
+     "latency_2xx_ms": {
+      "n": 593,
+      "p50": 13411.2,
+      "p95": 25506.3,
+      "p99": 28442.4,
+      "max": 29677.1
+     },
+     "latency_all_ms_bounds": {
+      "n": 621,
+      "timeouts": 28,
+      "p50": {
+       "min": 13411.2,
+       "max": 25506.3,
+       "at_2xx_quantile": 0.5245
+      },
+      "p95": {
+       "min": 28442.4,
+       "max": 29677.1,
+       "at_2xx_quantile": 0.9949
+      },
+      "p99": ">=30000",
+      "max": ">=30000"
+     },
+     "non_2xx": {
+      "timeout": 28
+     },
+     "wait_mean": 14423.4,
+     "hold_mean": 59,
+     "tail_wait_share": 0.998,
+     "transport_p95": 1
+    },
+    "nav_focus": {
+     "latency_2xx_ms": {
+      "n": 954,
+      "p50": 6334.2,
+      "p95": 16195.5,
+      "p99": 22709.1,
+      "max": 25933.8
+     },
+     "non_2xx": {},
+     "wait_mean": 7096.5,
+     "hold_mean": 20.1,
+     "tail_wait_share": 0.999,
+     "transport_p95": 0.9
+    },
+    "nav_project": {
+     "latency_2xx_ms": {
+      "n": 1778,
+      "p50": 4079.8,
+      "p95": 11025.5,
+      "p99": 15664.3,
+      "max": 24869.9
+     },
+     "non_2xx": {},
+     "wait_mean": 4370.4,
+     "hold_mean": 16.1,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1
+    },
+    "nav_root": {
+     "latency_2xx_ms": {
+      "n": 968,
+      "p50": 2279,
+      "p95": 11782,
+      "p99": 15455.1,
+      "max": 20596.2
+     },
+     "non_2xx": {},
+     "wait_mean": 4184.6,
+     "hold_mean": 55.3,
+     "tail_wait_share": 0.996,
+     "transport_p95": 1
+    },
+    "observation_list_query": {
+     "latency_2xx_ms": {
+      "n": 1431,
+      "p50": 723,
+      "p95": 6215,
+      "p99": 9147.5,
+      "max": 15775.1
+     },
+     "non_2xx": {},
+     "wait_mean": 1793,
+     "hold_mean": 13.8,
+     "tail_wait_share": 0.998,
+     "transport_p95": 1
+    },
+    "observation_subject_tree": {
+     "latency_2xx_ms": {
+      "n": 611,
+      "p50": 752,
+      "p95": 7030.2,
+      "p99": 9083.7,
+      "max": 12408.7
+     },
+     "non_2xx": {},
+     "wait_mean": 1745.8,
+     "hold_mean": 39.9,
+     "tail_wait_share": 0.996,
+     "transport_p95": 1.2
+    },
+    "planning_counts": {
+     "latency_2xx_ms": {
+      "n": 931,
+      "p50": 302.7,
+      "p95": 4737,
+      "p99": 8182.7,
+      "max": 12078.3
+     },
+     "non_2xx": {},
+     "wait_mean": 1194.2,
+     "hold_mean": 4.2,
+     "tail_wait_share": 0.999,
+     "transport_p95": 0.9
+    },
+    "project_overview": {
+     "latency_2xx_ms": {
+      "n": 958,
+      "p50": 1643.6,
+      "p95": 9693.7,
+      "p99": 13932.2,
+      "max": 24078.9
+     },
+     "non_2xx": {},
+     "wait_mean": 3325,
+     "hold_mean": 12.8,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1
+    },
+    "search_unified": {
+     "latency_2xx_ms": {
+      "n": 956,
+      "p50": 4439.8,
+      "p95": 10611.4,
+      "p99": 13330.2,
+      "max": 16368.4
+     },
+     "non_2xx": {},
+     "wait_mean": 7460.6,
+     "hold_mean": 20.4,
+     "tail_wait_share": 1.327,
+     "transport_p95": 1
+    },
+    "task_get": {
+     "latency_2xx_ms": {
+      "n": 2876,
+      "p50": 713,
+      "p95": 6013.1,
+      "p99": 9697.8,
+      "max": 14197
+     },
+     "non_2xx": {},
+     "wait_mean": 1736.8,
+     "hold_mean": 4.2,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1
+    },
+    "task_list_query": {
+     "latency_2xx_ms": {
+      "n": 1158,
+      "p50": 741.4,
+      "p95": 5596.2,
+      "p99": 9674.4,
+      "max": 13362.3
+     },
+     "non_2xx": {},
+     "wait_mean": 1734.2,
+     "hold_mean": 8.1,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1.1
+    },
+    "task_update_fields": {
+     "latency_2xx_ms": {
+      "n": 965,
+      "p50": 4869.1,
+      "p95": 13467.6,
+      "p99": 18052.1,
+      "max": 23337.2
+     },
+     "non_2xx": {},
+     "wait_mean": 5209.8,
+     "hold_mean": 81.5,
+     "tail_wait_share": 0.995,
+     "transport_p95": 1
+    },
+    "task_update_status": {
+     "latency_2xx_ms": {
+      "n": 585,
+      "p50": 4794.3,
+      "p95": 12657.9,
+      "p99": 18019.2,
+      "max": 20818.7
+     },
+     "non_2xx": {},
+     "wait_mean": 5005.9,
+     "hold_mean": 80.8,
+     "tail_wait_share": 0.994,
+     "transport_p95": 1.1
+    },
+    "timeline_buckets_day": {
+     "latency_2xx_ms": {
+      "n": 156,
+      "p50": 4894.5,
+      "p95": 9692.4,
+      "p99": 12232.6,
+      "max": 14108.1
+     },
+     "non_2xx": {},
+     "wait_mean": 1353.9,
+     "hold_mean": 4336.8,
+     "tail_wait_share": 0.58,
+     "transport_p95": 0.6
+    },
+    "timeline_buckets_week": {
+     "latency_2xx_ms": {
+      "n": 154,
+      "p50": 3812.6,
+      "p95": 8154.3,
+      "p99": 10194.1,
+      "max": 11294.9
+     },
+     "non_2xx": {},
+     "wait_mean": 1093.8,
+     "hold_mean": 3408.2,
+     "tail_wait_share": 0.608,
+     "transport_p95": 1.2
+    },
+    "timeline_events": {
+     "latency_2xx_ms": {
+      "n": 793,
+      "p50": 315.3,
+      "p95": 4675.3,
+      "p99": 7641.1,
+      "max": 9313.7
+     },
+     "non_2xx": {},
+     "wait_mean": 1097.8,
+     "hold_mean": 20.4,
+     "tail_wait_share": 0.996,
+     "transport_p95": 0.9
+    }
+   }
+  },
+  {
+   "clients": 1000,
+   "mix_clients": 992,
+   "discovery_clients": 8,
+   "workers": 8,
+   "valid": true,
+   "in_flight": {
+    "mean": 1000,
+    "min": 1000,
+    "p50": 1000
+   },
+   "requests": 18197,
+   "throughput_rps": 151.6,
+   "outcomes": {
+    "2xx": 17936,
+    "timeout": 261
+   },
+   "busy_without_retry_after": 0,
+   "pooled_2xx_ms": {
+    "n": 17664,
+    "p50": 4723.1,
+    "p95": 17995.5,
+    "p99": 25517.8,
+    "max": 29956.4
+   },
+   "pooled_all_ms_bounds": {
+    "n": 17925,
+    "timeouts": 261,
+    "p50": {
+     "min": 4723.1,
+     "max": 17995.5,
+     "at_2xx_quantile": 0.5074
+    },
+    "p95": {
+     "min": 17995.5,
+     "max": 25517.8,
+     "at_2xx_quantile": 0.9641
+    },
+    "p99": ">=30000",
+    "max": ">=30000"
+   },
+   "light_p95_2xx_ms": 15148.7,
+   "light_p95_all_ms_bounds": {
+    "min": 15148.7,
+    "max": "<30000",
+    "at_2xx_quantile": 0.9513
+   },
+   "heavy_p95_2xx_ms": 25490.6,
+   "heavy_p95_all_ms_bounds": ">=30000",
+   "fairness": {
+    "clients": 992,
+    "min": 6,
+    "mean": 18.1,
+    "max": 38,
+    "min_over_mean": 0.332,
+    "jain": 0.935,
+    "below_half_mean": 16
+   },
+   "client": {
+    "loop_p99_max_ms": 10.9,
+    "main_loop_p99_ms": 20.9,
+    "main_cpu_cores": 0.019,
+    "worker_cpu_cores_total": 0.144,
+    "connections_opened": 1295,
+    "status_restore": {
+     "attempted": 352,
+     "restored": 352
+    }
+   },
+   "server": {
+    "pool": {
+     "checkouts": 114161,
+     "unattributed": 312,
+     "capacity_waits": 0,
+     "capacity_wait_share": 0,
+     "wait_total_s": 123893,
+     "hold_total_s": 1770.7,
+     "waits_over_1s": 22511,
+     "waits_over_100ms": 113259,
+     "wait_max_ms_process": 14895
+    },
+    "delivery_pool": {
+     "checkouts": 9297,
+     "capacity_waits": 1,
+     "wait_total_ms": 18.522
+    },
+    "pool_active_max": 15,
+    "http_admission": null,
+    "health_status": {
+     "200:degraded": 24
+    },
+    "health_probe_ms": {
+     "n": 24,
+     "p50": 1.5,
+     "p95": 4.9,
+     "p99": 9.8,
+     "max": 9.8
+    },
+    "rss_max_mib": 733,
+    "cpu_cores": 0.929,
+    "docker_cpu_pct": {
+     "hmem-perftest-server": {
+      "mean": 91.8,
+      "max": 145.8
+     },
+     "hmem-perftest-postgres": {
+      "mean": 1492.1,
+      "max": 1752.6
+     }
+    },
+    "restarted": false
+   },
+   "postgres": {
+    "backends_max": 19,
+    "active_max": 18,
+    "active_mean": 14,
+    "lock_wait_samples": 91,
+    "samples": 239,
+    "ungranted_max": 6,
+    "active_wait_events": {
+     "CPU:-": 2876,
+     "Lock:advisory": 143,
+     "IO:BuffileWrite": 83,
+     "IO:BuffileRead": 58,
+     "IO:DataFileRead": 58
+    },
+    "temp_bytes": 113110485946,
+    "deadlocks": 0,
+    "top_statements": [
+     {
+      "query": "WITH bounds AS ( SELECT date_trunc($4, $2 AT TIME ZONE 'UTC') AS series_start, d",
+      "calls": 325,
+      "total_ms": 1217277,
+      "mean_ms": 3745.5
+     },
+     {
+      "query": "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space)",
+      "calls": 272,
+      "total_ms": 104661,
+      "mean_ms": 384.8
+     },
+     {
+      "query": "SELECT hmem_lock_planning_lifecycle()",
+      "calls": 1806,
+      "total_ms": 65849,
+      "mean_ms": 36.5
+     }
+    ]
+   },
+   "client_mode": "network",
+   "clock_offset_ms": [
+    -0.1,
+    0,
+    -0.1,
+    -0.1,
+    0,
+    0,
+    0,
+    0
+   ],
+   "worker_env": {
+    "node": "v24.18.0",
+    "platform": "linux",
+    "cpus": 24,
+    "ports": "32768 60999",
+    "open_files": "1048576"
+   },
+   "websocket": {
+    "observers": 32,
+    "open_at_end": 31,
+    "writes": 1785,
+    "expected": 9526,
+    "delivered": 9210,
+    "min_observer_fraction": 0,
+    "closed": [
+     1006
+    ],
+    "commit_to_frame_ms": {
+     "n": 9210,
+     "p50": -1580.3,
+     "p95": 100.6,
+     "p99": 435.3,
+     "max": 845.1
+    },
+    "undelivered_by_route": {
+     "task_update_status": 102,
+     "task_update_fields": 214
+    },
+    "frame_types": {
+     "session_activity_changed": 22256,
+     "change_unmatched:task_update_fields": 390,
+     "change_unmatched:task_update_status": 178,
+     "checkpoint": 4245,
+     "change_unmatched:other": 2132,
+     "change": 9210,
+     "change_unmatched:restore": 1772
+    }
+   },
+   "websocket_events": {},
+   "capture": {
+    "appenders": 8,
+    "appends_2xx_ms": {
+     "n": 129,
+     "p50": 6066.1,
+     "p95": 18308.3,
+     "p99": 20573.2,
+     "max": 20578.3
+    },
+    "outcomes": {
+     "2xx": 129
+    },
+    "proofs": {
+     "verified": 8
+    }
+   },
+   "recovery": {
+    "ok_after_hold_ms": 18352.3,
+    "pool_active": 1,
+    "http_admission": null
+   },
+   "log": {
+    "joined": 18197,
+    "join_rate": 1
+   },
+   "routes": {
+    "discovery_content": {
+     "latency_2xx_ms": {
+      "n": 89,
+      "p50": 1662.7,
+      "p95": 9557.5,
+      "p99": 14357.8,
+      "max": 14357.8
+     },
+     "non_2xx": {},
+     "wait_mean": 2971.8,
+     "hold_mean": 547.3,
+     "tail_wait_share": 0.949,
+     "transport_p95": 1.2
+    },
+    "discovery_continue": {
+     "latency_2xx_ms": {
+      "n": 93,
+      "p50": 1512.4,
+      "p95": 10385.6,
+      "p99": 13591.9,
+      "max": 13591.9
+     },
+     "non_2xx": {},
+     "wait_mean": 3124,
+     "hold_mean": 540,
+     "tail_wait_share": 0.953,
+     "transport_p95": 0.9
+    },
+    "discovery_subject_tree": {
+     "latency_2xx_ms": {
+      "n": 90,
+      "p50": 1101.6,
+      "p95": 8620.2,
+      "p99": 12227.9,
+      "max": 12227.9
+     },
+     "non_2xx": {},
+     "wait_mean": 3091.3,
+     "hold_mean": 69.3,
+     "tail_wait_share": 0.986,
+     "transport_p95": 1.4
+    },
+    "nav_batch": {
+     "latency_2xx_ms": {
+      "n": 474,
+      "p50": 18978.6,
+      "p95": 28566.8,
+      "p99": 29702.5,
+      "max": 29956.4
+     },
+     "latency_all_ms_bounds": {
+      "n": 714,
+      "timeouts": 240,
+      "p50": {
+       "min": 18978.6,
+       "max": 28566.8,
+       "at_2xx_quantile": 0.7532
+      },
+      "p95": ">=30000",
+      "p99": ">=30000",
+      "max": ">=30000"
+     },
+     "non_2xx": {
+      "timeout": 240
+     },
+     "wait_mean": 24824.4,
+     "hold_mean": 56.3,
+     "tail_wait_share": 0.998,
+     "transport_p95": 0.8
+    },
+    "nav_focus": {
+     "latency_2xx_ms": {
+      "n": 1060,
+      "p50": 11879.9,
+      "p95": 24286.3,
+      "p99": 28480.9,
+      "max": 29730.7
+     },
+     "latency_all_ms_bounds": {
+      "n": 1080,
+      "timeouts": 20,
+      "p50": {
+       "min": 11879.9,
+       "max": 24286.3,
+       "at_2xx_quantile": 0.5094
+      },
+      "p95": {
+       "min": 24286.3,
+       "max": 28480.9,
+       "at_2xx_quantile": 0.9679
+      },
+      "p99": ">=30000",
+      "max": ">=30000"
+     },
+     "non_2xx": {
+      "timeout": 20
+     },
+     "wait_mean": 13056.5,
+     "hold_mean": 19.3,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1.1
+    },
+    "nav_project": {
+     "latency_2xx_ms": {
+      "n": 1952,
+      "p50": 6580.3,
+      "p95": 18433.9,
+      "p99": 23194,
+      "max": 29690.9
+     },
+     "non_2xx": {},
+     "wait_mean": 7699.9,
+     "hold_mean": 15.5,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1.1
+    },
+    "nav_root": {
+     "latency_2xx_ms": {
+      "n": 1084,
+      "p50": 7200.6,
+      "p95": 18296.5,
+      "p99": 22923.2,
+      "max": 29375.7
+     },
+     "non_2xx": {},
+     "wait_mean": 8294.3,
+     "hold_mean": 53.6,
+     "tail_wait_share": 0.997,
+     "transport_p95": 1
+    },
+    "observation_list_query": {
+     "latency_2xx_ms": {
+      "n": 1572,
+      "p50": 1390,
+      "p95": 9072.3,
+      "p99": 14078.2,
+      "max": 19275
+     },
+     "non_2xx": {},
+     "wait_mean": 3194.4,
+     "hold_mean": 13.5,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1
+    },
+    "observation_subject_tree": {
+     "latency_2xx_ms": {
+      "n": 695,
+      "p50": 1478.7,
+      "p95": 9070.4,
+      "p99": 13630.9,
+      "max": 15669.9
+     },
+     "non_2xx": {},
+     "wait_mean": 3187.7,
+     "hold_mean": 38.6,
+     "tail_wait_share": 0.997,
+     "transport_p95": 1.1
+    },
+    "planning_counts": {
+     "latency_2xx_ms": {
+      "n": 1078,
+      "p50": 897.9,
+      "p95": 7139.6,
+      "p99": 9407.4,
+      "max": 15629
+     },
+     "non_2xx": {},
+     "wait_mean": 2205.6,
+     "hold_mean": 4.1,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1
+    },
+    "project_overview": {
+     "latency_2xx_ms": {
+      "n": 1053,
+      "p50": 5435.3,
+      "p95": 14104.9,
+      "p99": 20048.3,
+      "max": 25884.4
+     },
+     "non_2xx": {},
+     "wait_mean": 5929.5,
+     "hold_mean": 12.5,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1.1
+    },
+    "search_unified": {
+     "latency_2xx_ms": {
+      "n": 1145,
+      "p50": 6384,
+      "p95": 12995.9,
+      "p99": 15743.8,
+      "max": 19240.3
+     },
+     "non_2xx": {},
+     "wait_mean": 10196.8,
+     "hold_mean": 19.4,
+     "tail_wait_share": 1.333,
+     "transport_p95": 1.2
+    },
+    "task_get": {
+     "latency_2xx_ms": {
+      "n": 3252,
+      "p50": 1389.9,
+      "p95": 9017.2,
+      "p99": 13558.8,
+      "max": 19263.2
+     },
+     "non_2xx": {},
+     "wait_mean": 3126.9,
+     "hold_mean": 4,
+     "tail_wait_share": 1,
+     "transport_p95": 1.2
+    },
+    "task_list_query": {
+     "latency_2xx_ms": {
+      "n": 1259,
+      "p50": 1357.6,
+      "p95": 9155,
+      "p99": 13448.6,
+      "max": 19324.2
+     },
+     "non_2xx": {},
+     "wait_mean": 3061.1,
+     "hold_mean": 7.7,
+     "tail_wait_share": 0.999,
+     "transport_p95": 1.1
+    },
+    "task_update_fields": {
+     "latency_2xx_ms": {
+      "n": 1268,
+      "p50": 9444.1,
+      "p95": 21377.8,
+      "p99": 25142.7,
+      "max": 29592.2
+     },
+     "latency_all_ms_bounds": {
+      "n": 1269,
+      "timeouts": 1,
+      "p50": {
+       "min": 9444.1,
+       "max": 21377.8,
+       "at_2xx_quantile": 0.5008
+      },
+      "p95": {
+       "min": 21377.8,
+       "max": 25142.7,
+       "at_2xx_quantile": 0.9511
+      },
+      "p99": {
+       "min": 25142.7,
+       "max": 29592.2,
+       "at_2xx_quantile": 0.9913
+      },
+      "max": ">=30000"
+     },
+     "non_2xx": {
+      "timeout": 1
+     },
+     "wait_mean": 10081.4,
+     "hold_mean": 92,
+     "tail_wait_share": 0.996,
+     "transport_p95": 1.1
+    },
+    "task_update_status": {
+     "latency_2xx_ms": {
+      "n": 517,
+      "p50": 8814.5,
+      "p95": 19426.5,
+      "p99": 24993.2,
+      "max": 29606
+     },
+     "non_2xx": {},
+     "wait_mean": 9203.5,
+     "hold_mean": 88.3,
+     "tail_wait_share": 0.996,
+     "transport_p95": 1.1
+    },
+    "timeline_buckets_day": {
+     "latency_2xx_ms": {
+      "n": 153,
+      "p50": 5203,
+      "p95": 11761.6,
+      "p99": 14835.9,
+      "max": 14990.3
+     },
+     "non_2xx": {},
+     "wait_mean": 2207.9,
+     "hold_mean": 4258,
+     "tail_wait_share": 0.684,
+     "transport_p95": 1.4
+    },
+    "timeline_buckets_week": {
+     "latency_2xx_ms": {
+      "n": 164,
+      "p50": 4391,
+      "p95": 10957.7,
+      "p99": 15302.1,
+      "max": 15629.7
+     },
+     "non_2xx": {},
+     "wait_mean": 2385.3,
+     "hold_mean": 3392.4,
+     "tail_wait_share": 0.724,
+     "transport_p95": 0.9
+    },
+    "timeline_events": {
+     "latency_2xx_ms": {
+      "n": 938,
+      "p50": 956.3,
+      "p95": 8081.1,
+      "p99": 9647.8,
+      "max": 15654.4
+     },
+     "non_2xx": {},
+     "wait_mean": 2315.9,
+     "hold_mean": 22.1,
+     "tail_wait_share": 0.998,
+     "transport_p95": 1.1
+    }
+   }
+  }
+ ],
+ "findings": [
+  "300 concurrent requests are sustained: 300 in flight for the whole 120 s hold, all 15,588 requests 2xx, no 5xx, 429, refusals, resets or client timeouts. The latency is queueing: pooled 2xx p50 842 ms, p95 8.5 s, p99 13.7 s, max 26.9 s at 130 requests/s; with every request 2xx these are also the all-outcome figures.",
+  "The main pool saturates first. Mean connections held over the hold (hold_total / hold) are 14.5-14.8 of 15 at every step, PostgreSQL keeps about 14 backends active, and pool wait is at least 97% of the slowest 5% of every route except timeline buckets (50-72%), discovery content and continuation (90-95%) and unified search (above 100%, because its three branches wait concurrently). Throughput stays at 130-152 requests/s from 300 to 1,000 clients, so latency grows with the client count.",
+  "Timeline buckets are 1.8-1.9% of requests (284-325 calls per step, 3.7-3.8 s mean statement time) but hold 61-69% of all main pool connection time, and 98-113 GB of temporary files are written per step. Observation discovery is second (105-323 s per step).",
+  "Neither CPU nor the client is the limit: hmem-server uses 0.84-0.93 cores (RSS 665-733 MiB), PostgreSQL about 15 of 24 cores, the load workers at most 0.15 cores with event-loop p99 at most 11.1 ms, and transport overhead p95 at most 1.4 ms.",
+  "Breaking point: 500 is the first step with client timeouts (28, all navigation batch); 1,000 has 261 (240 navigation batch, 20 navigation focus, 1 field update). The 2xx-only percentiles understate these steps. All-outcome pooled p99 is censored at >=30 s at 1,000 (261 of 17,925 mix requests timed out) and at least 19.6 s at 500, where it is the 2xx 99.2nd percentile. Routes with many checkouts queue once per checkout: navigation batch (about 28 checkouts) has 60 ms of hold but an 8.8 s p50 at 300 (no timeouts). At 1,000, 240 of its 714 requests timed out: its 2xx-only p50 is 19.0 s, its all-outcome median is the 2xx 75th percentile, between 19.0 and 28.6 s, and its all-outcome p95 is censored at >=30 s.",
+  "f206ff72 has no HTTP admission control (no http_admission in health): there is no 503, no refusal and no queue bound; requests wait in the pool queue until the client gives up. Health reports degraded in every probe during each hold because its non-blocking database probe finds no idle connection, and it recovers 15-18 s after the load stops.",
+  "Fairness: Jain index 0.93-0.95. Every client completes at least half the mean at 300 (minimum 0.57 of the mean); 3 clients fall below half at 500 and 16 at 1,000. Light-route 2xx p95 is below heavy-route 2xx p95 at every step (6.6 against 13.8 s at 300, with no timeouts); at 1,000 the all-outcome heavy p95 is censored at >=30 s and the all-outcome light p95 is at least 15.1 s.",
+  "At f206ff72 (one stripe per capability), pool stripe capacity waits are 0 in every step: with the whole pool in demand, a stripe-only wait is not counted, so the runner does not reproduce stripe waits at these steps. It does reproduce bucket saturation.",
+  "WebSocket: the delivery pool shows no waits (at most 2 capacity waits). At 300, every change frame arrived except 41 frames for about 11 no-op status updates: the baseline runner set no status precondition, so targets left in progress by aborted runner attempts received in_progress again (11 fewer audit rows than logged updates); the remediated runner sets every status target to todo first. During the 500 step the server retired one healthy observer on its delivery deadline under pool saturation (websocket_turn retired_deadline, close 1006); it stays closed and counts as undelivered at 1,000 (open anomaly, see open_anomalies). Missing frames not attributable to that observer remain unexplained: about 44 of 175 at 500 (37-55 over plausible per-observer shares) and about 18 of 316 at 1,000, estimated with the mean per-observer share because per-observer counts were not recorded. Change frames reach observers before the writer receives its response (response-end-to-frame p50 -173 ms at 300, -1.58 s at 1,000) because write handlers queue for checkouts after their commit.",
+  "Capture: every append returned 2xx and all 8 prefix proofs were verified after every step; append 2xx p50 rose from 1.4 s at 300 to 6.1 s at 1,000."
+ ],
+ "limitations": [
+  "One run per step on a shared host; other work on the host may have used CPU during the runs. The consumer qualification requires two runs per step on a fresh copy.",
+  "The seed was changed before the baseline by runner development and smoke runs (83 small active sessions, about 80 tasks, task fields) and about 11 status targets were left in progress by aborted runs, because the baseline runner set no status precondition (the source of the 41 missing frames at 300); later steps follow earlier ones after a 30 s cooldown.",
+  "Local authentication: one principal; audiences differ only by bot identity, and per-user authorization costs are not exercised.",
+  "Load workers share the Docker VM CPUs with the server and PostgreSQL and bypass the Docker Desktop published-port proxy; only the main process uses it.",
+  "Host-process workers (--client local) intermittently crashed natively at 1,000 connections on Windows with Node 24.15 (exit 127 with worker threads, 0xC0000409 with child processes; one EADDRINUSE). The baseline used container workers; local mode is not qualified at 1,000.",
+  "Delivery latency starts at the write response end, so it is negative when frames precede responses; health, RSS and docker stats are sampled every 5 s and pg_stat_activity every 0.5 s.",
+  "The 503 server_busy, Retry-After and admission-wait classification is untested against an implementation, because f206ff72 has none.",
+  "The hold-boundary docker exec and psql calls (counter snapshots, container state, sampler start and stop) are synchronous and block the main process, delaying WebSocket frame timestamps and capture appends at those moments; the baseline did not measure them and excluded them from main_loop_p99_ms. The remediated runner reports them as main_blocking_ms.",
+  "All-outcome latency at the baseline is derived from recorded counts (method.latency) and is a bound, not a measured percentile; WebSocket delivery was aggregated over all observers, so the retired observer and unattributed missing frames are estimated from totals and the minimum observer fraction."
+ ],
+ "teardown": "docker compose -p hmem-perftest -f tools/perftest/compose.yaml down -v removed both containers, network hmem-perftest-net and volume hmem-perftest-pgdata; image hmem-perftest:f206ff72 removed; load-worker containers were removed on exit (--rm). .tmp/perftest (build context, secrets, seed state, step summaries, logs and scratch scripts) deleted. Verified empty: docker ps -a, volume ls and network ls filtered on hmem-perftest, docker images hmem-perftest. The pre-existing node:24.18.0-bookworm and postgres:17-bookworm images, hmem-local-tei and all other containers and images were not touched; BuildKit cache retained; no git worktree was created.",
+ "open_anomalies": [
+  {
+   "id": "retired-healthy-observer-500",
+   "owner": "fe98a2eb-da10-4c1e-ad9c-1f45295e101f",
+   "description": "During the 500-client step the server retired one healthy WebSocket observer on its delivery deadline under main pool saturation (websocket_turn retired_deadline, websocket_connection closed, close 1006); it delivered about 49% of its expected frames at 500 and none at 1,000. About 44 missing frames at 500 and about 18 at 1,000 are not attributable to it. Follow-up: reproduce with per-observer delivery (remediated runner) and determine whether a healthy observer should be retired when the delay comes from pool saturation."
+  }
+ ],
+ "remediation": {
+  "date": "2026-11-17",
+  "runner_sha256": "941427c86f00b97c6fc77d7572c951ffa07170f87ff3937dea17da87f61c9806",
+  "changes": [
+   "Latency distributions are labelled 2xx-only (*_2xx_ms) and all-outcome percentiles with client timeouts censored at the timeout (*_all_ms, >=<timeout>) are added per route, pooled, light and heavy p95 and capture appends.",
+   "Status workload: every status target is set to todo before the first step and the run stops if one cannot be; after each step, once health recovers or 30 s pass, every status target a client attempted is put back to todo whatever the outcome; after an abort or a failed restore, every status target is put back to todo.",
+   "--weights accepts only own route names (Object.hasOwn); an empty --steps value is rejected instead of selecting the default.",
+   "WebSocket delivery is aggregated over observers open through the drain, with every observer listed (state, expected, delivered) and closed or retired observers apart.",
+   "Hold-boundary synchronous docker exec and psql time is reported as client.main_blocking_ms.",
+   "The psql watch sampler is stopped in the finally path and its files are unique per run (/tmp/hmem-concurrency-<run>-*) and removed at exit.",
+   "The runner exits non-zero unless /api/v1/health answers HTTP 200 within 120 s, and records the wait as startup_health_ms."
+  ],
+  "validation": [
+   "node --check tools/perftest/concurrency.mjs: pass",
+   "node tools/perftest/concurrency.mjs --self-test: pass (censoring, 2xx-only distribution, status toggle and restore with lost and failed attempts)",
+   "PERFTEST_DIR=/nonexistent-perftest-dir: 39 invalid-argument cases exit 2 before reading inputs, including --weights constructor, toString, __proto__, hasOwnProperty and valueOf; a valid control fails only on the missing secrets.env, so nothing was contacted"
+  ],
+  "not_rerun": "No container was started for the remediation. The smoke and baseline figures above come from the earlier runner files; the new outputs (exact all-outcome percentiles, per-observer delivery, status precondition and restore, main_blocking_ms) await the matched runs of fe98a2eb."
+ }
+}

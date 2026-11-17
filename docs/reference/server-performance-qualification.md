@@ -219,6 +219,8 @@ at the write response, so it is a lower bound. RSS is sampled once per second. L
 every principal the trusted superadmin, so revocation is covered only by the
 focused specs. MCP follower diagnostics were not collected; capture used HTTP
 clients. Admission limits were not approached (27 sockets in one audience).
+The [concurrency runner](concurrency-runner.md) drives 300 to 1,000
+concurrent clients.
 
 ## Reproduce
 

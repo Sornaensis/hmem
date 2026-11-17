@@ -1483,7 +1483,7 @@ spec = describe "canonical change-stream loopback" $ do
           outcomeCount current ("websocket_upgrade", "none", "rejected_unavailable") == 1
         outcomeCount snapshot ("websocket_upgrade", "none", "accepted") `shouldBe` 0
 
-  it "keeps a successful Close physically admitted until its peer acknowledges" $
+  it "keeps a successful Close physically admitted without its delivery lease until its peer acknowledges" $
     withLocalSandboxAppContext $ \ctx -> do
       workspace <- createTestWorkspace ctx.localEnv "native-close-physical-lifetime"
       let scope = WorkspaceScope workspace.id
@@ -1494,29 +1494,38 @@ spec = describe "canonical change-stream loopback" $ do
       ticket <- createCanonicalTicketWithTtl ctx.localWSState 0.5 principal scope resume
       closing <- newEmptyMVar
       acknowledge <- newEmptyMVar
-      withWebSocketApplication ctx.localWSState ctx.localApplication $ \port ->
-        withHeldLegacyPeers port 31 $ do
-          let peer = runPlainPeer port ticket.ticket $ \conn -> do
-                first <- WS.receiveData conn >>= decodeFrame
-                frameType first `shouldBe` Just "checkpoint"
-                expired <- WS.receiveData conn >>= decodeFrame
-                frameType expired `shouldBe` Just "resync_required"
-                putMVar closing ()
-                takeMVar acknowledge
-                void (try @WS.ConnectionException (WS.receiveData conn :: IO Text))
-          withAsync peer $ \worker -> do
-            declaredPhase "successful Close written" (takeMVar closing)
-            (do
-              headers <- upgradeResponseHeaders port
-              headers `shouldSatisfy` BS.isInfixOf "503 Service Unavailable")
-              `finally` void (tryPutMVar acknowledge ())
-            declaredPhase "closing peer acknowledged" (wait worker)
-            let released = do
-                  headers <- upgradeResponseHeaders port
-                  if "503 Service Unavailable" `BS.isInfixOf` headers
-                    then threadDelay 10000 >> released
-                    else headers `shouldSatisfy` BS.isInfixOf "HTTP/1.1 101 "
-            declaredPhase "physical admission released after owner exit" released
+      withWebSocketApplication ctx.localWSState ctx.localApplication $ \port -> do
+        let peer = runPlainPeer port ticket.ticket $ \conn -> do
+              first <- WS.receiveData conn >>= decodeFrame
+              frameType first `shouldBe` Just "checkpoint"
+              expired <- WS.receiveData conn >>= decodeFrame
+              frameType expired `shouldBe` Just "resync_required"
+              putMVar closing ()
+              -- The server's Close frame stays unread, and so unacknowledged,
+              -- until the test releases this peer.
+              takeMVar acknowledge
+              final <- try @WS.ConnectionException (WS.receiveData conn :: IO Text)
+              case final of
+                Left (WS.CloseRequest code reason) ->
+                  (code, reason) `shouldBe` (1000, "canonical resume expired")
+                other -> expectationFailure ("expected the server's Close, got " <> show other)
+        withAsync peer $ \worker -> do
+          declaredPhase "terminal frame received" (takeMVar closing)
+          (do
+            -- The Close shares the terminal frame's delivery turn, so a
+            -- released lease means the Close write has completed. Physical
+            -- admission stays owned while the peer has not acknowledged.
+            held <- awaitTelemetry ctx.localWSState "successful Close awaiting peer acknowledgement" $ \current ->
+              current.delivery.leasesInUse == 0 && current.delivery.physicalAdmitted == 1
+            (held.delivery.physicalAdmitted, held.delivery.leasesInUse) `shouldBe` (1, 0)
+            outcomeCount held ("websocket_upgrade", "canonical", "accepted") `shouldBe` 1)
+            `finally` void (tryPutMVar acknowledge ())
+          declaredPhase "closing peer acknowledged" (wait worker)
+          -- Verified while the server still runs: its teardown drains every
+          -- physical admission, so a check after it would be vacuous.
+          released <- awaitTelemetry ctx.localWSState "physical admission released after owner exit" $ \current ->
+            current.delivery.physicalAdmitted == 0
+          (released.delivery.physicalAdmitted, released.delivery.leasesInUse) `shouldBe` (0, 0)
 
   it "joins the expiry writer when its canonical peer disconnects during terminal output" $
     withDeployedSandboxAppContext $ \ctx -> do

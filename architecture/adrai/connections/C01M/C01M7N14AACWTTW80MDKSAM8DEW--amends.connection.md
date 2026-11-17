@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M7N14AACWTTW80MDKSAM8DEW"
+relation = "amends"
+from_record = "R01M7N14AACHWKFZTGZ0DYZYVTR"
+subject_adr = "A01M39QPB23CYS9QHCWQSATSJE9"
+to_records = ["R01M7N0E6XMM8R89VJ6X9PX11ZC"]
++++
+
+Per the 2026-11-17 user decision, accept every valid prefix verification with CPU-sized workers and five-minute retention, and serve busy evidence reader caches through an uncached fill instead of refusing.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjbGF1ZGUtY29kZSIsImsiOiJsbG0iLCJtIjoiY2xhdWRlLW9wdXMtNS01In0sImIiOiI5MjZiNmU3MmM4OWYyZGVmNmE0NmUzOTU5MzY4NGVlMmUxNzc4NWJkIiwiaSI6InNoYTI1NjpJTEh3R0d0eXFDcDYxbzNiYnNiak0yVmJMZVZfc2hZY0NwQzRMX2R2emVjIiwiayI6ImNvbm5lY3Rpb24uYW1lbmRzIiwibyI6IkMwMU03TjE0QUFDV1RUVzgwTURLU0FNOERFVyIsIm9wIjoiTzAxTTdOMTRBQUNIV0tGWlRHWjBEWVpZVlRSIiwicCI6WyJSMDFNN04wRTZYTU04Ujg5Vko2WDlQWDExWkMiXSwiciI6Im1hc3RlciIsInMiOiJzaGEyNTY6ZmhLRHdrWWJsWFRCajdDRXdobkZDUWtNV3A1OEZ6ZmwxbTZWWldRdFh3cyIsInQiOjE3OTQ5Mjg0MjExOTYsInYiOjEsIngiOiJhZHJhaS8xLjAuMCJ9 -->

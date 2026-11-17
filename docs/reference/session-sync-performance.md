@@ -471,8 +471,8 @@ Their input and binary bindings are separate from the earlier component build in
 
 [Session traffic telemetry](session-traffic-telemetry.md) classifies capture
 requests and unknown prefix proofs. The opt-in measurement runs the production
-follower cadence (1 s source checks, 10 s periodic verification, 50 ms pending
-polls) against a real server, prefix registry and isolated PostgreSQL:
+follower options against a real server, prefix registry and isolated
+PostgreSQL:
 
 ```text
 HMEM_SESSION_TRAFFIC_MEASUREMENT=1 stack test hmem-mcp:test:hmem-mcp-test --ta "--match SessionTrafficMeasurement"
@@ -487,39 +487,52 @@ cohorts receive no output and are disturbed once after 12 s. The compact result
 is `tools/session-capture-traffic.qualification.json`; follower and server
 counts agree for every route.
 
+The follower checks its source every second. A pending proof is polled after
+50 ms, then after half the time it has been pending, at most 1 s apart.
+Periodic verification follows 10 s after the last one for prefixes up to
+16 MiB and scales with prefix size up to 60 s. The before rows use the earlier
+fixed 50 ms polls and 10 s interval. Before and after binaries ran alternately
+on one host, two runs each:
+
 | Cohort | Appends | Proof submits | Proof polls (pending) | Server compute per proof | Local hash |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Live, 1 MiB prefix | 42.0 | 5.0 | 10.0 (5.0) | mean 80 ms | 13.9 MiB |
-| Live, 100 MiB prefix | 62.0 | 4.0 | 60.3 (56.0) | mean 854 ms, max 1,034 ms | 663.5 MiB |
+| Live, 1 MiB prefix, before | 40.3 | 5.0 | 7.7 (2.7) | mean 52 ms | 13.8 MiB |
+| Live, 1 MiB prefix, after | 41.8 | 5.0 | 8.0 (3.0) | mean 53 ms | 13.8 MiB |
+| Live, 100 MiB prefix, before | 62.3 | 4.0 | 64.7 (60.0) | mean 889 ms | 673.0 MiB |
+| Live, 100 MiB prefix, after | 37.7 | 2.0 | 13.2 (11.2) | mean 741 ms | 403.5 MiB |
 
 Values are per follower lifecycle; each lifecycle also made one metadata read
 and three heartbeats and committed 1.76 MiB. Per committed MiB the large
-prefix needed 34.3 polls against 5.7. Pending polls follow server compute
-(about 8.5 ms per prefix MiB) at the 50 ms cadence, and every periodic sweep
-of a growing session hashes the whole prefix locally and on the server.
+prefix needed 36.8 polls before and 7.5 after. A run with only the poll backoff
+made 27.7 polls (23.3 pending) per large lifecycle at four submissions. With
+both changes the large cohort no longer ran periodic sweeps within 30 s: server
+compute fell from 10.7 s to 4.4 s per cohort. It also made fewer appends for
+the same bytes, because periodic sweeps no longer interleave extra source
+checks. Resume took 2.08 s before and 2.07 s after. Three sequential stop
+receipts took 2.84 s before and 4.05 s after, about 0.4 s more per receipt:
+coarser polls and no reuse of a just-completed periodic proof.
 
 Each deliberate disturbance of quiet 1 MiB followers produced exactly one
 `verification_unknown` per follower with the expected reason: restart
 `unknown_since_start`, a 301 s server clock advance `expired`, and sixteen
 later proofs `evicted`. Each loss cost one recovery: one renewed local hash
 of the prefix, one submission, one or two polls and one server proof. All
-receipts verified with no retries. In a mixed cohort, a quiet follower beside
-three live peers lost its retained result to eviction once in 65 s (1 of 9
-polls); the peers admitted 24 proofs in that time.
+receipts verified with no retries. In the mixed cohort, a quiet follower beside
+three live peers lost its retained result to eviction once per run. These
+cohorts are unchanged by the poll and interval changes.
 
 Dispositions:
 
-- **Pending polls on large prefixes** dominate avoidable traffic: 93% of the
-  large cohort's lookups were pending. A candidate for the MCP prefix work is
-  spacing polls by expected compute or a server hint, if a matched rerun shows
-  fewer polls without delaying resume and finite receipts beyond one interval.
-- **Periodic full-prefix proofs while growing** cost 10.2 s of server compute
-  per 32 s for three 100 MiB followers. Lengthening the interval with prefix
-  size is a candidate only with continued bounded sweeps and matched evidence.
+- **Pending polls on large prefixes**: bounded backoff adopted; 57% fewer
+  large-cohort polls at unchanged submissions.
+- **Periodic full-prefix proofs while growing**: interval scaled with prefix
+  size and capped at 60 s, so sweeps continue; adopted.
 - **Reused proofs of quiet followers** become unknown when the five-minute
   terminal lifetime ends (about 1 in 31 reuse polls by construction) or sooner
   under eviction churn. Submitting a fresh operation before the lifetime ends
-  would remove the expiry case; whether a verified unchanged boundary still
+  was rejected: the matched cohorts cannot show a reduction (expiry advances
+  only the server clock), and it would save at most one lookup and one local
+  hash per five quiet minutes. Whether a verified unchanged boundary still
   needs a remote lookup is an API/MCP decision question.
 - **Appends, heartbeats and metadata reads** follow output, idle time and
   lifecycle starts. They are needed for commit latency and liveness; no change.

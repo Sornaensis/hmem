@@ -1115,6 +1115,12 @@ spec = describe "Session follower" $ do
         _ <- await registry manager "http://unused.invalid" workspace another (hasStatus "failed")
         readTVarIO attempts `shouldReturn` 2
 
+  it "PrefixProofClient bounds pending-poll backoff and periodic verification scaling" $ do
+    let mib = 1048576
+    map (pendingPollDelay 0.05 1) [0, 0.1, 0.25, 0.5, 1.9, 2, 30] `shouldBe` [0.05, 0.05, 0.125, 0.25, 0.95, 1, 1]
+    map (pendingPollDelay 0.001 0.001) [0, 0.5, 30] `shouldBe` [0.001, 0.001, 0.001]
+    map (periodicVerificationDelay 10) [0, mib, 16*mib, 24*mib, 32*mib, 96*mib, 100*mib, 10240*mib] `shouldBe` [10, 10, 10, 15, 20, 60, 60, 60]
+
   it "PrefixProofClient spaces polls from the completion of a slow pending reply" $
     withManager $ \manager -> withSourceFile "" $ \path -> do
       sid <- UUID.nextRandom
@@ -1155,12 +1161,62 @@ spec = describe "Session follower" $ do
           setClock 0.27
           putMVar finishLookup ()
           _ <- await registry manager base workspace sid (acknowledged 0.27)
-          setClock 0.319
+          -- Pending for 0.25 s since the first pending reply: wait 0.125 s.
+          setClock 0.394
           threadDelay 80000
           readTVarIO lookups `shouldReturn` 1
-          setClock 0.321
+          setClock 0.396
           _ <- await registry manager base workspace sid (hasStatus "caught_up")
           readTVarIO lookups `shouldReturn` 2
+
+  it "PrefixProofClient scales the periodic verification interval with the verified prefix" $
+    withManager $ \manager -> do
+      let original = BS.concat (replicate 32 (BS.replicate 1048575 97 <> "\n"))
+          base = "http://unused.invalid"
+      withSourceFile original $ \path -> do
+        sid <- UUID.nextRandom
+        clock <- newTVarIO epoch
+        proofs <- newTVarIO (0 :: Int); pages <- newTVarIO (0 :: Int); beats <- newTVarIO (0 :: Int)
+        let setClock seconds = atomically $ writeTVar clock (addUTCTime seconds epoch)
+            metadata _ target _ = do
+              when ("/heartbeat" `T.isSuffixOf` T.pack target) $ atomically $ modifyTVar' beats (+1)
+              pure (Right (fakeMetadata sid (BS.length original)))
+            page name = when (name == "local_prefix_page") $ atomically $ modifyTVar' pages (+1)
+            reach label condition = do
+              let loop = condition >>= \ready -> unless ready (threadDelay 10000 >> loop)
+              reached <- timeout 3000000 loop
+              counts <- (,,) <$> readTVarIO proofs <*> readTVarIO pages <*> readTVarIO beats
+              unless (isJustValue reached) $ expectationFailure (label <> ": (proofs,pages,beats) = " <> show counts)
+        proof <- fakeProofTransport sid original "verified" metadata
+        let action verb target body = do
+              when ("/prefix-verifications" `T.isInfixOf` T.pack target) $ atomically $ modifyTVar' proofs (+1)
+              proof verb target body
+        withRegistry fast {intervalMicros = 1000000, now = readTVarIO clock, requestOverride = Just action, transition = page} $ \registry -> do
+          _ <- start registry manager base workspace sid path
+          _ <- await registry manager base workspace sid (hasStatus "caught_up")
+          -- Resume: one proof request, a hashing pass and the second local pass.
+          -- Unchanged quiet sweeps reuse that proof with one lookup each.
+          readTVarIO proofs `shouldReturn` 1
+          readTVarIO pages `shouldReturn` 64
+          resumeBeats <- readTVarIO beats
+          -- A 32 MiB prefix waits 20 s rather than the 10 s base interval.
+          setClock 15
+          reach "idle heartbeat at 15 s" $ (> resumeBeats) <$> readTVarIO beats
+          threadDelay 200000
+          readTVarIO pages `shouldReturn` 64
+          readTVarIO proofs `shouldReturn` 1
+          setClock 21
+          reach "periodic lookup at 21 s" $ (== 2) <$> readTVarIO proofs
+          reach "periodic hash at 21 s" $ (== 96) <$> readTVarIO pages
+          -- Let the sweep complete at 21 s before moving the clock.
+          threadDelay 200000
+          periodicBeats <- readTVarIO beats
+          setClock 40
+          reach "idle heartbeat at 40 s" $ (> periodicBeats) <$> readTVarIO beats
+          threadDelay 200000
+          readTVarIO proofs `shouldReturn` 2
+          setClock 41.5
+          reach "periodic lookup at 41.5 s" $ (== 3) <$> readTVarIO proofs
 
   it "atomically admits/completes controls across retirement and stop-finalization races" $
     withManager $ \manager -> withSourceFile "" $ \path -> do

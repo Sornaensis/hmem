@@ -1,310 +1,463 @@
 {
   "schema": 1,
-  "task": "44d61f05-3cc1-48b3-b483-b8c0deeb679d",
+  "task": "53f167b2-1d63-4a8e-9e67-ca37733ce0ff",
+  "supersedes": "Receipt of task 44d61f05 measured at df8e7af; the follower and measurement sources were unchanged from then until this task's base.",
   "candidate": {
-    "base": "49461dfd227df4dd3a5d515108c3f9d39b3f96d4",
+    "base": "02367439fc28743936d52a61e970f41fe158fd63",
     "state": "uncommitted working tree on base; measured source hashes below",
     "inputs": {
+      "hmem-mcp/src/HMem/MCP/SessionFollower.hs": {
+        "before": "c3ca1cb455add93d5175fb3ec9647052b701caf33e2f60b6d67aab3979166b27",
+        "after": "4c6ffcdaa257869e28811d40a3efff014e23c409fb488a764950b4b200290086"
+      },
+      "hmem-mcp/test/HMem/MCP/SessionFollowerSpec.hs": {
+        "before": "1f4502362f32dc0d1b4d672642d5fbfa03998b79118d73e881be43a639e3e00b",
+        "after": "d61b4cfbec9a728fc5921cc977f5fd524cb812a25be0c173393a9e09405cde7f"
+      },
+      "hmem-mcp/src/HMem/MCP/Server.hs": "cdf71b33728561d328abef5c7811b51bed76645bceec9416f70fb5b8a774af4e",
       "hmem-server/src/HMem/Server/SessionTraffic.hs": "b9ad8ae59478b76be1b8aef231220cfb0698caad3bfeaceb2da43f28fcf35b7e",
       "hmem-server/src/HMem/Server/SessionPrefix.hs": "0371874b7dc29b060de508673de70daf69d52ed5bdf2281b34a37e18ad10c098",
-      "hmem-server/src/HMem/Server/API.hs": "f9cabad69b835107684e62ed71617d184812b7f0da67467834e12a13dead6401",
-      "hmem-mcp/src/HMem/MCP/SessionFollower.hs": "c3ca1cb455add93d5175fb3ec9647052b701caf33e2f60b6d67aab3979166b27",
-      "hmem-mcp/src/HMem/MCP/Server.hs": "cdf71b33728561d328abef5c7811b51bed76645bceec9416f70fb5b8a774af4e",
-      "hmem-mcp/test/HMem/MCP/SessionFollowerSpec.hs": "1f4502362f32dc0d1b4d672642d5fbfa03998b79118d73e881be43a639e3e00b"
+      "hmem-server/src/HMem/Server/API.hs": "f409a3c59a9ac7efc9eee2786fefe57f80a8c592a26695deb52db290b6f58720"
+    },
+    "changes": {
+      "pendingPollBackoff": "A pending proof is polled again after max(50 ms, min(1 s, half the time since its first pending reply)); the cap is one source-check interval.",
+      "periodicIntervalScaling": "The next periodic sweep follows a completed verification after 10 s * clamp(1, 6, verified prefix bytes / 16 MiB): 10 s up to 16 MiB, at most 60 s."
     }
   },
   "owner": "repository maintainers",
-  "retention": "Retain this compact receipt until a matched rerun or a qualified MCP prefix traffic change supersedes it. Generated sources, database clusters and logs were task scratch and were removed after the run.",
-  "method": "Opt-in hspec measurement in hmem-mcp SessionFollowerSpec (HMEM_SESSION_TRAFFIC_MEASUREMENT=1). Production follower cadence (defaultFollowerOptions: 1 s source checks, 10 s periodic verification, 50 ms pending polls, two shared follower HTTP slots) through the native helper transport to the real server application, DB-backed prefix registry and an isolated native PostgreSQL test cluster, all on one host over loopback. Each cohort owns a fresh primary and replacement server application with separate prefix registries sharing one database; restart routes all follower requests to the replacement. Live followers each receive six 1 KiB JSONL records every 100 ms for 30 s (mixed: 60 s) and then stop with locally checked receipts. Quiet cohorts are disturbed once after 12 s and observed for 22 s more. Follower counts come from per-lifecycle counters; server counts and compute time come from the registry telemetry snapshot (registry deadline clock). Times are monotonic.",
+  "retention": "Retain this compact receipt until a matched rerun or a qualified MCP prefix traffic change supersedes it. Test binaries, database clusters and logs were task scratch and were removed after the run.",
+  "method": "The opt-in SessionTrafficMeasurement of the df8e7af receipt, unchanged: production follower options, native helper transport, real server application, DB-backed prefix registry and an isolated native PostgreSQL cluster on one host over loopback, with the same cohorts, followers, rates (six 1 KiB records per live follower every 100 ms) and durations. Test executables built from the before and after sources ran alternately in one 40-minute window (before, poll-backoff-only, after, before, after) with the same helper executable. The poll-backoff-only variant is the after source with the base periodic interval, run once to attribute the two changes. Values are means over runs; stopMs covers three sequential stop receipts.",
   "command": "HMEM_SESSION_TRAFFIC_MEASUREMENT=1 stack test hmem-mcp:test:hmem-mcp-test --ta \"--match SessionTrafficMeasurement\"",
   "runtime": {
     "os": "Windows 11 Pro 10.0.26200",
     "ghc": "9.10.2",
     "postgresql": "18.2"
   },
-  "outcome": {
-    "result": "1 example, 0 failures",
-    "duration": "Finished in 255.0249 seconds"
-  },
+  "runs": [
+    {
+      "variant": "before",
+      "result": "1 example, 0 failures",
+      "duration": "255.9 s"
+    },
+    {
+      "variant": "pollBackoffOnly",
+      "result": "1 example, 0 failures",
+      "duration": "254.9 s"
+    },
+    {
+      "variant": "after",
+      "result": "1 example, 0 failures",
+      "duration": "260.2 s"
+    },
+    {
+      "variant": "before",
+      "result": "1 example, 0 failures",
+      "duration": "255.7 s"
+    },
+    {
+      "variant": "after",
+      "result": "1 example, 0 failures",
+      "duration": "255.7 s"
+    }
+  ],
   "cohorts": [
     {
       "cohort": "small_live",
       "mode": "live",
       "followers": 3,
       "prefixBytes": 1048576,
-      "resumeMs": 365.3,
-      "observeMs": 32277.7,
-      "stopMs": 324.9,
-      "receiptsVerified": 3,
-      "followerRequests": {
-        "append:ok": 126,
-        "heartbeat:ok": 9,
-        "metadata:ok": 3,
-        "proof_poll:pending": 15,
-        "proof_poll:verified": 15,
-        "proof_submit:pending": 15
-      },
-      "perLifecycle": {
-        "append": 42.0,
-        "heartbeat": 3.0,
-        "metadata": 1.0,
-        "proof_poll": 10.0,
-        "proof_submit": 5.0
-      },
-      "committedBytes": 5529600,
-      "perCommittedMiB": {
-        "append": 23.89,
-        "heartbeat": 1.71,
-        "metadata": 0.57,
-        "proof_poll": 5.69,
-        "proof_submit": 2.84
-      },
-      "localHashMiBPerLifecycle": 13.86,
-      "proofRecoveries": 0,
-      "transientRetries": 0,
-      "serverRequests": {
-        "primary:append:committed": 126,
-        "primary:heartbeat:accepted": 9,
-        "primary:proof_lookup:pending": 15,
-        "primary:proof_lookup:verified": 15,
-        "primary:proof_submit:pending": 15
-      },
-      "serverCompute": [
-        {
-          "process": "primary",
-          "result": "verified",
-          "prefix": "le_16mib",
-          "proofs": 12,
-          "prefixMiB": 27.316,
-          "meanMs": 92.381,
-          "maxMs": 212.821
+      "before": {
+        "runs": 2,
+        "perLifecycle": {
+          "append": 40.34,
+          "heartbeat": 3.0,
+          "metadata": 1.0,
+          "proof_poll": 7.67,
+          "proof_submit": 5.0
         },
-        {
-          "process": "primary",
-          "result": "verified",
-          "prefix": "le_1mib",
-          "proofs": 3,
-          "prefixMiB": 3.0,
-          "meanMs": 31.174,
-          "maxMs": 68.003
-        }
-      ],
-      "droppedEvents": 0
+        "pendingPollsPerLifecycle": 2.67,
+        "perCommittedMiB": {
+          "append": 22.95,
+          "heartbeat": 1.71,
+          "metadata": 0.57,
+          "proof_poll": 4.36,
+          "proof_submit": 2.84
+        },
+        "pendingPollsPerCommittedMiB": 1.52,
+        "verificationUnknownPolls": 0.0,
+        "proofRecoveries": 0.0,
+        "serverProofs": 15.0,
+        "serverComputeMs": 784.75,
+        "serverComputeMeanMsPerProof": 52.32,
+        "localHashMiBPerLifecycle": 13.8,
+        "resumeMs": 285.9,
+        "stopMs": 316.4,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      },
+      "pollBackoffOnly": {
+        "runs": 1,
+        "perLifecycle": {
+          "append": 42.0,
+          "heartbeat": 3.0,
+          "metadata": 1.0,
+          "proof_poll": 8.0,
+          "proof_submit": 5.0
+        },
+        "pendingPollsPerLifecycle": 3.0,
+        "perCommittedMiB": {
+          "append": 23.89,
+          "heartbeat": 1.71,
+          "metadata": 0.57,
+          "proof_poll": 4.55,
+          "proof_submit": 2.84
+        },
+        "pendingPollsPerCommittedMiB": 1.71,
+        "verificationUnknownPolls": 0.0,
+        "proofRecoveries": 0.0,
+        "serverProofs": 15.0,
+        "serverComputeMs": 827.6,
+        "serverComputeMeanMsPerProof": 55.17,
+        "localHashMiBPerLifecycle": 13.84,
+        "resumeMs": 291.0,
+        "stopMs": 312.1,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      },
+      "after": {
+        "runs": 2,
+        "perLifecycle": {
+          "append": 41.84,
+          "heartbeat": 3.0,
+          "metadata": 1.0,
+          "proof_poll": 8.0,
+          "proof_submit": 5.0
+        },
+        "pendingPollsPerLifecycle": 3.0,
+        "perCommittedMiB": {
+          "append": 23.8,
+          "heartbeat": 1.71,
+          "metadata": 0.57,
+          "proof_poll": 4.55,
+          "proof_submit": 2.84
+        },
+        "pendingPollsPerCommittedMiB": 1.71,
+        "verificationUnknownPolls": 0.0,
+        "proofRecoveries": 0.0,
+        "serverProofs": 15.0,
+        "serverComputeMs": 799.65,
+        "serverComputeMeanMsPerProof": 53.31,
+        "localHashMiBPerLifecycle": 13.84,
+        "resumeMs": 247.5,
+        "stopMs": 326.45,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      }
     },
     {
       "cohort": "large_live",
       "mode": "live",
       "followers": 3,
       "prefixBytes": 104857600,
-      "resumeMs": 2056.6,
-      "observeMs": 32383.8,
-      "stopMs": 3240.9,
-      "receiptsVerified": 3,
-      "followerRequests": {
-        "append:ok": 186,
-        "heartbeat:ok": 9,
-        "metadata:ok": 3,
-        "proof_poll:pending": 168,
-        "proof_poll:verified": 13,
-        "proof_submit:pending": 12
+      "before": {
+        "runs": 2,
+        "perLifecycle": {
+          "append": 62.33,
+          "heartbeat": 3.0,
+          "metadata": 1.0,
+          "proof_poll": 64.66,
+          "proof_submit": 4.0
+        },
+        "pendingPollsPerLifecycle": 60.0,
+        "perCommittedMiB": {
+          "append": 35.46,
+          "heartbeat": 1.71,
+          "metadata": 0.57,
+          "proof_poll": 36.79,
+          "proof_submit": 2.28
+        },
+        "pendingPollsPerCommittedMiB": 34.13,
+        "verificationUnknownPolls": 0.0,
+        "proofRecoveries": 0.0,
+        "serverProofs": 12.0,
+        "serverComputeMs": 10673.0,
+        "serverComputeMeanMsPerProof": 889.42,
+        "localHashMiBPerLifecycle": 673.03,
+        "resumeMs": 2082.8,
+        "stopMs": 2839.1,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
       },
-      "perLifecycle": {
-        "append": 62.0,
-        "heartbeat": 3.0,
-        "metadata": 1.0,
-        "proof_poll": 60.33,
-        "proof_submit": 4.0
+      "pollBackoffOnly": {
+        "runs": 1,
+        "perLifecycle": {
+          "append": 58.0,
+          "heartbeat": 3.0,
+          "metadata": 1.0,
+          "proof_poll": 27.67,
+          "proof_submit": 4.0
+        },
+        "pendingPollsPerLifecycle": 23.33,
+        "perCommittedMiB": {
+          "append": 33.0,
+          "heartbeat": 1.71,
+          "metadata": 0.57,
+          "proof_poll": 15.74,
+          "proof_submit": 2.28
+        },
+        "pendingPollsPerCommittedMiB": 13.27,
+        "verificationUnknownPolls": 0.0,
+        "proofRecoveries": 0.0,
+        "serverProofs": 12.0,
+        "serverComputeMs": 9790.2,
+        "serverComputeMeanMsPerProof": 815.85,
+        "localHashMiBPerLifecycle": 652.18,
+        "resumeMs": 2094.0,
+        "stopMs": 3327.9,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
       },
-      "committedBytes": 5529600,
-      "perCommittedMiB": {
-        "append": 35.27,
-        "heartbeat": 1.71,
-        "metadata": 0.57,
-        "proof_poll": 34.32,
-        "proof_submit": 2.28
-      },
-      "localHashMiBPerLifecycle": 663.49,
-      "proofRecoveries": 0,
-      "transientRetries": 0,
-      "serverRequests": {
-        "primary:append:committed": 186,
-        "primary:heartbeat:accepted": 9,
-        "primary:proof_lookup:pending": 168,
-        "primary:proof_lookup:verified": 13,
-        "primary:proof_submit:pending": 12
-      },
-      "serverCompute": [
-        {
-          "process": "primary",
-          "result": "verified",
-          "prefix": "le_128mib",
-          "proofs": 12,
-          "prefixMiB": 1210.441,
-          "meanMs": 854.145,
-          "maxMs": 1034.41
-        }
-      ],
-      "droppedEvents": 0
+      "after": {
+        "runs": 2,
+        "perLifecycle": {
+          "append": 37.66,
+          "heartbeat": 3.0,
+          "metadata": 1.0,
+          "proof_poll": 13.16,
+          "proof_submit": 2.0
+        },
+        "pendingPollsPerLifecycle": 11.16,
+        "perCommittedMiB": {
+          "append": 21.43,
+          "heartbeat": 1.71,
+          "metadata": 0.57,
+          "proof_poll": 7.5,
+          "proof_submit": 1.14
+        },
+        "pendingPollsPerCommittedMiB": 6.36,
+        "verificationUnknownPolls": 0.0,
+        "proofRecoveries": 0.0,
+        "serverProofs": 6.0,
+        "serverComputeMs": 4444.25,
+        "serverComputeMeanMsPerProof": 740.71,
+        "localHashMiBPerLifecycle": 403.52,
+        "resumeMs": 2066.9,
+        "stopMs": 4051.15,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      }
     },
     {
       "cohort": "restart",
       "mode": "quiet",
       "followers": 3,
       "prefixBytes": 1048576,
-      "resumeMs": 357.8,
-      "observeMs": 34004.3,
-      "stopMs": 91.6,
-      "receiptsVerified": 3,
-      "followerRequests": {
-        "heartbeat:ok": 18,
-        "metadata:ok": 3,
-        "proof_poll:pending": 5,
-        "proof_poll:verification_unknown": 3,
-        "proof_poll:verified": 15,
-        "proof_submit:pending": 6
-      },
-      "perLifecycle": {
-        "heartbeat": 6.0,
-        "metadata": 1.0,
-        "proof_poll": 7.67,
-        "proof_submit": 2.0
-      },
-      "committedBytes": 0,
-      "perCommittedMiB": null,
-      "localHashMiBPerLifecycle": 8.0,
-      "proofRecoveries": 3,
-      "transientRetries": 0,
-      "serverRequests": {
-        "primary:heartbeat:accepted": 9,
-        "primary:proof_lookup:pending": 1,
-        "primary:proof_lookup:verified": 6,
-        "primary:proof_submit:pending": 3,
-        "replacement:heartbeat:accepted": 9,
-        "replacement:proof_lookup:pending": 4,
-        "replacement:proof_lookup:verification_unknown:unknown_since_start": 3,
-        "replacement:proof_lookup:verified": 9,
-        "replacement:proof_submit:pending": 3
-      },
-      "serverCompute": [
-        {
-          "process": "primary",
-          "result": "verified",
-          "prefix": "le_1mib",
-          "proofs": 3,
-          "prefixMiB": 3.0,
-          "meanMs": 26.701,
-          "maxMs": 62.882
+      "before": {
+        "runs": 2,
+        "perLifecycle": {
+          "heartbeat": 6.0,
+          "metadata": 1.0,
+          "proof_poll": 6.0,
+          "proof_submit": 2.0
         },
-        {
-          "process": "replacement",
-          "result": "verified",
-          "prefix": "le_1mib",
-          "proofs": 3,
-          "prefixMiB": 3.0,
-          "meanMs": 86.456,
-          "maxMs": 127.172
-        }
-      ],
-      "droppedEvents": 0
+        "pendingPollsPerLifecycle": 0.0,
+        "verificationUnknownPolls": 3.0,
+        "proofRecoveries": 3.0,
+        "serverProofs": 6.0,
+        "serverComputeMs": 119.25,
+        "serverComputeMeanMsPerProof": 19.88,
+        "localHashMiBPerLifecycle": 8.0,
+        "resumeMs": 223.95,
+        "stopMs": 91.0,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      },
+      "pollBackoffOnly": {
+        "runs": 1,
+        "perLifecycle": {
+          "heartbeat": 6.0,
+          "metadata": 1.0,
+          "proof_poll": 6.0,
+          "proof_submit": 2.0
+        },
+        "pendingPollsPerLifecycle": 0.0,
+        "verificationUnknownPolls": 3.0,
+        "proofRecoveries": 3.0,
+        "serverProofs": 6.0,
+        "serverComputeMs": 131.2,
+        "serverComputeMeanMsPerProof": 21.87,
+        "localHashMiBPerLifecycle": 8.0,
+        "resumeMs": 180.8,
+        "stopMs": 90.1,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      },
+      "after": {
+        "runs": 2,
+        "perLifecycle": {
+          "heartbeat": 6.0,
+          "metadata": 1.0,
+          "proof_poll": 6.0,
+          "proof_submit": 2.0
+        },
+        "pendingPollsPerLifecycle": 0.0,
+        "verificationUnknownPolls": 3.0,
+        "proofRecoveries": 3.0,
+        "serverProofs": 6.0,
+        "serverComputeMs": 97.75,
+        "serverComputeMeanMsPerProof": 16.29,
+        "localHashMiBPerLifecycle": 8.0,
+        "resumeMs": 288.3,
+        "stopMs": 90.15,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      }
     },
     {
       "cohort": "expiry",
       "mode": "quiet",
       "followers": 3,
       "prefixBytes": 1048576,
-      "resumeMs": 222.4,
-      "observeMs": 34015.4,
-      "stopMs": 92.6,
-      "receiptsVerified": 3,
-      "followerRequests": {
-        "heartbeat:ok": 18,
-        "metadata:ok": 3,
-        "proof_poll:pending": 3,
-        "proof_poll:verification_unknown": 3,
-        "proof_poll:verified": 15,
-        "proof_submit:pending": 6
+      "before": {
+        "runs": 2,
+        "perLifecycle": {
+          "heartbeat": 6.0,
+          "metadata": 1.0,
+          "proof_poll": 6.83,
+          "proof_submit": 2.0
+        },
+        "pendingPollsPerLifecycle": 0.83,
+        "verificationUnknownPolls": 3.0,
+        "proofRecoveries": 3.0,
+        "serverProofs": 6.0,
+        "serverComputeMs": 249.25,
+        "serverComputeMeanMsPerProof": 41.54,
+        "localHashMiBPerLifecycle": 8.0,
+        "resumeMs": 270.8,
+        "stopMs": 91.6,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
       },
-      "perLifecycle": {
-        "heartbeat": 6.0,
-        "metadata": 1.0,
-        "proof_poll": 7.0,
-        "proof_submit": 2.0
+      "pollBackoffOnly": {
+        "runs": 1,
+        "perLifecycle": {
+          "heartbeat": 6.0,
+          "metadata": 1.0,
+          "proof_poll": 6.67,
+          "proof_submit": 2.0
+        },
+        "pendingPollsPerLifecycle": 0.67,
+        "verificationUnknownPolls": 3.0,
+        "proofRecoveries": 3.0,
+        "serverProofs": 6.0,
+        "serverComputeMs": 275.3,
+        "serverComputeMeanMsPerProof": 45.88,
+        "localHashMiBPerLifecycle": 8.0,
+        "resumeMs": 273.5,
+        "stopMs": 92.2,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
       },
-      "committedBytes": 0,
-      "perCommittedMiB": null,
-      "localHashMiBPerLifecycle": 8.0,
-      "proofRecoveries": 3,
-      "transientRetries": 0,
-      "serverRequests": {
-        "primary:heartbeat:accepted": 18,
-        "primary:proof_lookup:pending": 3,
-        "primary:proof_lookup:verification_unknown:expired": 3,
-        "primary:proof_lookup:verified": 15,
-        "primary:proof_submit:pending": 6
-      },
-      "serverCompute": [
-        {
-          "process": "primary",
-          "result": "verified",
-          "prefix": "le_1mib",
-          "proofs": 6,
-          "prefixMiB": 6.0,
-          "meanMs": 40.329,
-          "maxMs": 59.814
-        }
-      ],
-      "droppedEvents": 0
+      "after": {
+        "runs": 2,
+        "perLifecycle": {
+          "heartbeat": 6.0,
+          "metadata": 1.0,
+          "proof_poll": 6.33,
+          "proof_submit": 2.0
+        },
+        "pendingPollsPerLifecycle": 0.33,
+        "verificationUnknownPolls": 3.0,
+        "proofRecoveries": 3.0,
+        "serverProofs": 6.0,
+        "serverComputeMs": 264.05,
+        "serverComputeMeanMsPerProof": 44.01,
+        "localHashMiBPerLifecycle": 8.0,
+        "resumeMs": 255.4,
+        "stopMs": 91.8,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      }
     },
     {
       "cohort": "eviction",
       "mode": "quiet",
       "followers": 3,
       "prefixBytes": 1048576,
-      "resumeMs": 248.6,
-      "observeMs": 34149.9,
-      "stopMs": 75.9,
-      "receiptsVerified": 3,
-      "followerRequests": {
-        "heartbeat:ok": 18,
-        "metadata:ok": 3,
-        "proof_poll:pending": 3,
-        "proof_poll:verification_unknown": 3,
-        "proof_poll:verified": 15,
-        "proof_submit:pending": 6
+      "before": {
+        "runs": 2,
+        "perLifecycle": {
+          "heartbeat": 6.0,
+          "metadata": 1.0,
+          "proof_poll": 6.83,
+          "proof_submit": 2.0
+        },
+        "pendingPollsPerLifecycle": 0.83,
+        "verificationUnknownPolls": 3.0,
+        "proofRecoveries": 3.0,
+        "serverProofs": 22.0,
+        "serverComputeMs": 316.2,
+        "serverComputeMeanMsPerProof": 14.37,
+        "localHashMiBPerLifecycle": 8.0,
+        "resumeMs": 329.0,
+        "stopMs": 91.25,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
       },
-      "perLifecycle": {
-        "heartbeat": 6.0,
-        "metadata": 1.0,
-        "proof_poll": 7.0,
-        "proof_submit": 2.0
+      "pollBackoffOnly": {
+        "runs": 1,
+        "perLifecycle": {
+          "heartbeat": 6.0,
+          "metadata": 1.0,
+          "proof_poll": 6.67,
+          "proof_submit": 2.0
+        },
+        "pendingPollsPerLifecycle": 0.67,
+        "verificationUnknownPolls": 3.0,
+        "proofRecoveries": 3.0,
+        "serverProofs": 22.0,
+        "serverComputeMs": 266.2,
+        "serverComputeMeanMsPerProof": 12.1,
+        "localHashMiBPerLifecycle": 8.0,
+        "resumeMs": 285.0,
+        "stopMs": 90.9,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
       },
-      "committedBytes": 0,
-      "perCommittedMiB": null,
-      "localHashMiBPerLifecycle": 8.0,
-      "proofRecoveries": 3,
-      "transientRetries": 0,
-      "serverRequests": {
-        "primary:heartbeat:accepted": 18,
-        "primary:proof_lookup:pending": 3,
-        "primary:proof_lookup:verification_unknown:evicted": 3,
-        "primary:proof_lookup:verified": 31,
-        "primary:proof_submit:pending": 22
-      },
-      "serverCompute": [
-        {
-          "process": "primary",
-          "result": "verified",
-          "prefix": "le_1mib",
-          "proofs": 22,
-          "prefixMiB": 6.0,
-          "meanMs": 10.158,
-          "maxMs": 66.488
-        }
-      ],
-      "droppedEvents": 0,
-      "fixtureRequests": {
-        "proof_lookups": 16,
-        "proof_submits": 16
+      "after": {
+        "runs": 2,
+        "perLifecycle": {
+          "heartbeat": 6.0,
+          "metadata": 1.0,
+          "proof_poll": 6.83,
+          "proof_submit": 2.0
+        },
+        "pendingPollsPerLifecycle": 0.83,
+        "verificationUnknownPolls": 3.0,
+        "proofRecoveries": 3.0,
+        "serverProofs": 22.0,
+        "serverComputeMs": 242.15,
+        "serverComputeMeanMsPerProof": 11.01,
+        "localHashMiBPerLifecycle": 8.0,
+        "resumeMs": 241.25,
+        "stopMs": 92.4,
+        "receiptsVerified": 3.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
       }
     },
     {
@@ -312,146 +465,118 @@
       "mode": "mixed",
       "followers": 4,
       "prefixBytes": 1048576,
-      "resumeMs": 355.6,
-      "observeMs": 64592.6,
-      "stopMs": 356.5,
-      "receiptsVerified": 4,
-      "followerRequests": {
-        "append:ok": 253,
-        "heartbeat:ok": 18,
-        "metadata:ok": 4,
-        "proof_poll:pending": 26,
-        "proof_poll:verification_unknown": 1,
-        "proof_poll:verified": 32,
-        "proof_submit:pending": 26
-      },
-      "perLifecycle": {
-        "append": 63.25,
-        "heartbeat": 4.5,
-        "metadata": 1.0,
-        "proof_poll": 14.75,
-        "proof_submit": 6.5
-      },
-      "committedBytes": 11059200,
-      "perCommittedMiB": {
-        "append": 23.99,
-        "heartbeat": 1.71,
-        "metadata": 0.38,
-        "proof_poll": 5.59,
-        "proof_submit": 2.47
-      },
-      "localHashMiBPerLifecycle": 24.35,
-      "proofRecoveries": 1,
-      "transientRetries": 0,
-      "serverRequests": {
-        "primary:append:committed": 253,
-        "primary:heartbeat:accepted": 18,
-        "primary:proof_lookup:pending": 26,
-        "primary:proof_lookup:verification_unknown:evicted": 1,
-        "primary:proof_lookup:verified": 32,
-        "primary:proof_submit:pending": 26
-      },
-      "serverCompute": [
-        {
-          "process": "primary",
-          "result": "verified",
-          "prefix": "le_16mib",
-          "proofs": 21,
-          "prefixMiB": 66.85,
-          "meanMs": 100.733,
-          "maxMs": 218.42
+      "before": {
+        "runs": 2,
+        "perLifecycle": {
+          "append": 62.12,
+          "heartbeat": 4.5,
+          "metadata": 1.0,
+          "proof_poll": 12.62,
+          "proof_submit": 6.5
         },
-        {
-          "process": "primary",
-          "result": "verified",
-          "prefix": "le_1mib",
-          "proofs": 5,
-          "prefixMiB": 5.0,
-          "meanMs": 28.296,
-          "maxMs": 53.969
-        }
-      ],
-      "droppedEvents": 0,
-      "lifecycles": [
-        {
-          "role": "quiet",
-          "requests": {
-            "heartbeat:ok": 9,
-            "metadata:ok": 1,
-            "proof_poll:verification_unknown": 1,
-            "proof_poll:verified": 8,
-            "proof_submit:pending": 2
-          },
-          "committedBytes": 0,
-          "localHashMiB": 11.0,
-          "proofRecoveries": 1
+        "pendingPollsPerLifecycle": 4.38,
+        "perCommittedMiB": {
+          "append": 23.56,
+          "heartbeat": 1.71,
+          "metadata": 0.38,
+          "proof_poll": 4.79,
+          "proof_submit": 2.47
         },
-        {
-          "role": "live",
-          "requests": {
-            "append:ok": 88,
-            "heartbeat:ok": 3,
-            "metadata:ok": 1,
-            "proof_poll:pending": 8,
-            "proof_poll:verified": 8,
-            "proof_submit:pending": 8
-          },
-          "committedBytes": 3686400,
-          "localHashMiB": 28.8,
-          "proofRecoveries": 0
+        "pendingPollsPerCommittedMiB": 1.66,
+        "verificationUnknownPolls": 1.0,
+        "proofRecoveries": 1.0,
+        "serverProofs": 26.0,
+        "serverComputeMs": 1682.5,
+        "serverComputeMeanMsPerProof": 64.71,
+        "localHashMiBPerLifecycle": 24.26,
+        "resumeMs": 256.95,
+        "stopMs": 390.55,
+        "receiptsVerified": 4.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      },
+      "pollBackoffOnly": {
+        "runs": 1,
+        "perLifecycle": {
+          "append": 60.5,
+          "heartbeat": 4.5,
+          "metadata": 1.0,
+          "proof_poll": 11.75,
+          "proof_submit": 6.5
         },
-        {
-          "role": "live",
-          "requests": {
-            "append:ok": 83,
-            "heartbeat:ok": 3,
-            "metadata:ok": 1,
-            "proof_poll:pending": 9,
-            "proof_poll:verified": 8,
-            "proof_submit:pending": 8
-          },
-          "committedBytes": 3686400,
-          "localHashMiB": 28.8,
-          "proofRecoveries": 0
+        "pendingPollsPerLifecycle": 3.5,
+        "perCommittedMiB": {
+          "append": 22.95,
+          "heartbeat": 1.71,
+          "metadata": 0.38,
+          "proof_poll": 4.46,
+          "proof_submit": 2.47
         },
-        {
-          "role": "live",
-          "requests": {
-            "append:ok": 82,
-            "heartbeat:ok": 3,
-            "metadata:ok": 1,
-            "proof_poll:pending": 9,
-            "proof_poll:verified": 8,
-            "proof_submit:pending": 8
-          },
-          "committedBytes": 3686400,
-          "localHashMiB": 28.8,
-          "proofRecoveries": 0
-        }
-      ]
+        "pendingPollsPerCommittedMiB": 1.33,
+        "verificationUnknownPolls": 1.0,
+        "proofRecoveries": 1.0,
+        "serverProofs": 26.0,
+        "serverComputeMs": 1448.1,
+        "serverComputeMeanMsPerProof": 55.7,
+        "localHashMiBPerLifecycle": 24.25,
+        "resumeMs": 331.0,
+        "stopMs": 358.0,
+        "receiptsVerified": 4.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      },
+      "after": {
+        "runs": 2,
+        "perLifecycle": {
+          "append": 60.25,
+          "heartbeat": 4.5,
+          "metadata": 1.0,
+          "proof_poll": 12.38,
+          "proof_submit": 6.5
+        },
+        "pendingPollsPerLifecycle": 4.12,
+        "perCommittedMiB": {
+          "append": 22.85,
+          "heartbeat": 1.71,
+          "metadata": 0.38,
+          "proof_poll": 4.7,
+          "proof_submit": 2.47
+        },
+        "pendingPollsPerCommittedMiB": 1.56,
+        "verificationUnknownPolls": 1.0,
+        "proofRecoveries": 1.0,
+        "serverProofs": 26.0,
+        "serverComputeMs": 1540.9,
+        "serverComputeMeanMsPerProof": 59.27,
+        "localHashMiBPerLifecycle": 24.24,
+        "resumeMs": 256.4,
+        "stopMs": 360.2,
+        "receiptsVerified": 4.0,
+        "transientRetries": 0.0,
+        "droppedEvents": 0.0
+      }
     }
   ],
   "observations": [
-    "Follower and server counts agree for every route and outcome; fixture requests in the eviction cohort are listed separately.",
-    "Large prefixes multiply polling: 60.3 polls per lifecycle (56.0 pending) at 100 MiB against 10.0 (5.0) at 1 MiB with matched output; polls per committed MiB 34.3 against 5.7.",
-    "Server proof compute averaged 854 ms per 100 MiB proof (about 8.5 ms per prefix MiB); three growing 100 MiB followers used 10.2 s of compute in 32 s.",
-    "Every periodic sweep of a growing session rehashes the full prefix locally (663.5 MiB per 100 MiB lifecycle) and on the server.",
-    "Restart, a 301 s server clock advance and sixteen later proofs each produced one verification_unknown per follower with reasons unknown_since_start, expired and evicted; each was recovered once with one extra submission, one or two polls and one renewed local prefix hash.",
-    "A quiet follower beside three live peers lost its reused proof to eviction once in 65 s (1 of 9 polls) while the peers admitted 24 proofs.",
+    "Large live cohort per lifecycle: proof polls 64.7 (60.0 pending) before, 27.7 (23.3) with poll backoff only and 13.2 (11.2) after; per committed MiB 36.8 before and 7.5 after.",
+    "Large live cohort: proof submissions per lifecycle 4.0 before and with poll backoff only, 2.0 after (resume and stop receipt); server proofs 12 to 6, server compute 10.7 s to 4.4 s per cohort, local prefix hashing 673 to 404 MiB per lifecycle.",
+    "Resume was unchanged (2,083 ms before, 2,067 ms after). Three sequential stop receipts took 2,839 ms before, 3,328 ms with poll backoff only and 4,051 ms after: about 0.16 s more per receipt from coarser polling and 0.24 s more with the periodic change, consistent with receipts no longer reusing a just-completed periodic proof (before: 14 verified lookups for 12 submissions; after: 6 for 6). Each receipt stays within one second of its base time.",
+    "Large live followers made 37.7 appends per lifecycle after against 62.3 before for the same committed bytes: periodic sweeps no longer add source checks between their pages, leaving the nominal one-second source-check cadence.",
+    "Small live, quiet and mixed cohorts (prefixes up to 16 MiB) are unchanged within run-to-run variation; every disturbance still produced exactly one verification_unknown per follower with one recovery.",
     "All receipts verified, no transient retries, no dropped telemetry events."
   ],
   "dispositions": {
-    "pendingProofPolls": "Dominant avoidable traffic for large prefixes. Candidate for the MCP prefix project: space polls by expected compute or a server hint, conditional on a matched rerun showing fewer polls without delaying resume or finite receipts by more than one interval.",
-    "periodicFullPrefixProofs": "Server and local cost grows with prefix size for growing sessions. Candidate: scale the periodic interval with prefix size while keeping bounded sweeps, conditional on matched evidence.",
-    "reusedProofLookups": "Cheap per poll, but reused results become unknown at the five-minute terminal lifetime or under eviction churn. Candidate: submit a fresh operation before the lifetime ends; whether an unchanged verified boundary needs a remote lookup is an API/MCP decision question.",
-    "appendsHeartbeatsMetadata": "Proportional to output, idle time and lifecycle starts; required for commit latency and liveness. No change.",
-    "missRecovery": "Bounded at four consecutive losses; one extra submission and one local rehash per loss. Preserve."
+    "pendingProofPolls": "Adopted: bounded pending-poll backoff. With unchanged submissions the large cohort made 57% fewer polls (61% fewer pending); resume was unchanged and each finite receipt was delayed by less than one interval.",
+    "periodicFullPrefixProofs": "Adopted: periodic interval scaled with prefix size above 16 MiB, at most 60 s. The large cohort halved its submissions, server compute fell 58% and local hashing 40%; small prefixes are unchanged.",
+    "reusedProofLookups": "Rejected for this change: refreshing a reused proof before its five-minute terminal lifetime cannot show a reduction in the matched cohorts (expiry is simulated by advancing only the server clock) and saves at most one lookup and one local rehash per five quiet minutes; eviction losses remain. Whether an unchanged verified boundary needs a remote lookup at all remains an API/MCP decision question under A01M39QPB23CYS9QHCWQSATSJE9.",
+    "appendsHeartbeatsMetadata": "No change to source-check, append, heartbeat or metadata logic.",
+    "missRecovery": "Unchanged: bounded at four consecutive losses; one extra submission and one local rehash per loss."
   },
   "limitations": [
     "One host and loopback HTTP; no network shaping, packet loss or multi-host routing.",
-    "Lifecycles are 34 to 66 s; steady-state expiry rates (about one miss per 31 reuse polls for a quiet follower) are projected from code constants, not measured over hours.",
+    "Two runs per variant and one poll-backoff-only attribution run; stop timing aggregates three sequential receipts.",
+    "Thirty-second live cohorts end before a 100 MiB follower reaches its 60 s periodic interval, so the measured periodic reduction is the removal of all in-window periodic sweeps; longer followers keep one sweep per minute.",
     "Restart is modelled by routing to a second server application with an empty registry sharing the database, not by restarting the native server.",
-    "Server compute uses the registry clock from admission to the terminal result and includes queueing behind the two workers.",
-    "The 10 November sample (1,464 polling 404s in 30,422 polls) cannot be re-attributed without its server logs; future logs carry the reason."
+    "Server compute uses the registry clock from admission to the terminal result and includes queueing behind the two workers."
   ]
 }

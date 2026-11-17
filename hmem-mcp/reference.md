@@ -214,6 +214,10 @@ at most 1 MiB and performs at most one HTTP request; prefix verification uses
 Nominal source checks occur every second, idle heartbeats every ten seconds;
 `stale` independently becomes true thirty seconds after the last HTTP
 acknowledgement. File/HTTP latency and other jobs can delay a turn.
+A pending prefix proof is polled after 50 ms, then after half the time it has
+been pending, at most one second apart. Periodic verification of the complete
+prefix follows ten seconds after the last verification for prefixes up to
+16 MiB; larger prefixes wait proportionally longer, at most one minute.
 
 Each HTTP operation has a five-second deadline and a 2 MiB response cap. A
 transient failure preserves the exact pending append for retry, with exponential

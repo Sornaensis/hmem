@@ -3,6 +3,7 @@ module HMem.MCP.SessionFollower
   ( Registry, FollowerOptions(..), defaultFollowerOptions, newRegistry, newRegistryWith
   , closeRegistry, uploadToolDefinitions, isUploadTool, handleUploadTool, registryMetrics
   , FollowerTraffic(..), followerTraffic, followerTrafficValue
+  , pendingPollDelay, periodicVerificationDelay
   ) where
 
 import Control.Concurrent
@@ -20,7 +21,7 @@ import Data.ByteString.Lazy qualified as BL
 import Data.Int (Int64)
 import Data.List (sortOn)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -84,10 +85,26 @@ data SweepPurpose = Resume | Periodic | Receipt deriving (Eq)
 data Sweep = Sweep
   { purpose :: !SweepPurpose, end :: !Int64, revision :: !Int64, offset :: !Int64
   , context :: !(Context SHA256), proof :: !(Maybe Wire.PrefixProofRequest)
-  , audience :: !(Maybe Text), submitted :: !Bool, proven :: !Bool, nextPoll :: !(Maybe UTCTime) }
+  , audience :: !(Maybe Text), submitted :: !Bool, proven :: !Bool, nextPoll :: !(Maybe UTCTime)
+  -- | Completion of the first pending reply for the current operation.
+  , pendingSince :: !(Maybe UTCTime) }
 
 newSweep :: SweepPurpose -> Core.AgentSession -> Sweep
-newSweep purpose session = Sweep purpose session.committedBytes session.revision 0 hashInit Nothing Nothing False False Nothing
+newSweep purpose session = Sweep purpose session.committedBytes session.revision 0 hashInit Nothing Nothing False False Nothing Nothing
+
+-- | Delay before re-polling a pending prefix proof: the base cadence at first,
+-- then half the time the operation has already been pending, capped at the cap
+-- (one source-check interval). A completed proof is therefore observed at most
+-- one capped poll interval after completion.
+pendingPollDelay :: NominalDiffTime -> NominalDiffTime -> NominalDiffTime -> NominalDiffTime
+pendingPollDelay base cap pendingFor = max base (min cap (pendingFor / 2))
+
+-- | Interval from one completed verification to the next periodic sweep.
+-- Prefixes up to 16 MiB keep the base interval; larger prefixes scale linearly
+-- up to six times the base, so sweeps continue at a bounded interval.
+periodicVerificationDelay :: NominalDiffTime -> Int64 -> NominalDiffTime
+periodicVerificationDelay base bytes = base * min 6 (max 1 (fromIntegral bytes / 16777216))
+
 data ImportScan = ImportScan !Int64 !Int64 !(Context SHA256) !ByteString
 
 data ImportFault = InvalidImport | ImportDeadline deriving (Show,Eq)
@@ -469,8 +486,9 @@ turn registry job = do
   state <- readTVarIO job.state
   time <- registry.options.now
   when (maybe False (time >) state.importDeadline) $ throwIO ImportDeadline
-  let verificationDelay = fromIntegral registry.options.intervalMicros / 100000
-      pollDelay = min 0.05 (fromIntegral registry.options.intervalMicros / 1000000)
+  let interval = fromIntegral registry.options.intervalMicros / 1000000
+      verificationDelay = periodicVerificationDelay (interval * 10)
+      pollDelay = pendingPollDelay (min 0.05 interval) interval
       saveAt due updated = do
         completed <- registry.options.now
         atomically $ do
@@ -624,7 +642,7 @@ turn registry job = do
                   unless (proof.sha256 == digest) $ throwIO SourceChanged
                   _ <- checkSource source (max verify.end (maybe verify.end id (control >>= (.boundary))))
                   if verify.purpose == Periodic then
-                    save state {sweep = Nothing, verifyNext = False, nextVerification = addUTCTime verificationDelay time}
+                    save state {sweep = Nothing, verifyNext = False, nextVerification = addUTCTime (verificationDelay verify.end) time}
                   else do
                     -- This existing write-authorized endpoint supplies one latest
                     -- cursor checkpoint after the final local pass. A downgraded
@@ -640,7 +658,7 @@ turn registry job = do
                           mutated state {remote = Just canonical, sweep = Just (newSweep verify.purpose canonical)}
                         else if verify.purpose == Resume then
                           mutated state {remote = Just canonical, sweep = Nothing, pending = if state.reconcile then Nothing else state.pending
-                            , reconcile = False, phase = "following", verifyNext = False, nextVerification = addUTCTime verificationDelay time}
+                            , reconcile = False, phase = "following", verifyNext = False, nextVerification = addUTCTime (verificationDelay verify.end) time}
                         else if job.imported then do
                           (total,expected) <- maybe (throwIO SourceUnavailable) pure state.importManifest
                           unless (verify.end == total && digest == expected) $ throwIO SourceChanged
@@ -656,7 +674,7 @@ turn registry job = do
                             if stopping then modifyTVar' job.state (\s -> s {phase = "finalizing"}) else do
                               completeControl job resultValue
                               modifyTVar' job.state (settled completed state {remote = Just canonical, receipt = Just resultValue, sweep = Nothing, phase = "caught_up"
-                                , lastAck = Just completed, lastHeartbeat = Just completed, failures = 0, failure = Nothing, nextVerification = addUTCTime verificationDelay completed})
+                                , lastAck = Just completed, lastHeartbeat = Just completed, failures = 0, failure = Nothing, nextVerification = addUTCTime (verificationDelay verify.end) completed})
                             pure stopping
                           when stopNow $ do
                             registry.options.transition "stop_finalizing"
@@ -688,7 +706,7 @@ turn registry job = do
                       Left (HTTPStatus 404) | verify.submitted ->
                         if state.lostProofs >= 4 then retire registry job "failed" "verification_retry_exhausted"
                         else noteTraffic job (\current -> current {proofRecoveries = current.proofRecoveries + 1}) >> save state
-                          { sweep = Just verify {offset = 0, context = hashInit, proof = Nothing, audience = Nothing, submitted = False, nextPoll = Nothing}
+                          { sweep = Just verify {offset = 0, context = hashInit, proof = Nothing, audience = Nothing, submitted = False, nextPoll = Nothing, pendingSince = Nothing}
                           , lastProof = Nothing, lostProofs = state.lostProofs + 1
                           }
                       Left (HTTPStatus 409) -> retire registry job "failed" "verification_operation_conflict"
@@ -705,15 +723,17 @@ turn registry job = do
                             unless (reply.error == Nothing) $ throwIO SourceChanged
                             -- A second bounded local pass catches persistent mutation
                             -- during remote verification before resume/finite receipt.
-                            let checked = verify {audience = Just reply.audience, submitted = True, proven = True, nextPoll = Nothing
+                            let checked = verify {audience = Just reply.audience, submitted = True, proven = True, nextPoll = Nothing, pendingSince = Nothing
                                   , offset = if verify.purpose == Periodic then verify.offset else 0
                                   , context = if verify.purpose == Periodic then verify.context else hashInit}
                             acknowledge state {sweep = Just checked, lastProof = Just (proof,reply.audience), lostProofs = 0}
                           "pending" -> do
                             -- A slow reply must not spend the next polling interval.
+                            -- Longer-pending proofs are polled less often (bounded).
                             completed <- registry.options.now
-                            let due = addUTCTime pollDelay completed
-                                updated = state {sweep = Just verify {audience = Just reply.audience, submitted = True, nextPoll = Just due}, verifyNext = False}
+                            let since = fromMaybe completed verify.pendingSince
+                                due = addUTCTime (pollDelay (diffUTCTime completed since)) completed
+                                updated = state {sweep = Just verify {audience = Just reply.audience, submitted = True, nextPoll = Just due, pendingSince = Just since}, verifyNext = False}
                             if verify.purpose == Periodic then acknowledge updated else acknowledgeAt due updated
                           "mismatch" -> throwIO SourceChanged
                           "failed" -> retire registry job "failed" "verification_unavailable"

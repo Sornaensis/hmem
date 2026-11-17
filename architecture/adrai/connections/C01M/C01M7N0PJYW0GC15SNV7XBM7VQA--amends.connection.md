@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M7N0PJYW0GC15SNV7XBM7VQA"
+relation = "amends"
+from_record = "R01M7N0PJYWECS1RC1MNFP2135A"
+subject_adr = "A01M39RTNXZ8BWZ54DXPN50GCCM"
+to_records = ["R01M7J54P8H35M7K2GSKER74ZBB"]
++++
+
+Per the 2026-11-17 user decision, remove the physical WebSocket and activity admission caps and scale delivery leases to the delivery pool, keeping one connection for the dispatcher and at least four leases.
+
+<!-- @adrai:eyJhIjp7ImkiOiJjbGF1ZGUtY29kZSIsImsiOiJsbG0iLCJtIjoiY2xhdWRlLW9wdXMtNS01In0sImIiOiJmOGYyYzJlODA4NzIwNDhlM2Q1OGExMWFjZGIxMzQ0ZTlmMTQ1ODMzIiwiaSI6InNoYTI1Njo4WlNqUTQ1djNpeWM3aHJwckVFNS1GSlAwdnJFbEJwVjBDV2h1UUs0dEtZIiwiayI6ImNvbm5lY3Rpb24uYW1lbmRzIiwibyI6IkMwMU03TjBQSllXMEdDMTVTTlY3WEJNN1ZRQSIsIm9wIjoiTzAxTTdOMFBKWVdFQ1MxUkMxTU5GUDIxMzVBIiwicCI6WyJSMDFNN0o1NFA4SDM1TTdLMkdTS0VSNzRaQkIiXSwiciI6Im1hc3RlciIsInMiOiJzaGEyNTY6THFHQ2lqNlZtWDh3RThBU2Q4MUdfNzc1OVoyUV9pcWE4MDZXbWltYXg4SSIsInQiOjE3OTQ5Mjc5NzEyOTIsInYiOjEsIngiOiJhZHJhaS8xLjAuMCJ9 -->

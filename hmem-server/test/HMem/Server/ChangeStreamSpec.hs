@@ -18,7 +18,7 @@ import Data.List (nub, sort)
 import Data.Map.Strict qualified as Map
 import Data.Pool (Pool, destroyAllResources)
 import Hasql.Connection qualified as Hasql
-import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import GHC.Clock (getMonotonicTimeNSec)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -220,6 +220,89 @@ spec = describe "canonical change-stream loopback" $ do
             _ -> expectationFailure "unexpected number of bounded retry reads"
           readIORef commits `shouldReturn` 1
           readIORef deferrals `shouldReturn` 1
+
+  it "reads only scopes whose committed counter passed the acknowledgement and retains it on failure" $
+    withLocalSandboxAppContext $ \ctx -> do
+      workspaces <- sort <$> forM [1..6 :: Int] (\index -> do
+        workspace <- createTestWorkspace ctx.localEnv ("dispatch-skip-" <> T.pack (show index))
+        void $ Project.createProject ctx.localEnv.pool (CreateProject workspace.id Nothing "retained" Nothing Nothing Nothing)
+        pure workspace.id)
+      (writtenId, prunedId, failingId) <- case workspaces of
+        first:second:third:_ -> pure (first, second, third)
+        _ -> fail "expected six workspaces"
+      let pool = ctx.localEnv.pool
+          st = ctx.localWSState
+          owned = map WorkspaceScope workspaces
+          written = WorkspaceScope writtenId
+          pruned = WorkspaceScope prunedId
+          failing = WorkspaceScope failingId
+          principal = Principal { actorType = ActorUser, actorId = "skip-delivery", actorLabel = "skip-delivery", authority = PrincipalSyntheticLocalSuperadmin }
+      cutoff <- addUTCTime 60 <$> getCurrentTime
+      void $ pruneOutboxScopeBefore pool pruned cutoff 1000
+      listOutboxAfter pool pruned 0 10 `shouldReturn` []
+      resume <- terminalLocalResume ctx written (TrustedAudience "local:skip-delivery")
+      ticket <- createCanonicalTicket st principal written resume
+      events <- newIORef []
+      failArmed <- newIORef False
+      let observe event = do
+            atomicModifyIORef' events (\old -> (old <> [event], ()))
+            case event of
+              DispatchBatchRead rows | any (\(scope, _, count) -> scope == failing && count > 0) rows -> do
+                armed <- atomicModifyIORef' failArmed (\value -> (False, value))
+                when armed $ ioError (userError "injected failure after fetch, before managed dispatch")
+              _ -> pure ()
+          rotations scope entries = length [() | DispatchBatchRead rows <- entries, any (\(identity, _, _) -> identity == scope) rows]
+          -- Wait until every owned scope has been rotated twice more after a
+          -- point, so the window covers complete turns of all of them.
+          awaitRotations phase from extra = timeout 30000000 poll >>= maybe (fail ("dispatcher did not reach " <> phase)) pure
+            where
+              poll = do
+                entries <- readIORef events
+                let later = drop from entries
+                if extra entries && all (\scope -> rotations scope later >= 2) owned
+                  then pure (length entries) else threadDelay 10000 >> poll
+          slice from to = take (to - from) . drop from <$> readIORef events
+          ownedScans entries = filter (`elem` owned) (concat [scopes | DispatchScopesScanned scopes <- entries])
+          readsOf scope entries = [(previous, count) | DispatchBatchRead rows <- entries, (identity, previous, count) <- rows, identity == scope, count > 0]
+          idleCount = length . filter (== DispatchIdle)
+      withWebSocketApplication st ctx.localApplication $ \port ->
+        withActivityFrames port ticket.ticket $ \frames -> do
+          frameType <$> declaredPhase "skip initial checkpoint" (readChan frames >>= decodeFrame) `shouldReturn` Just "checkpoint"
+          bracket (startChangeStreamWorkerWithObserver observe pool testChangeStreamConfig st)
+            stopChangeStreamWorker $ \_ -> do
+              -- After the first idle sleep, wait for two more complete
+              -- rotations and at least two further idle sleeps.
+              settled <- awaitRotations "idle rotations" 0 (\entries -> idleCount entries >= 3
+                && all (\scope -> rotations scope (dropWhile (/= DispatchIdle) entries) >= 3) owned)
+              initial <- slice 0 settled
+              -- Each retained scope, including the fully pruned one, is read
+              -- once; later idle rotations read none of them.
+              sort (ownedScans initial) `shouldBe` sort owned
+              ownedScans (dropWhile (/= DispatchIdle) initial) `shouldBe` []
+              readsOf pruned initial `shouldBe` []
+              project <- Project.createProject pool (CreateProject writtenId Nothing "after idle sweeps" Nothing Nothing Nothing)
+              awaitChangeChan frames project.id
+              delivered <- readIORef events >>= \entries -> awaitRotations "rotations after a write" (length entries) (const True)
+              afterWrite <- slice settled delivered
+              ownedScans afterWrite `shouldBe` [written]
+              map snd (readsOf written afterWrite) `shouldBe` [1]
+              atomicModifyIORef' failArmed (const (True, ()))
+              void $ Project.createProject pool (CreateProject failingId Nothing "retry after failure" Nothing Nothing Nothing)
+              retriedAt <- awaitRotations "rotations after a failed turn" delivered (\entries ->
+                case readsOf failing (drop delivered entries) of
+                  (failedFrom, _):_:_ -> or [through > failedFrom | DispatchBatchCommitted rows <- drop delivered entries, (identity, through) <- rows, identity == failing]
+                  _ -> False)
+              retried <- slice delivered retriedAt
+              readIORef failArmed `shouldReturn` False
+              length [() | DispatchDeferred <- retried] `shouldSatisfy` (>= 1)
+              ownedScans retried `shouldBe` [failing, failing]
+              case readsOf failing retried of
+                [(failedFrom, 1), (retriedFrom, 1)] -> do
+                  retriedFrom `shouldBe` failedFrom
+                  let committed = [through | DispatchBatchCommitted rows <- retried, (identity, through) <- rows, identity == failing]
+                  committed `shouldSatisfy` (not . null)
+                  last committed `shouldSatisfy` (> failedFrom)
+                _ -> expectationFailure "expected one failed and one retried read of the written scope"
 
   it "keeps retention running while successful dispatcher batches remain busy" $
     withLocalSandboxAppContext $ \ctx -> do

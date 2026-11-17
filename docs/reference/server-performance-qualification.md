@@ -78,7 +78,9 @@ cannot reach.
    correlation, not isolation: before has no pool counters, scan and
    scope-lock statement time is only 14 to 15% of after's held connection
    time, and no ablation separates the scans from other after-only changes
-   (request, pool and WebSocket telemetry).
+   (request, pool and WebSocket telemetry). The
+   [replay repair rerun](#replay-repair-rerun) removes the scan cost but not
+   the per-route regression.
 2. **A stuck catch-up retires healthy sockets.** Three or four of four healthy
    hot-workspace sockets were retired by the 750 ms work budget in each after
    run. The leading explanation is that the blocked catch-up keeps its
@@ -99,15 +101,46 @@ cannot reach.
 6. **Memory** under contention peaks at 336 to 348 MiB against 377 to 400 MiB
    before.
 
+## Replay repair rerun
+
+[`tools/outbox-replay.qualification.json`](../../tools/outbox-replay.qualification.json)
+records an ablation of the replay repair on 17 November 2026 with the same
+method on a freshly seeded volume of the same scale. Variant **a** makes the
+two replay predicates match the `(scope, coalesce(workspace_id, zero), cursor)`
+index; **a+b** also skips the dispatcher read of a scope whose committed
+counter has not passed its acknowledgement. Both are built from `d4d70f78`.
+Runs were ordered before, a, a+b, a+b, a, before.
+
+| Measure | Before | a | a+b |
+| --- | --- | --- | --- |
+| Pooled foreground p95 | 87.8, 96.3 ms | 93.1, 96.9 ms (+3.2%) | 99.1, 102.2 ms (+9.3%) |
+| Routes over +10% at p95 | | 7 of 10 (1.3-3.2x) | 7 of 10 (1.4-3.6x) |
+| Seeded capture append p95 | 57.3, 62.1 ms | 56.2, 42.3 ms (-17%) | 45.9, 69.4 ms (-3%) |
+| Outbox reads per 120 s | 213-229 (0.8 s) | 12,725-16,315 (0.2 s) | 2,340-2,396 (0.13 s) |
+| Outbox reads per idle 30 s | 248-252 (1.5 s) | 668-692 (4 ms) | 0 |
+| Scope locks per 120 s | 255-271 (0.5 s) | 4,005-5,113 (8-10 s) | 3,053-3,143 (7 s) |
+| Pool wait in the foreground tail | | 35-42% | 39-42% |
+
+Every new generic and custom plan, for the global scope and the hot
+workspace, is an ordered index scan with an index condition on scope,
+workspace identity and cursor, and no sort or sequential scan. The pooled and
+capture gates pass; the per-route gate still fails. The routes that regress are
+the cheap reads (task read and list, planning counts, project and focus
+navigation, project overview, Observation search). The skip does not change
+foreground latency, so outbox reads no longer explain the regression. The
+leading remaining candidate is per-socket delivery scope locking waiting behind
+hot writers on one-connection pool stripes; it is not isolated. The stuck
+catch-up still retires healthy sockets in three of four after runs.
+
 ## Production rollout decisions
 
 These need separate decisions or scoped work; none is made by this receipt.
 
 | Decision | Condition |
 | --- | --- |
-| Deploy the change-stream delivery repairs before the replay predicate is index-compatible ([candidate 4](request-performance.md#disposition)) | A matched rerun after that repair must pass the 10% foreground gate first. |
+| Deploy the change-stream delivery repairs ([candidate 4](request-performance.md#disposition)) | With the replay repair the pooled gate passes but seven routes still regress (see the [rerun](#replay-repair-rerun)); the remaining cause needs a scoped repair and a matched rerun first. |
 | Change pool striping ([candidate 2](request-performance.md#disposition)) or keep blocked database work outside delivery-turn budgets | Rerun the stuck case with production pool settings. |
-| Accept idle polling cost at production scope count and outbox size (seven times this seed) | Measure passively after deployment or bound it first. |
+| Accept idle polling cost at production scope count and outbox size (seven times this seed) | The dispatcher skip removes idle outbox reads; each turn still reads four scope counters. Measure passively after deployment. |
 | OIDC audiences, TLS, reverse proxies and production pool and RTS settings | Not covered by the container; confirm with passive production telemetry. |
 
 ## Limits

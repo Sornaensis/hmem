@@ -22,7 +22,7 @@ import Hasql.Connection qualified as Hasql
 import System.IO (hPutStrLn, stderr)
 
 import HMem.Config (ChangeStreamConfig(..))
-import HMem.DB.ChangeStream (ChangeScope, OutboxRecord(..), OutboxBacklog(..), cleanupChangeStream, listOutboxAfter, listRetentionScopes, outboxBacklog, pruneOutboxScopeBefore)
+import HMem.DB.ChangeStream (ChangeScope, OutboxRecord(..), OutboxBacklog(..), cleanupChangeStream, listDispatchScopes, listOutboxAfter, listRetentionScopes, outboxBacklog, pruneOutboxScopeBefore)
 import HMem.DB.Pool (DBException(..))
 import HMem.Server.WebSocket (WSState, dispatchOutboxBatch, canonicalReplayPending, flushWebSocketTelemetry, reauthorizeCanonicalConnections)
 import HMem.Server.WebSocketDelivery (DeliveryFailure(..), DeliveryCleanupFailure(..))
@@ -40,6 +40,10 @@ data ChangeStreamMaintenance = ChangeStreamMaintenance
 -- tests, not a retained log or an alternate dispatch/acknowledgement path.
 data ChangeStreamDispatchEvent
   = DispatchBatchRead ![(ChangeScope, Int64, Int)]
+  -- | Rotated scopes whose committed counter was past their acknowledgement
+  -- and which were therefore read; 'DispatchBatchRead' still lists every
+  -- rotated scope, with zero records for an unread one.
+  | DispatchScopesScanned ![ChangeScope]
   | DispatchBatchCommitted ![(ChangeScope, Int64)]
   | DispatchMaintenanceAttempt
   | DispatchIdleAuthorization !Word64
@@ -100,17 +104,26 @@ startObserved startupHook observe pool config wsState = mask_ $ do
       authorized <- trySynchronous $ when authorizationDue $ do
         observe (DispatchIdleAuthorization authorizationNow)
         reauthorizeCanonicalConnections pool wsState
-      scopesResult <- trySynchronous (listRetentionScopes pool dispatchCursor)
+      scopesResult <- trySynchronous (listDispatchScopes pool dispatchCursor)
       case (authorized, scopesResult) of
-        (Right (), Right scopes) -> do
+        (Right (), Right counted) -> do
+          let scopes = map fst counted
           delivered <- trySynchronous $ do
-            batches <- forM scopes $ \scope -> do
+            -- A scope whose committed counter has not passed its
+            -- acknowledgement has no unacknowledged record: every committed
+            -- record's cursor is at most the counter, and later commits get
+            -- larger cursors. Skipping its read loses nothing.
+            batches <- forM counted $ \(scope, committed) -> do
               let previous = Map.findWithDefault 0 scope acknowledgements
-              records <- listOutboxAfter pool scope previous 1000
-              pure (scope, previous, records)
-            observe $ DispatchBatchRead [(scope, previous, length records) | (scope, previous, records) <- batches]
+              if committed <= previous
+                then pure (scope, previous, Nothing, [])
+                else do
+                  records <- listOutboxAfter pool scope previous dispatchScopeLimit
+                  pure (scope, previous, Just committed, records)
+            observe $ DispatchScopesScanned [scope | (scope, _, Just _, _) <- batches]
+            observe $ DispatchBatchRead [(scope, previous, length records) | (scope, previous, _, records) <- batches]
             pending <- canonicalReplayPending wsState
-            let records = concat [rows | (_, _, rows) <- batches]
+            let records = concat [rows | (_, _, _, rows) <- batches]
             when (not (null records) || pending) $ dispatchOutboxBatch pool wsState records
             pure (batches, not (null records))
           let cursor = case reverse scopes of [] -> dispatchCursor; value:_ -> Just value
@@ -127,10 +140,7 @@ startObserved startupHook observe pool config wsState = mask_ $ do
               threadDelay 1000000
               loop status acknowledgements nextMaintenance nextScope nextMaintenanceDue cursor True nextAuthorization
             Right (batches, busy) -> do
-              let advance current (scope, _, records) = case reverse records of
-                    [] -> current
-                    latest:_ -> Map.insert scope latest.outboxCursor current
-                  nextAcknowledgements = foldl advance acknowledgements batches
+              let nextAcknowledgements = foldl advanceAcknowledgement acknowledgements batches
               -- Publish only after all managed producers actually completed.
               observe $ DispatchBatchCommitted [(scope, Map.findWithDefault 0 scope nextAcknowledgements) | scope <- scopes]
               pending <- canonicalReplayPending wsState
@@ -200,6 +210,22 @@ startObserved startupHook observe pool config wsState = mask_ $ do
       modifyMVar_ status $ \value -> pure value
         { lastError = Just reason, failureCount = value.failureCount + 1, backlog = Nothing }
       hPutStrLn stderr ("change_stream_retention error=" <> reason)
+
+dispatchScopeLimit :: Int
+dispatchScopeLimit = 1000
+
+-- | Applied only after a successfully dispatched turn. A short read returned
+-- every retained record up to the counter observed before it, so a fully
+-- pruned or caught-up scope is acknowledged through that counter and skipped
+-- until a later commit. A full read acknowledges only its last record.
+advanceAcknowledgement :: Map.Map ChangeScope Int64 -> (ChangeScope, Int64, Maybe Int64, [OutboxRecord]) -> Map.Map ChangeScope Int64
+advanceAcknowledgement current (_, _, Nothing, _) = current
+advanceAcknowledgement current (scope, previous, Just committed, records) =
+  let latest = case reverse records of
+        [] -> previous
+        record:_ -> record.outboxCursor
+      through = if length records < dispatchScopeLimit then max latest committed else latest
+  in Map.insertWith max scope through current
 
 stopChangeStreamWorker :: ChangeStreamWorker -> IO ()
 stopChangeStreamWorker (ChangeStreamWorker worker finished _) = do

@@ -27,6 +27,14 @@ including failed scopes, so a busy workspace cannot monopolize retention.
 The older internal multi-scope helper retains ascending workspace UUID then
 global locking and removes at most 1,000 rows per call.
 
+Live dispatch rotates the same scope counters, four per turn, and reads a
+scope's outbox only when its committed `next_cursor` has passed the process
+acknowledgement. A read shorter than its 1,000-record limit acknowledges through
+that counter, so idle and fully pruned scopes cost no outbox read until their
+next commit; a failed turn keeps every acknowledgement. Dispatch and replay
+reads match the `(scope, coalesce(workspace_id, zero), cursor)` index, so
+generic and custom plans read one ordered index range without a sort.
+
 Deletion and replay-floor advancement commit together. A cutoff is exclusive:
 records exactly at the cutoff remain. A retained record stops prefix deletion;
 later old timestamps cannot make retention skip it. Cancellation, lock failure

@@ -1,0 +1,1130 @@
+{
+ "format_version": 1,
+ "task": "17e8cd32-75f2-4593-b859-ae3f5d6af675",
+ "parent_task": "073d6bfb-a972-4c94-a8cf-4dbfdfd86c11",
+ "project": "5b1593f5-8081-45da-9c42-bc7a6be8149a",
+ "date": "2026-11-17",
+ "evidence_class": "CONTAINER EVIDENCE, NOT PRODUCTION. Same throwaway Docker method as tools/server-performance-qualification.json (compose project hmem-perftest, loopback only); the live system was not contacted.",
+ "outcome": "PARTIAL: replay reads are ordered index range scans in every plan and their statement time falls from about 0.8 s (before) and 67-74 s (073d6bfb after) to 0.13-0.23 s per contention phase. Pooled foreground p95 and seeded capture append pass the 10% gate for both variants, but 7 of 10 ordinary routes still regress 1.3-3.6x at p95, so the per-route gate and task acceptance fail. The skip removes idle outbox reads and 81-86% of contention reads without changing foreground latency, so the remaining regression is not caused by outbox scans.",
+ "owner": "Task 17e8cd32 developer through review; parent 073d6bfb owns final combined re-qualification",
+ "retention": "Retain this compact receipt until 073d6bfb closes. Raw run summaries, EXPLAIN output, the seed manifest, scratch sources and logs were removed at teardown.",
+ "change": {
+  "a_predicate": "hmem-core/src/HMem/DB/ChangeStream.hs: listOutboxAfterStatement and listOutboxRangeStatement filter coalesce(workspace_id, zero) = coalesce($2, zero), the uq_change_stream_global_cursor expression, instead of workspace_id IS NOT DISTINCT FROM $2. No migration.",
+  "b_skip": "hmem-server/src/HMem/Server/ChangeStream.hs: the dispatcher reads the rotated scopes with their committed next_cursor (listDispatchScopes) and skips listOutboxAfter when the counter is not past the process acknowledgement. After a successfully dispatched turn a read shorter than 1,000 records acknowledges max(last record, observed counter) and a full read its last record; a failed turn keeps every acknowledgement. DispatchBatchRead still lists every rotated scope; DispatchScopesScanned names the scopes read. Per-socket replay is unchanged."
+ },
+ "inputs": {
+  "base_revision": "d4d70f78eeea0bbaef41c615a0d96c704187c293",
+  "before": {
+   "revision": "7127a3d974e1792b0446bbfb3a61e0607e66a457",
+   "image": "hmem-perftest:7127a3d9 sha256:af277c377798253ce0d7dc5ed489347def0221efbff786b525f53d0f1db8edef",
+   "hmem_server_sha256": "d27de8e76adf0345bc817cc8fcbb86e9e4b1fcb6a849aa666df4faf3546b88af",
+   "build": "git archive of 7127a3d9 built with the repository Dockerfile plus two COPY lines restoring the 7127a3d9 hmem-core.cabal, hmem-server/package.yaml and hmem-server.cabal after a Stack dependency layer resolved from 8d5101d0 package metadata, the method of the 073d6bfb before image. This scratch Dockerfile was reconstructed (sha256 85a42448bb31eef33808eb6593cdb09fe478886f6f7285e871381ce55abc41cd) and is not byte-identical to the 073d6bfb one (0d393c36...)."
+  },
+  "a": {
+   "revision": "d4d70f78eeea0bbaef41c615a0d96c704187c293",
+   "patch_sha256": "aaf73c30b00909186f8b14e35bcb7a1fff46d5b088bf6fb085783d810a201fb0",
+   "patch": "the two statement predicates only (diff -u of hmem-core/src/HMem/DB/ChangeStream.hs)",
+   "image": "hmem-perftest:d4d70f78-a sha256:87935d08f5c7658562e1ee3c8682da2e7a3aac55763d9f448292d751b230f9a5",
+   "hmem_server_sha256": "38b2480c2b9fe5236dc18809fffebe815f9e19fb16dc2b6bb90d351f8127baf5"
+  },
+  "a_b": {
+   "revision": "d4d70f78eeea0bbaef41c615a0d96c704187c293",
+   "patch_sha256": "4286cbf7c6c424d8a020e0766ebe7da86b465c91f36b0031238fd0488ab88d78",
+   "patch": "git diff HEAD -- hmem-core/src hmem-server/src of the task working tree",
+   "image": "hmem-perftest:d4d70f78-ab sha256:ca6077b9dd23119207acdfd5f4cdb77717e98ea37ecd64f74a78f413c6ac5d46",
+   "hmem_server_sha256": "be0f37a7808c06c3d3906d5acb8e29bbcfa65db5677153b9ca170ca3825a923e"
+  },
+  "labels": "The runner requires a 40-hex hmem.perftest.revision, so candidates carry the base SHA there plus hmem.perftest.patch (patch sha256) and hmem.perftest.variant.",
+  "sha256": {
+   "tools/perftest/combined.mjs": "91086927a8ea14792698ac573b51e3b288c7aa37b22b16dda70ad8b89288212a",
+   "tools/perftest/perftest.mjs": "b581687897d42f7899e387b8d85ac46c4a16097f87ab7de315f4527f5ba32d68",
+   "tools/perftest/compose.yaml": "3cc7ae68eafa21034e2f7b288594b431643d5453c471264e74f58a5594ab0e3d",
+   "Dockerfile": "f101f43e9144bd0bed01ae3a3b15aa06b18c60ef546396aded6e199bfa14337a"
+  }
+ },
+ "environment": {
+  "host": "Windows 11 Pro 10.0.26200, Docker Desktop 29.6.1 (WSL2 kernel 6.18.33.2), 24 CPUs, 31.1 GiB; Node 24.15.0 client on the host",
+  "postgres": "postgres:17-bookworm (image 051f7b7b3abd), PostgreSQL 17.11, compose settings (128 MB shared buffers, pg_stat_statements, track_io_timing)",
+  "server": "tools/perftest/compose.yaml production pool defaults (10 connections, 30 s statement timeout), local authentication, embeddings disabled",
+  "seed": "A fresh volume seeded with perftest.mjs through image a: 6 planning workspaces (1,500 projects, 9,153 tasks, 12,000 Observations); 562 terminated sessions (3,271,093,120 raw bytes, all archived) and 12 active (347,544,869 bytes) in 33,825 chunks; 7,100 API task updates cloned 25 times and spread over 90 days. 5,041,206,963-byte database, 410,512 audit rows, 77,112 outbox rows (hot workspace counter 10,144). pg_stat_statements was then created with CREATE EXTENSION, which the runner needs and the 073d6bfb seed already had. The stopped volume (6,141,691,236 bytes) was copied once to hmem-perftest-pgdata-base and restored before every run. Unlike the 073d6bfb seed, the request-latency load profiles were not run on it."
+ },
+ "method": {
+  "matching": "Same seed copy, workload definition (combined.mjs unchanged at the recorded hash), compose file and host for all variants; each run starts a fresh server on a freshly restored volume. Counterbalanced order before-1, a-1, ab-1, ab-2, a-2, before-2, so every variant has mean position 3.5. Gates compare the mean of each variant's two runs with the before mean.",
+  "workload": "combined.mjs defaults (30 s idle, 120 s contention); see tools/server-performance-qualification.json method.workload.",
+  "measurement": "Client latency from the host. Database counts are pg_stat_statements calls per phase: outbox_scan = statements containing FROM change_stream_outbox, scope_lock = hmem_change_stream_lock. Pool wait share = mean db_wait_ms / mean complete_ms over the slowest 5% of joined foreground requests; the before image has no request phases or pool counters."
+ },
+ "commands": [
+  "git archive 7127a3d974e1792b0446bbfb3a61e0607e66a457 | tar -x -C .tmp/perftest-17e8cd32/before-src; keep the 7127a3d9 hmem-core.cabal, hmem-server/package.yaml and hmem-server.cabal under perftest-7127a3d9/ and restore the 8d5101d0 package metadata in place; Dockerfile.perftest = Dockerfile plus COPY perftest-7127a3d9/... after the dependency layer",
+  "docker build -f Dockerfile.perftest --target runtime --label hmem.perftest.revision=7127a3d974e1792b0446bbfb3a61e0607e66a457 --label hmem.perftest.owner=task-17e8cd32 --label hmem.perftest.dockerfile=repo-Dockerfile-plus-hmem-core-cbits-and-8d5101d0-dependency-layer -t hmem-perftest:7127a3d9 .",
+  "git archive HEAD into cand-a-src (predicates replaced) and cand-ab-src (working-tree hmem-core and hmem-server ChangeStream.hs); docker build -f Dockerfile --target runtime --label hmem.perftest.revision=d4d70f78eeea0bbaef41c615a0d96c704187c293 --label hmem.perftest.patch=<patch sha256> --label hmem.perftest.variant=<variant> --label hmem.perftest.owner=task-17e8cd32 --label hmem.perftest.dockerfile=repo-Dockerfile -t hmem-perftest:d4d70f78-{a,ab} .",
+  "PERFTEST_DIR=.tmp/perftest-17e8cd32/run PERFTEST_SECRETS=<run>/secrets.env PERFTEST_IMAGE=hmem-perftest:d4d70f78-a docker compose -p hmem-perftest -f tools/perftest/compose.yaml --env-file <run>/secrets.env up -d",
+  "node tools/perftest/perftest.mjs seed-planning --workspaces 6; seed-sessions --scale 1 --clients 8; seed-history --updates 7100 --clients 16 --primary-share 0.25; clone-history --factor 25; after all 562 archive jobs were ready: spread-history; manifest",
+  "compose stop; docker volume create hmem-perftest-pgdata-base and copy; compose up -d postgres; CREATE EXTENSION pg_stat_statements; compose stop; copy to the base again",
+  "per run: compose down; docker run --rm -v hmem-perftest-pgdata:/to -v hmem-perftest-pgdata-base:/from:ro postgres:17-bookworm sh -c \"find /to -mindepth 1 -delete && cp -a /from/. /to/\"; PERFTEST_IMAGE=<tag> compose up -d; node tools/perftest/combined.mjs --label <run>",
+  "EXPLAIN: fresh restore with postgres only; PREPARE the old and new statement texts; SET plan_cache_mode; EXPLAIN (ANALYZE, BUFFERS, TIMING OFF) EXECUTE with ('global', NULL) and ('workspace', hot workspace), cursor 0, LIMIT 1000 (after) or 500 (range)"
+ ],
+ "explain": {
+  "result": "PASS: every new plan, generic and custom, global and hot workspace, is an Index Scan using uq_change_stream_global_cursor with Index Cond on scope, COALESCE(workspace_id, ...) and cursor, no Sort, no Seq Scan and no workspace Filter. Every old plan sorts and filters workspace_id; four of its eight plans scan the whole outbox.",
+  "fields": "statement, scope, plan mode, plan, shared buffers hit+read, execution ms",
+  "old": [
+   [
+    "after",
+    "global",
+    "generic",
+    "Sort > Seq Scan",
+    12311,
+    10.7
+   ],
+   [
+    "after",
+    "workspace",
+    "generic",
+    "Sort > Seq Scan",
+    12308,
+    13.7
+   ],
+   [
+    "range",
+    "global",
+    "generic",
+    "Sort > Index Scan idx_change_stream_outbox_replay + Filter",
+    4,
+    0.04
+   ],
+   [
+    "range",
+    "workspace",
+    "generic",
+    "Sort > Index Scan idx_change_stream_outbox_replay + Filter (10,144 rows)",
+    72328,
+    72.2
+   ],
+   [
+    "after",
+    "global",
+    "custom",
+    "Sort > Index Scan idx_change_stream_outbox_replay + Filter",
+    4,
+    0.02
+   ],
+   [
+    "after",
+    "workspace",
+    "custom",
+    "Sort > Seq Scan",
+    12308,
+    12.2
+   ],
+   [
+    "range",
+    "global",
+    "custom",
+    "Sort > Index Scan idx_change_stream_outbox_replay + Filter",
+    4,
+    0.05
+   ],
+   [
+    "range",
+    "workspace",
+    "custom",
+    "Sort > Parallel Seq Scan",
+    12382,
+    10.2
+   ]
+  ],
+  "new": [
+   [
+    "after",
+    "global",
+    "generic",
+    "Index Scan uq_change_stream_global_cursor",
+    4,
+    0.03
+   ],
+   [
+    "after",
+    "workspace",
+    "generic",
+    "Index Scan uq_change_stream_global_cursor (first read, 996 pages from disk)",
+    1013,
+    4.9
+   ],
+   [
+    "range",
+    "global",
+    "generic",
+    "Index Scan uq_change_stream_global_cursor",
+    4,
+    0.02
+   ],
+   [
+    "range",
+    "workspace",
+    "generic",
+    "Index Scan uq_change_stream_global_cursor",
+    508,
+    0.37
+   ],
+   [
+    "after",
+    "global",
+    "custom",
+    "Index Scan uq_change_stream_global_cursor",
+    4,
+    0.02
+   ],
+   [
+    "after",
+    "workspace",
+    "custom",
+    "Index Scan uq_change_stream_global_cursor",
+    1013,
+    0.29
+   ],
+   [
+    "range",
+    "global",
+    "custom",
+    "Index Scan uq_change_stream_global_cursor",
+    4,
+    0.02
+   ],
+   [
+    "range",
+    "workspace",
+    "custom",
+    "Index Scan uq_change_stream_global_cursor",
+    508,
+    0.17
+   ]
+  ]
+ },
+ "runs": [
+  {
+   "run": "before-1",
+   "variant": "before",
+   "image": "hmem-perftest:7127a3d9",
+   "started_at": "2026-11-17T02:04:26.948Z",
+   "finished_at": "2026-11-17T02:07:39.180Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 18577,
+     "p50": 10,
+     "p95": 87.8,
+     "p99": 277.9,
+     "max": 526.9,
+     "failures": 0
+    },
+    "p95_by_variant": {
+     "task_get": 8.2,
+     "task_update_fields": 272.9,
+     "task_list_query": 11.8,
+     "search_unified": 94.4,
+     "nav_root": 267.8,
+     "nav_project": 38.6,
+     "nav_focus": 55.9,
+     "planning_counts": 8.6,
+     "project_overview": 29.1,
+     "observation_list_query": 14
+    }
+   },
+   "seeded_append": {
+    "n": 1462,
+    "p50": 13.4,
+    "p95": 57.3,
+    "p99": 112.7,
+    "max": 365.4
+   },
+   "proof_append_p95_ms": 64.8,
+   "hot_update_p95_ms": 222.5,
+   "contention_db": {
+    "ms": 120516.2,
+    "outbox_scan": {
+     "calls": 229,
+     "total_ms": 818.4
+    },
+    "scope_lock": {
+     "calls": 271,
+     "total_ms": 538.1
+    },
+    "statement_calls": 2257251,
+    "checkout": null,
+    "lock_wait_samples": 1,
+    "max_ungranted": 1
+   },
+   "idle_db": {
+    "ms": 30009.1,
+    "outbox_scan": {
+     "calls": 252,
+     "total_ms": 1455.7
+    },
+    "scope_lock_calls": 28,
+    "statement_calls": 39663,
+    "checkout": null
+   },
+   "foreground_tail": null,
+   "delivery": {
+    "hot_writes_ok": 1920,
+    "delivered_by_phase_end": [
+     250,
+     250,
+     250,
+     250
+    ],
+    "commit_to_frame_p95_ms": [
+     1072,
+     1068.3,
+     1073.6,
+     1074
+    ]
+   },
+   "stalled_reader_changes_after_resume": 1920,
+   "stuck": {
+    "blocked_closed_by_1500ms": null,
+    "release_ms": 7652.9,
+    "undelivered": 0,
+    "during_hold_p95": 7338.9,
+    "observer_closures": [],
+    "late_upgrade_ok": true,
+    "after_release_upgrade_ok": true
+   },
+   "contention_rss_max_mib": 427.9,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 660.6,
+    "warnings": 0
+   },
+   "evidence_exact": true
+  },
+  {
+   "run": "a-1",
+   "variant": "a",
+   "image": "hmem-perftest:d4d70f78-a",
+   "started_at": "2026-11-17T02:08:09.108Z",
+   "finished_at": "2026-11-17T02:11:21.261Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 17494,
+     "p50": 10.6,
+     "p95": 93.1,
+     "p99": 282.8,
+     "max": 472.5,
+     "failures": 0
+    },
+    "p95_by_variant": {
+     "task_get": 15.1,
+     "task_update_fields": 273.6,
+     "task_list_query": 27.7,
+     "search_unified": 96,
+     "nav_root": 265.8,
+     "nav_project": 54.7,
+     "nav_focus": 75.6,
+     "planning_counts": 23.1,
+     "project_overview": 42.5,
+     "observation_list_query": 17.8
+    }
+   },
+   "seeded_append": {
+    "n": 1469,
+    "p50": 12.5,
+    "p95": 56.2,
+    "p99": 125.5,
+    "max": 314.9
+   },
+   "proof_append_p95_ms": 94.7,
+   "hot_update_p95_ms": 232.2,
+   "contention_db": {
+    "ms": 121097,
+    "outbox_scan": {
+     "calls": 12725,
+     "total_ms": 200
+    },
+    "scope_lock": {
+     "calls": 4005,
+     "total_ms": 8117.5
+    },
+    "statement_calls": 2396491,
+    "checkout": {
+     "checkouts": 230728,
+     "unattributed": 31158,
+     "capacity_waits": 13603,
+     "wait_total_ms": 192349.7,
+     "hold_total_ms": 487597.8,
+     "connects": 0
+    },
+    "lock_wait_samples": 0,
+    "max_ungranted": 0
+   },
+   "idle_db": {
+    "ms": 30012.8,
+    "outbox_scan": {
+     "calls": 668,
+     "total_ms": 4.3
+    },
+    "scope_lock_calls": 0,
+    "statement_calls": 46015,
+    "checkout": {
+     "checkouts": 4473,
+     "unattributed": 4473,
+     "capacity_waits": 0,
+     "wait_total_ms": 9.3,
+     "hold_total_ms": 3940,
+     "connects": 0
+    }
+   },
+   "foreground_tail": {
+    "n": 875,
+    "complete_ms": 73.8,
+    "db_wait_ms": 30.9,
+    "db_hold_ms": 44.3,
+    "pool_wait_share": 0.419
+   },
+   "delivery": {
+    "hot_writes_ok": 1919,
+    "delivered_by_phase_end": [
+     1919,
+     1919,
+     1919,
+     1919
+    ],
+    "commit_to_frame_p95_ms": [
+     935.3,
+     934.8,
+     937.4,
+     935.4
+    ]
+   },
+   "stalled_reader_changes_after_resume": 227,
+   "stuck": {
+    "blocked_closed_by_1500ms": 863.8,
+    "release_ms": 7949.4,
+    "undelivered": 29,
+    "during_hold_p95": 1064.3,
+    "observer_closures": [
+     {
+      "name": "hot-1",
+      "code": 1006,
+      "ms": 3676
+     },
+     {
+      "name": "hot-2",
+      "code": 1006,
+      "ms": 7549.2
+     },
+     {
+      "name": "blocked",
+      "code": 1006,
+      "ms": 863.8
+     }
+    ],
+    "late_upgrade_ok": true,
+    "after_release_upgrade_ok": true
+   },
+   "contention_rss_max_mib": 359,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 532.4,
+    "warnings": 0
+   },
+   "evidence_exact": true
+  },
+  {
+   "run": "ab-1",
+   "variant": "a+b",
+   "image": "hmem-perftest:d4d70f78-ab",
+   "started_at": "2026-11-17T02:11:45.068Z",
+   "finished_at": "2026-11-17T02:14:57.743Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 16845,
+     "p50": 10.7,
+     "p95": 99.1,
+     "p99": 291.7,
+     "max": 479.3,
+     "failures": 0
+    },
+    "p95_by_variant": {
+     "task_get": 26.3,
+     "task_update_fields": 286.5,
+     "task_list_query": 25.7,
+     "search_unified": 115.2,
+     "nav_root": 268.2,
+     "nav_project": 50.8,
+     "nav_focus": 71.1,
+     "planning_counts": 26.5,
+     "project_overview": 41.4,
+     "observation_list_query": 18.3
+    }
+   },
+   "seeded_append": {
+    "n": 1469,
+    "p50": 13.1,
+    "p95": 45.9,
+    "p99": 95.3,
+    "max": 148.3
+   },
+   "proof_append_p95_ms": 43.7,
+   "hot_update_p95_ms": 246.8,
+   "contention_db": {
+    "ms": 121060.1,
+    "outbox_scan": {
+     "calls": 2396,
+     "total_ms": 128.2
+    },
+    "scope_lock": {
+     "calls": 3143,
+     "total_ms": 6910.2
+    },
+    "statement_calls": 2241411,
+    "checkout": {
+     "checkouts": 215820,
+     "unattributed": 20118,
+     "capacity_waits": 13595,
+     "wait_total_ms": 173056.4,
+     "hold_total_ms": 491153,
+     "connects": 0
+    },
+    "lock_wait_samples": 1,
+    "max_ungranted": 0
+   },
+   "idle_db": {
+    "ms": 30005.1,
+    "outbox_scan": {
+     "calls": 0,
+     "total_ms": 0
+    },
+    "scope_lock_calls": 0,
+    "statement_calls": 39287,
+    "checkout": {
+     "checkouts": 3773,
+     "unattributed": 3773,
+     "capacity_waits": 0,
+     "wait_total_ms": 7.4,
+     "hold_total_ms": 3745.2,
+     "connects": 0
+    }
+   },
+   "foreground_tail": {
+    "n": 843,
+    "complete_ms": 77.4,
+    "db_wait_ms": 30.1,
+    "db_hold_ms": 49.3,
+    "pool_wait_share": 0.389
+   },
+   "delivery": {
+    "hot_writes_ok": 1920,
+    "delivered_by_phase_end": [
+     1920,
+     1920,
+     1920,
+     1920
+    ],
+    "commit_to_frame_p95_ms": [
+     957,
+     960.4,
+     958.5,
+     957.1
+    ]
+   },
+   "stalled_reader_changes_after_resume": 239,
+   "stuck": {
+    "blocked_closed_by_1500ms": 865.8,
+    "release_ms": 7740.4,
+    "undelivered": 33,
+    "during_hold_p95": 711.5,
+    "observer_closures": [
+     {
+      "name": "hot-0",
+      "code": 1006,
+      "ms": 3328.7
+     },
+     {
+      "name": "hot-2",
+      "code": 1006,
+      "ms": 2546.8
+     },
+     {
+      "name": "blocked",
+      "code": 1006,
+      "ms": 865.8
+     }
+    ],
+    "late_upgrade_ok": true,
+    "after_release_upgrade_ok": true
+   },
+   "contention_rss_max_mib": 337.6,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 1316.4,
+    "warnings": 0
+   },
+   "evidence_exact": true
+  },
+  {
+   "run": "ab-2",
+   "variant": "a+b",
+   "image": "hmem-perftest:d4d70f78-ab",
+   "started_at": "2026-11-17T02:15:23.058Z",
+   "finished_at": "2026-11-17T02:18:36.089Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 16567,
+     "p50": 10.7,
+     "p95": 102.2,
+     "p99": 288.2,
+     "max": 535.8,
+     "failures": 0
+    },
+    "p95_by_variant": {
+     "task_get": 26.6,
+     "task_update_fields": 278.3,
+     "task_list_query": 29.1,
+     "search_unified": 93.5,
+     "nav_root": 270.4,
+     "nav_project": 58.1,
+     "nav_focus": 81.3,
+     "planning_counts": 28,
+     "project_overview": 50.8,
+     "observation_list_query": 23
+    }
+   },
+   "seeded_append": {
+    "n": 1464,
+    "p50": 12.4,
+    "p95": 69.4,
+    "p99": 123.1,
+    "max": 458.2
+   },
+   "proof_append_p95_ms": 90.4,
+   "hot_update_p95_ms": 228.2,
+   "contention_db": {
+    "ms": 120317.2,
+    "outbox_scan": {
+     "calls": 2340,
+     "total_ms": 125.3
+    },
+    "scope_lock": {
+     "calls": 3053,
+     "total_ms": 7189.6
+    },
+    "statement_calls": 2187254,
+    "checkout": {
+     "checkouts": 210451,
+     "unattributed": 16519,
+     "capacity_waits": 15923,
+     "wait_total_ms": 223007.7,
+     "hold_total_ms": 483197.7,
+     "connects": 0
+    },
+    "lock_wait_samples": 5,
+    "max_ungranted": 2
+   },
+   "idle_db": {
+    "ms": 30001.3,
+    "outbox_scan": {
+     "calls": 0,
+     "total_ms": 0
+    },
+    "scope_lock_calls": 0,
+    "statement_calls": 39082,
+    "checkout": {
+     "checkouts": 3753,
+     "unattributed": 3753,
+     "capacity_waits": 0,
+     "wait_total_ms": 7,
+     "hold_total_ms": 3973.5,
+     "connects": 0
+    }
+   },
+   "foreground_tail": {
+    "n": 829,
+    "complete_ms": 78.7,
+    "db_wait_ms": 32.7,
+    "db_hold_ms": 46.4,
+    "pool_wait_share": 0.416
+   },
+   "delivery": {
+    "hot_writes_ok": 1920,
+    "delivered_by_phase_end": [
+     1911,
+     1911,
+     1911,
+     1911
+    ],
+    "commit_to_frame_p95_ms": [
+     952,
+     954.5,
+     951.5,
+     955.2
+    ]
+   },
+   "stalled_reader_changes_after_resume": 235,
+   "stuck": {
+    "blocked_closed_by_1500ms": 752.6,
+    "release_ms": 7906.7,
+    "undelivered": 24,
+    "during_hold_p95": 1013.2,
+    "observer_closures": [
+     {
+      "name": "hot-1",
+      "code": 1006,
+      "ms": 4791.1
+     },
+     {
+      "name": "hot-3",
+      "code": 1006,
+      "ms": 7429.5
+     },
+     {
+      "name": "blocked",
+      "code": 1006,
+      "ms": 752.6
+     }
+    ],
+    "late_upgrade_ok": true,
+    "after_release_upgrade_ok": true
+   },
+   "contention_rss_max_mib": 347.1,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 1397.5,
+    "warnings": 0
+   },
+   "evidence_exact": true
+  },
+  {
+   "run": "a-2",
+   "variant": "a",
+   "image": "hmem-perftest:d4d70f78-a",
+   "started_at": "2026-11-17T02:19:07.166Z",
+   "finished_at": "2026-11-17T02:22:18.886Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 16878,
+     "p50": 10.8,
+     "p95": 96.9,
+     "p99": 290.3,
+     "max": 741.4,
+     "failures": 0
+    },
+    "p95_by_variant": {
+     "task_get": 23.7,
+     "task_update_fields": 287,
+     "task_list_query": 28.8,
+     "search_unified": 90.3,
+     "nav_root": 274.8,
+     "nav_project": 46.9,
+     "nav_focus": 86.1,
+     "planning_counts": 25.1,
+     "project_overview": 43.6,
+     "observation_list_query": 30.1
+    }
+   },
+   "seeded_append": {
+    "n": 1458,
+    "p50": 13.5,
+    "p95": 42.3,
+    "p99": 101.1,
+    "max": 561.5
+   },
+   "proof_append_p95_ms": 42.2,
+   "hot_update_p95_ms": 223.3,
+   "contention_db": {
+    "ms": 120584.4,
+    "outbox_scan": {
+     "calls": 16315,
+     "total_ms": 232.5
+    },
+    "scope_lock": {
+     "calls": 5113,
+     "total_ms": 10328.3
+    },
+    "statement_calls": 2388585,
+    "checkout": {
+     "checkouts": 229427,
+     "unattributed": 33572,
+     "capacity_waits": 14480,
+     "wait_total_ms": 204824,
+     "hold_total_ms": 503312.4,
+     "connects": 1
+    },
+    "lock_wait_samples": 7,
+    "max_ungranted": 6
+   },
+   "idle_db": {
+    "ms": 30010,
+    "outbox_scan": {
+     "calls": 692,
+     "total_ms": 4.4
+    },
+    "scope_lock_calls": 0,
+    "statement_calls": 46272,
+    "checkout": {
+     "checkouts": 4473,
+     "unattributed": 4473,
+     "capacity_waits": 0,
+     "wait_total_ms": 8.6,
+     "hold_total_ms": 3905.2,
+     "connects": 0
+    }
+   },
+   "foreground_tail": {
+    "n": 844,
+    "complete_ms": 76.3,
+    "db_wait_ms": 27,
+    "db_hold_ms": 49.8,
+    "pool_wait_share": 0.354
+   },
+   "delivery": {
+    "hot_writes_ok": 1921,
+    "delivered_by_phase_end": [
+     1921,
+     1921,
+     1921,
+     1921
+    ],
+    "commit_to_frame_p95_ms": [
+     957.9,
+     958,
+     958.7,
+     958.1
+    ]
+   },
+   "stalled_reader_changes_after_resume": 218,
+   "stuck": {
+    "blocked_closed_by_1500ms": 834.4,
+    "release_ms": 8111.5,
+    "undelivered": 0,
+    "during_hold_p95": 888.5,
+    "observer_closures": [
+     {
+      "name": "blocked",
+      "code": 1006,
+      "ms": 834.4
+     }
+    ],
+    "late_upgrade_ok": true,
+    "after_release_upgrade_ok": true
+   },
+   "contention_rss_max_mib": 349.3,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 410.2,
+    "warnings": 0
+   },
+   "evidence_exact": true
+  },
+  {
+   "run": "before-2",
+   "variant": "before",
+   "image": "hmem-perftest:7127a3d9",
+   "started_at": "2026-11-17T02:22:48.153Z",
+   "finished_at": "2026-11-17T02:26:00.193Z",
+   "error": null,
+   "foreground": {
+    "pooled": {
+     "n": 18079,
+     "p50": 10,
+     "p95": 96.3,
+     "p99": 283.8,
+     "max": 549.3,
+     "failures": 0
+    },
+    "p95_by_variant": {
+     "task_get": 7,
+     "task_update_fields": 279.5,
+     "task_list_query": 13.5,
+     "search_unified": 100.4,
+     "nav_root": 254.9,
+     "nav_project": 37.4,
+     "nav_focus": 53.1,
+     "planning_counts": 6.7,
+     "project_overview": 19.7,
+     "observation_list_query": 13.7
+    }
+   },
+   "seeded_append": {
+    "n": 1462,
+    "p50": 13,
+    "p95": 62.1,
+    "p99": 112.4,
+    "max": 303.2
+   },
+   "proof_append_p95_ms": 69.6,
+   "hot_update_p95_ms": 204.1,
+   "contention_db": {
+    "ms": 120580.3,
+    "outbox_scan": {
+     "calls": 213,
+     "total_ms": 786.7
+    },
+    "scope_lock": {
+     "calls": 255,
+     "total_ms": 490.4
+    },
+    "statement_calls": 2223323,
+    "checkout": null,
+    "lock_wait_samples": 1,
+    "max_ungranted": 3
+   },
+   "idle_db": {
+    "ms": 30010.4,
+    "outbox_scan": {
+     "calls": 248,
+     "total_ms": 1460.3
+    },
+    "scope_lock_calls": 28,
+    "statement_calls": 39668,
+    "checkout": null
+   },
+   "foreground_tail": null,
+   "delivery": {
+    "hot_writes_ok": 1920,
+    "delivered_by_phase_end": [
+     233,
+     233,
+     233,
+     233
+    ],
+    "commit_to_frame_p95_ms": [
+     1079.8,
+     1094,
+     1092.5,
+     1073.9
+    ]
+   },
+   "stalled_reader_changes_after_resume": 252,
+   "stuck": {
+    "blocked_closed_by_1500ms": null,
+    "release_ms": 7595.6,
+    "undelivered": 0,
+    "during_hold_p95": 7340.7,
+    "observer_closures": [],
+    "late_upgrade_ok": true,
+    "after_release_upgrade_ok": true
+   },
+   "contention_rss_max_mib": 409.3,
+   "drain": {
+    "exit_code": 130,
+    "stop_ms": 584.5,
+    "warnings": 0
+   },
+   "evidence_exact": true
+  }
+ ],
+ "foreground_gate": {
+  "a": {
+   "before_pooled_p95_ms": [
+    87.8,
+    96.3
+   ],
+   "after_pooled_p95_ms": [
+    93.1,
+    96.9
+   ],
+   "pooled_ratio_of_means": 1.032,
+   "seeded_append": {
+    "before_p95_ms": 59.7,
+    "after_p95_ms": 49.3,
+    "ratio": 0.825
+   },
+   "routes_over_limit": [
+    "task_get",
+    "task_list_query",
+    "nav_project",
+    "nav_focus",
+    "planning_counts",
+    "project_overview",
+    "observation_list_query"
+   ],
+   "by_variant": {
+    "task_get": {
+     "before_p95_ms": 7.6,
+     "after_p95_ms": 19.4,
+     "ratio": 2.553
+    },
+    "task_update_fields": {
+     "before_p95_ms": 276.2,
+     "after_p95_ms": 280.3,
+     "ratio": 1.015
+    },
+    "task_list_query": {
+     "before_p95_ms": 12.7,
+     "after_p95_ms": 28.3,
+     "ratio": 2.233
+    },
+    "search_unified": {
+     "before_p95_ms": 97.4,
+     "after_p95_ms": 93.2,
+     "ratio": 0.956
+    },
+    "nav_root": {
+     "before_p95_ms": 261.4,
+     "after_p95_ms": 270.3,
+     "ratio": 1.034
+    },
+    "nav_project": {
+     "before_p95_ms": 38,
+     "after_p95_ms": 50.8,
+     "ratio": 1.337
+    },
+    "nav_focus": {
+     "before_p95_ms": 54.5,
+     "after_p95_ms": 80.9,
+     "ratio": 1.483
+    },
+    "planning_counts": {
+     "before_p95_ms": 7.7,
+     "after_p95_ms": 24.1,
+     "ratio": 3.15
+    },
+    "project_overview": {
+     "before_p95_ms": 24.4,
+     "after_p95_ms": 43.1,
+     "ratio": 1.764
+    },
+    "observation_list_query": {
+     "before_p95_ms": 13.9,
+     "after_p95_ms": 24,
+     "ratio": 1.729
+    }
+   }
+  },
+  "a_b": {
+   "before_pooled_p95_ms": [
+    87.8,
+    96.3
+   ],
+   "after_pooled_p95_ms": [
+    99.1,
+    102.2
+   ],
+   "pooled_ratio_of_means": 1.093,
+   "seeded_append": {
+    "before_p95_ms": 59.7,
+    "after_p95_ms": 57.7,
+    "ratio": 0.966
+   },
+   "routes_over_limit": [
+    "task_get",
+    "task_list_query",
+    "nav_project",
+    "nav_focus",
+    "planning_counts",
+    "project_overview",
+    "observation_list_query"
+   ],
+   "by_variant": {
+    "task_get": {
+     "before_p95_ms": 7.6,
+     "after_p95_ms": 26.5,
+     "ratio": 3.48
+    },
+    "task_update_fields": {
+     "before_p95_ms": 276.2,
+     "after_p95_ms": 282.4,
+     "ratio": 1.022
+    },
+    "task_list_query": {
+     "before_p95_ms": 12.7,
+     "after_p95_ms": 27.4,
+     "ratio": 2.166
+    },
+    "search_unified": {
+     "before_p95_ms": 97.4,
+     "after_p95_ms": 104.4,
+     "ratio": 1.071
+    },
+    "nav_root": {
+     "before_p95_ms": 261.4,
+     "after_p95_ms": 269.3,
+     "ratio": 1.03
+    },
+    "nav_project": {
+     "before_p95_ms": 38,
+     "after_p95_ms": 54.5,
+     "ratio": 1.433
+    },
+    "nav_focus": {
+     "before_p95_ms": 54.5,
+     "after_p95_ms": 76.2,
+     "ratio": 1.398
+    },
+    "planning_counts": {
+     "before_p95_ms": 7.7,
+     "after_p95_ms": 27.3,
+     "ratio": 3.562
+    },
+    "project_overview": {
+     "before_p95_ms": 24.4,
+     "after_p95_ms": 46.1,
+     "ratio": 1.889
+    },
+    "observation_list_query": {
+     "before_p95_ms": 13.9,
+     "after_p95_ms": 20.7,
+     "ratio": 1.491
+    }
+   }
+  }
+ },
+ "gates": [
+  {
+   "name": "EXPLAIN generic and custom plans, global and workspace: ordered index range, Index Cond on scope, workspace identity and cursor, no Seq Scan or Sort",
+   "result": "PASS",
+   "evidence": "explain; hmem-core spec 'plans replay reads as ordered scope, workspace and cursor index ranges under generic and custom plans'"
+  },
+  {
+   "name": "Ordinary foreground p95, pooled, <= 10% over matched before",
+   "result": "PASS (a: 1.032; a+b: 1.093)"
+  },
+  {
+   "name": "Ordinary foreground p95 per route <= 10%",
+   "result": "FAIL",
+   "note": "Both variants: task_get, task_list_query, nav_project, nav_focus, planning_counts, project_overview and observation_list_query regress 1.33-3.15x (a) and 1.40-3.56x (a+b); task_update_fields, search_unified and nav_root stay within 2-7%."
+  },
+  {
+   "name": "Seeded capture append p95 <= 10%",
+   "result": "PASS (a: 0.825; a+b: 0.966)"
+  },
+  {
+   "name": "Outbox scans and pool wait share reported per phase",
+   "result": "REPORTED",
+   "note": "Contention: before 213-229 scans (0.79-0.82 s), a 12,725-16,315 (0.20-0.23 s), a+b 2,340-2,396 (0.13 s). Idle 30 s: before 248-252 (1.46 s), a 668-692 (4.3-4.4 ms), a+b 0. Pool wait share of the foreground tail: a 0.42 and 0.35, a+b 0.39 and 0.42 (073d6bfb after: 0.50 and 0.48 on its own seed)."
+  },
+  {
+   "name": "Stuck catch-up beside healthy peers (owned by task 033d1704)",
+   "result": "FAIL, unchanged",
+   "note": "After images retire two of four healthy hot sockets in 3 of 4 runs (a-2: none); before keeps them but delays delivery up to 7.3-7.5 s."
+  }
+ ],
+ "findings": [
+  "The predicate repair removes the replay scan cost: about 13-16k outbox reads per contention phase take 0.20-0.23 s in total, against 67-74 s for 7.1-7.8k reads in the 073d6bfb after runs, and pooled foreground p95 falls to within 3.2% of before.",
+  "The dispatcher skip removes every idle outbox read (668-692 per 30 s with a alone) and 81-86% of contention reads, but foreground latency does not improve (a+b pooled 1.093 against a 1.032, inside the 9.7% spread between the two before runs). Outbox reads no longer explain the regression.",
+  "Cheap reads still regress 2-3.6x at p95 (task_get 7.6 to 19-27 ms, planning_counts 7.7 to 24-27 ms) while database work per statement is unchanged: the after images run the same statement mix (2.19-2.40M calls per phase against 2.22-2.26M) and 35-42% of the foreground tail is pool wait, with 13.6-15.9k capacity waits and 173-223 s of total wait per phase.",
+  "The largest remaining change-stream database difference is scope locking: 3,053-5,113 hmem_change_stream_lock calls taking 6.9-10.3 s per contention phase against 255-271 calls and 0.5 s before. These come from per-socket canonical delivery and replay, which this task left unchanged; on one-connection pool stripes their lock waits behind hot writers are the leading candidate for the remaining queueing, not yet isolated.",
+  "Delivery is unchanged by the skip: every healthy hot observer received every hot change (ab-2 counted 1,911 of 1,920 because its contention phase ended 0.3 s after the 120 s write window while delivery takes about 1 s; all four observers stopped at the same count), commit-to-frame p95 0.93-0.96 s; before delivered 233-250 of 1,920 beside the stalled reader.",
+  "Memory peaks at 338-359 MiB for the after variants against 409-428 MiB before."
+ ],
+ "limitations": [
+  "Two runs per variant on one shared host; the before runs differ by 9.7% pooled p95 (87.8 and 96.3 ms). The a+b pooled ratio of 1.093 is within that spread of the limit.",
+  "The unfixed after image (d4d70f78 without these changes) was not rerun on this seed; comparisons with it use the 073d6bfb receipt, which had a different seed copy and its load-profile history.",
+  "Foreground clients are closed-loop, so before completed 7% (against a) and 10% (against a+b) more foreground requests on average; hot writes were open-loop and matched.",
+  "The before image's scratch Dockerfile was reconstructed and is not byte-identical to the 073d6bfb one; image content was not compared.",
+  "The before image has no request phases or pool counters, so pool wait share is reported for after variants only.",
+  "Local authentication makes every principal the trusted superadmin; revocation and per-user reauthorization rely on the focused specs."
+ ],
+ "focused_specs": {
+  "core": "stack test hmem-core:test:hmem-core-test --ta '--match \"HMem.DB.ChangeStream\"': 60 examples, 0 failures (includes the new plan-shape spec).",
+  "server_change_stream": "stack test hmem-server:test:hmem-server-test --ta '--match \"HMem.Server.ChangeStream\" --match \"HMem.Server.WebSocketDelivery\" --match \"owned WebSocket delivery\"': 68 examples, 0 failures.",
+  "server_receipt_and_outbox": "The nine 073d6bfb focused matches, the new skip spec and the 15 APISpec examples that read listOutboxAfter: 39 examples, 0 failures.",
+  "mutation": "Restoring workspace_id IS NOT DISTINCT FROM fails the plan spec in all 8 plans (Sort, workspace Filter, no workspace Index Cond). The skip spec fails when the skip is removed, when a short read acknowledges only its last record (the pruned scope is read every turn), and when a failed turn keeps the counters as acknowledgements (the written scope is never re-read).",
+  "full_suites": "hmem-server: 664 examples, 3 failures, 17 pending (AuditMaintenance CHECKPOINT statement timeout, AuditServerRestart fixture path, and 'withdraws dispatch when a live archive backlog crosses its bound', which passed when rerun alone). hmem-core: 692 examples, 8 failures, 5 pending (six migration-upgrade fixtures, the truncate-guard cancellation and the ReaderSpec row-lock example). All are in the known pre-existing set; an earlier core run under concurrent seeding load stalled without database activity and was stopped."
+ },
+ "scratch_disposition": "Teardown removed the hmem-perftest compose stack and network, volumes hmem-perftest-pgdata and hmem-perftest-pgdata-base, images hmem-perftest:7127a3d9, hmem-perftest:d4d70f78-a and hmem-perftest:d4d70f78-ab, and .tmp/perftest-17e8cd32 (sources, secrets, summaries, logs). hmem-local-tei and other containers were not touched; no git worktree was created."
+}

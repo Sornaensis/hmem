@@ -64,6 +64,49 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     listRetentionScopes env.pool (Just GlobalScope) `shouldReturn` take 4 scopes
     listRetentionScopes env.pool (Just (scopes !! 5)) `shouldReturn` [GlobalScope] <> take 3 scopes
 
+  it "plans replay reads as ordered scope, workspace and cursor index ranges under generic and custom plans" $ \_ -> withTestEnv $ \env -> do
+    workspace <- createTestWorkspace env "replay-plan-shape"
+    forM_ [1..3 :: Int] $ \index -> void $ createProject env.pool
+      (CreateProject workspace.id Nothing ("plan-shape-" <> T.pack (show index)) Nothing Nothing Nothing)
+    -- Every retained record of a rotated scope is at or below its counter.
+    counted <- listDispatchScopes env.pool Nothing
+    map fst counted `shouldSatisfy` (not . null)
+    forM_ counted $ \(scope, counter) -> do
+      retained <- listOutboxAfter env.pool scope 0 1000
+      filter ((> counter) . (.outboxCursor)) retained `shouldBe` []
+    suffix <- T.replace "-" "" . UUID.toText <$> UUIDV4.nextRandom
+    let Statement.Statement afterSql _ _ _ = listOutboxAfterStatement
+        Statement.Statement rangeSql _ _ _ = listOutboxRangeStatement
+        named base = TE.encodeUtf8 (base <> suffix)
+        workspaceArg = "'" <> TE.encodeUtf8 (UUID.toText workspace.id) <> "'::uuid"
+        statements =
+          [ (named "plan_after_", "(text, uuid, bigint, integer)", afterSql, \scope ident -> scope <> ", " <> ident <> ", 0, 1000")
+          , (named "plan_range_", "(text, uuid, bigint, bigint, integer)", rangeSql, \scope ident -> scope <> ", " <> ident <> ", 0, 9223372036854775807, 500") ]
+        scopes = [("'global'", "NULL::uuid"), ("'workspace'", workspaceArg)]
+        explain :: ByteString -> Statement.Statement () [T.Text]
+        explain sql = Statement.Statement sql Enc.noParams (Dec.rowList (Dec.column (Dec.nonNullable Dec.text))) False
+    plans <- runSession env.pool $ do
+      Session.sql "SET LOCAL enable_seqscan = off; SET LOCAL enable_bitmapscan = off"
+      forM_ statements $ \(name, types, sql, _) -> Session.sql ("PREPARE " <> name <> types <> " AS " <> sql)
+      results <- forM [(mode, statement, scope) | mode <- ["force_generic_plan", "force_custom_plan"], statement <- statements, scope <- scopes] $
+        \(mode, (name, _, _, arguments), (scope, ident)) -> do
+          Session.sql ("SET LOCAL plan_cache_mode = " <> mode)
+          plan <- Session.statement () (explain ("EXPLAIN EXECUTE " <> name <> "(" <> arguments scope ident <> ")"))
+          pure ((mode, name, scope), plan)
+      forM_ statements $ \(name, _, _, _) -> Session.sql ("DEALLOCATE " <> name)
+      pure results
+    length plans `shouldBe` 8
+    let problems :: [T.Text] -> [String]
+        problems plan =
+          [ "no ordered scan of a scope/workspace/cursor index" | not (any (\line -> any (`T.isInfixOf` line)
+              ["Index Scan using uq_change_stream_global_cursor", "Index Scan using idx_change_stream_outbox_replay"]) plan) ]
+          <> [ "Index Cond lacks scope, workspace identity or cursor" | not (any (\line -> all (`T.isInfixOf` line)
+              ["Index Cond:", "scope =", "COALESCE(workspace_id", "cursor >"]) plan) ]
+          <> [ "workspace filter" | any (\line -> "Filter:" `T.isInfixOf` line && "workspace_id" `T.isInfixOf` line) plan ]
+          <> [ "sort" | any ("Sort" `T.isInfixOf`) plan ]
+          <> [ "sequential scan" | any ("Seq Scan" `T.isInfixOf`) plan ]
+    [ (planContext, problem, plan) | (planContext, plan) <- plans, problem <- problems plan ] `shouldBe` []
+
   it "caps a large backlog drain and measures only a bounded lower bound" $ \_ -> withTestEnv $ \env -> do
     workspace <- createTestWorkspace env "bounded-retention-large"
     let scope = WorkspaceScope workspace.id

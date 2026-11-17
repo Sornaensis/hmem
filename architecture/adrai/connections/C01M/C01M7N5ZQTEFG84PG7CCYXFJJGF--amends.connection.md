@@ -1,0 +1,12 @@
++++
+schema = "adrai/connection/v1"
+connection = "C01M7N5ZQTEFG84PG7CCYXFJJGF"
+relation = "amends"
+from_record = "R01M7N5ZQTEN6S0A2VWVSP6VGJP"
+subject_adr = "A01M39QPB23CYS9QHCWQSATSJE9"
+to_records = ["R01M7N14AACHWKFZTGZ0DYZYVTR"]
++++
+
+Bound memory under uncapped prefix verification: release each job's reader and archive decoder between turns, and cap retained terminal results with earliest-expiring eviction while never evicting live work.
+
+<!-- @adrai:eyJhIjp7ImkiOiJkZXZlbG9wZXIiLCJrIjoibGxtIiwibSI6ImNsYXVkZS1vcHVzLTUtNSJ9LCJiIjoiMDI5Mzc3ZDdmNjZlNTZkZGM4MGY1ZWE2Y2QzMGIyNmYyY2JjMDM2YSIsImkiOiJzaGEyNTY6dmJzeE5BMDNlU2ltY19hclVpMTNCaE9lQktiY3R0Q3RhZHNtVEw2QXRfOCIsImsiOiJjb25uZWN0aW9uLmFtZW5kcyIsIm8iOiJDMDFNN041WlFURUZHODRQRzdDQ1lYRkpKR0YiLCJvcCI6Ik8wMU03TjVaUVRFTjZTMEEyVldWU1A2VkdKUCIsInAiOlsiUjAxTTdOMTRBQUNIV0tGWlRHWjBEWVpZVlRSIl0sInIiOiJtYXN0ZXIiLCJzIjoic2hhMjU2OldBUHBNVnV5S2dicWJ6b2VMMUVxd1NuWGhHbHlTbTF2SEJ2OTNpcmJ4SmsiLCJ0IjoxNzk0OTMzNTE0MDYyLCJ2IjoxLCJ4IjoiYWRyYWkvMS4wLjAifQ -->

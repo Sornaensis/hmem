@@ -280,6 +280,12 @@ container or a later production sample, before implementation.
 | 5 | Fewer transactions per request where semantics allow, including session appends (6 checkouts). | After priority 2, with contention evidence. |
 | 6 | Avoid the generic plan for the timeline events statement only. | Reproduce it on the production PostgreSQL major version first. |
 
+In the [server performance qualification](server-performance-qualification.md),
+candidate 4's replay scans are the leading explanation for a foreground
+regression under WebSocket load, and candidate 2's one-connection stripes for
+healthy sockets retired beside a stuck catch-up. No ablation or matched run
+isolated either cause.
+
 ## Sample limits
 
 No passive native sample was collected. On 16 November 2026 the user chose

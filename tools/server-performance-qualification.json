@@ -1,0 +1,2501 @@
+{
+ "format_version": 1,
+ "task": "073d6bfb-a972-4c94-a8cf-4dbfdfd86c11",
+ "project": "5b1593f5-8081-45da-9c42-bc7a6be8149a",
+ "date": "2026-11-17",
+ "evidence_class": "CONTAINER EVIDENCE, NOT PRODUCTION. User decision of 2026-11-16: qualify in a throwaway Docker environment, never against the live system. Synthetic near-production seed; local trusted-principal authentication; plain HTTP.",
+ "outcome": "FAILED: 2 of 8 gates fail (ordinary foreground p95; healthy progress beside a stuck catch-up). Task acceptance is not met.",
+ "owner": "Task 073d6bfb developer through review, then repository maintainers",
+ "retention": "Retain this compact receipt and tools/perftest/combined.mjs until a matched rerun after the dispositions below supersedes them. Raw summaries, logs, the seeded volumes, images and scratch were task scratch and were removed at teardown.",
+ "inputs": {
+  "before": {
+   "revision": "7127a3d974e1792b0446bbfb3a61e0607e66a457",
+   "why": "The performance review revision named in the project scope; the parent of fd6c9b48, the first sibling repair (fbc30801 change-stream recovery and delivery, 1587798d MCP prefix recovery), and before every commit of this project. hmem-server/migrations are identical to 8d5101d0 (V001-V063), so both revisions run the same schema and seed."
+  },
+  "after": {
+   "revision": "8d5101d06c1c1ad839b3449f9292d7fb11141eef",
+   "why": "Existing hmem-perftest:8d5101d0 image. HEAD 57175d7194c003ff77419d8aea78652412e0a43e differs from it only in Dockerfile (the hmem-core/cbits COPY the image already has), docs and tools; no server, core, MCP or migration source changed."
+  },
+  "sha256": {
+   "tools/perftest/combined.mjs (current, not used for any run; review hardening: request-log route keys without query strings, rejected unknown, repeated or valueless flags and unsafe labels, observer image pinned to the digest below)": "91086927a8ea14792698ac573b51e3b288c7aa37b22b16dda70ad8b89288212a",
+   "tools/perftest/combined.mjs (first review version, not used for any run; adds only the usage note and duration argument check to the after-4 version)": "2a7b86bf8feb37d3c2c242ad8d92203ec7e185df0f98a8ffe41d2981b52b4643",
+   "tools/perftest/combined.mjs (runs after-4 and diag-after-n4, as recorded at the time)": "cab42eef2a2a759a73f7297c563ce70861a21e5148d5e814d44bb9acc34671ce",
+   "tools/perftest/combined.mjs (runs before-2 and after-3; no stuck.observer_closures output)": "caebb3192851030831571479fdf05752645af9b652fd8e53e44834fb04ea271a",
+   "tools/perftest/compose.yaml": "3cc7ae68eafa21034e2f7b288594b431643d5453c471264e74f58a5594ab0e3d",
+   "tools/perftest/perftest.mjs (seeded the shared volume; unchanged)": "b581687897d42f7899e387b8d85ac46c4a16097f87ab7de315f4527f5ba32d68",
+   "Dockerfile (HEAD)": "f101f43e9144bd0bed01ae3a3b15aa06b18c60ef546396aded6e199bfa14337a",
+   "before build Dockerfile (HEAD Dockerfile plus two COPY lines restoring 7127a3d9 package metadata after the dependency layer; scratch)": "0d393c3676c44db2404083aafe3a9b73803f6a2e0d9e37170d4f1d03351aa7b0",
+   "docs/reference/session-sync-performance.md": "3890fd0d0a2e11f0ce98bbac5a9f004259750d8585e2ac6018020bd330cdc4b8",
+   "docs/reference/sealed-session-archives.md": "f63d917149542150b5e490b95881ba74d57c65ed2d8e8801c8267f4f49fa51e3",
+   "docs/reference/websocket-telemetry.md": "0412379ec21acf5ea3a778933ae20130e3ba98c36e611590230567115f0d8d30",
+   "docs/reference/session-traffic-telemetry.md": "9180d5a03547be5fb9d8b459e70e95f419746f98e75a48764bebd44d31cc3702",
+   "tools/change-stream-qualification.json": "b2b162c20ba418169946845aa70ebbc2939ed832c0cfd61ec35c5dc193dff501",
+   "tools/request-latency.qualification.json": "94b4bdeeb89ef863e70317ff7a93271afa6d901f3d7790a91936cf2357e8a30a",
+   "tools/archive-readiness.qualification.json": "e5a973a7a28f5a3bc17ccb818e0634a1ac7612dd557e0fe9990aab95555fbfb7",
+   "adrai show A01M39RTNXZ8BWZ54DXPN50GCCM": "e2421cc18cd8aaaaf37423633c5749f54a68545bea251ea307bc2cd9029a7080",
+   "adrai show A01M51RECA7P68J92X84FGFEQPN": "c6fc1f1ced94560a9406cef812ed730de9c83120d256fe7fe7bf5a5b0aea49c4",
+   "hmem-server-test.exe (stack build reported it current for HEAD sources)": "793595a1da375d64c02aef3c049b9024c8444c64d423c9f3db3733a1944b0fcd"
+  },
+  "runner_versions": "The runner hash used for before-3 was not recorded and cannot be recovered: raw summaries and scratch were removed at teardown. Its summary has stuck.observer_closures, as after-4's does and before-2's and after-3's do not, so it did not run caebb319. All runner versions share one workload definition and, as recorded, differ only in output fields (stuck-phase observer closures) and later in argument handling."
+ },
+ "environment": {
+  "host": "Windows 11 Pro 10.0.26200, Docker Desktop 29.6.1 (WSL2 kernel 6.18.33.2), 24 CPUs, 31.1 GiB; Node 24.15.0 client on the host",
+  "compose_project": "hmem-perftest (tools/perftest/compose.yaml), server published on 127.0.0.1:18429 only",
+  "images": {
+   "before": {
+    "tag": "hmem-perftest:7127a3d9",
+    "id": "sha256:7a3ec32d125e787d3a54d6e2a078d94ba3bcabc056511e69423b8d1805f441fe",
+    "labels": {
+     "hmem.perftest.revision": "7127a3d974e1792b0446bbfb3a61e0607e66a457",
+     "hmem.perftest.owner": "task-073d6bfb",
+     "hmem.perftest.dockerfile": "repo-Dockerfile-plus-hmem-core-cbits-and-8d5101d0-dependency-layer"
+    },
+    "build": "git archive of 7127a3d9; Stack dependency layer resolved from 8d5101d0 package metadata (same stack.yaml and stack.yaml.lock), then the 7127a3d9 package.yaml/.cabal files restored before the source build; 9 min 32 s"
+   },
+   "after": {
+    "tag": "hmem-perftest:8d5101d0",
+    "id": "sha256:4ba33992fd0635a24df4ba41ad3f62ee005e3ac7d0e5357b7e7b972987018222",
+    "labels": {
+     "hmem.perftest.revision": "8d5101d06c1c1ad839b3449f9292d7fb11141eef",
+     "hmem.perftest.owner": "task-9bb3fedd",
+     "hmem.perftest.dockerfile": "repo-Dockerfile-plus-hmem-core-cbits"
+    }
+   },
+   "postgres": "postgres:17-bookworm sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0, PostgreSQL 17.11, 128 MB shared buffers, pg_stat_statements, track_io_timing",
+   "stalled_observer": "node:24.18.0-bookworm sha256:5711a0d445a1af54af9589066c646df387d1831a608226f4cd694fc59e745059 (pre-existing public image; container only, on hmem-perftest-net)"
+  },
+  "server": "Production pool defaults (10 connections, statement timeout 30 s); GHC -N on 24 CPUs gives 10 one-connection pool stripes; embedding provider disabled; local authentication, so every principal is the trusted local superadmin",
+  "seed": "One volume seeded by perftest.mjs for the request-latency container sample (tools/request-latency.qualification.json containerSample): 6 planning workspaces of the large perf shape, 562 terminated sessions (3.27 GB raw, archived), 12 active sessions, 412,738 audit rows, 77-80k outbox rows; 4.85 GB database. It was copied once to hmem-perftest-pgdata-base and restored byte-identically (6,079,559,056 bytes) before every run."
+ },
+ "method": {
+  "matching": "Same seed copy, same workload definition (runner versions differ only in output fields; see inputs.runner_versions), same compose file and host for both revisions; each run starts a fresh server process on a freshly restored volume. Matched runs were ordered before-2, after-3, before-3, after-4. Gate statistics are means of the two runs per revision.",
+  "workload": {
+   "setup": "16 empty workspaces (empty retained scopes), one blocked-scope workspace, two proof sessions and two bulk sessions created through the API",
+   "observers": "27 canonical WebSocket sockets per run: 4 on the hot workspace, 2 on the measured workspace, 1 on a slowly written workspace, 16 on empty workspaces (all through full shell resync, ticket and upgrade), 1 stalled observer, 1 blocked catch-up and 2 late upgrades",
+   "quiet_snapshots": "full_v1 of the measured workspace (4,533 items, 46 pages of 100), workspace_shell_v1 of it, and full_v1 of the hot workspace (4,480 items), each beside a same-scope task writer every 25 ms",
+   "idle": "30 s with every socket connected and no writes",
+   "contention": "120 s (longer only while archive streams finish): 4 closed-loop foreground clients over 10 ordinary interactive routes on the measured workspace; 4 open-loop hot writers (16 task updates/s on one workspace) and 1 writer at 1/s on another (skewed scopes); 4 appenders on seeded active sessions (4-32 KiB every 250 ms); 2 proof sessions appending 16 KiB every 250 ms with a prefix proof every 5 s; a stalled observer on the hot scope; full_v1 hot and shell measured resyncs at 20/25 s; the two largest archives (86.4 and 34.8 MB compressed) streamed at 40 s; twelve ~1 MB appends to the bulk sessions at 70 s",
+   "stalled_observer": "Raw WebSocket client in a node container on hmem-perftest-net (kernel buffers only between it and the server); completes the upgrade, stops reading for 130 s, then drains for 5 s and counts what arrived",
+   "stuck_catch_up": "6d9ef144 case: a psql session in hmem-perftest-postgres holds hmem_change_stream_lock for the blocked workspace for 8 s; a canonical socket for that scope connects; hot writes continue every 250 ms; a new socket is admitted at 1.5 s and another after release",
+   "evidence": "Proof and bulk sessions terminated with their exact final SHA-256, linked tasks set done, evidence ranges read back and compared byte-for-byte",
+   "drain": "docker stop (SIGINT, 180 s grace) with the server log followed live"
+  },
+  "measurement": "Client latency is request start to response body end on the host. Delivery latency is response end of the write to arrival of the change frame whose transaction.request_id is the write X-Request-Id. Database counts are pg_stat_statements calls per phase (reset at phase start), classified by statement text. Memory is hmem-server VmRSS sampled once per second through docker exec; archive and large-body increments are the maximum during the event minus the maximum in the preceding 10 s. Request phases, pool counters, WebSocket and session-traffic telemetry come from the after server only; the before revision has none of them."
+ },
+ "commands": [
+  "git archive 7127a3d974e1792b0446bbfb3a61e0607e66a457 | tar -x -C .tmp/perftest-073d6bfb/before-src",
+  "docker build -f Dockerfile.perftest --target runtime --label hmem.perftest.revision=7127a3d974e1792b0446bbfb3a61e0607e66a457 --label hmem.perftest.owner=task-073d6bfb --label hmem.perftest.dockerfile=repo-Dockerfile-plus-hmem-core-cbits-and-8d5101d0-dependency-layer -t hmem-perftest:7127a3d9 .  (in .tmp/perftest-073d6bfb/before-src)",
+  "docker compose -p hmem-perftest -f tools/perftest/compose.yaml --env-file .tmp/perftest/secrets.env stop; docker volume create hmem-perftest-pgdata-base; docker run --rm -v hmem-perftest-pgdata:/from:ro -v hmem-perftest-pgdata-base:/to postgres:17-bookworm sh -c \"cp -a /from/. /to/\"",
+  "per run: docker compose ... down; docker run --rm -v hmem-perftest-pgdata:/to -v hmem-perftest-pgdata-base:/from:ro postgres:17-bookworm sh -c \"find /to -mindepth 1 -delete && cp -a /from/. /to/\"; PERFTEST_IMAGE=<tag> docker compose ... up -d",
+  "node tools/perftest/combined.mjs --label <run>",
+  "diagnostic only: the same with a compose override setting GHCRTS=-N4 on the hmem service",
+  "reduction: each run's summary JSON was reduced into runs[] and diagnostic_run (regrouped and renamed fields, e.g. drain.log_tail_warnings split into warnings and other_lines, drain.shutdown_lines reduced to shutdown_logged); the reduction step was not retained, and the raw summaries were removed at teardown",
+  "stack build hmem-server:test:hmem-server-test --test --no-run-tests  (nothing to rebuild)",
+  "hmem-server-test.exe --match \"rotates bounded dispatcher batches past a skewed scope\" --match \"reauthorizes idle clients once per elapsed tick\" --match \"measures causal pool queueing and snapshot scope-lock contention\" --match \"lets a healthy later population progress while the first batch producer is blocked\" --match \"admits and dispatches while a catch-up blocked in PostgreSQL stays retained\" --match \"holds a paginated HTTP snapshot at H and replays a concurrent direct-core commit\" --match \"sends a targeted revoke and closes the canonical workspace scope\" --match \"sends a cross-scope revoke while the retained scope remains live\" --match \"owned WebSocket delivery\"",
+  "review hardening, no measurement: node --check tools/perftest/combined.mjs (exit 0); with PERFTEST_DIR at a missing directory, valid flags reach the secrets read (ENOENT) and unknown, repeated, valueless or positional arguments, a path-like label and out-of-range durations exit 1 before any docker call"
+ ],
+ "focused_specs": {
+  "result": "23 examples, 0 failures in 62.1 s (isolated test PostgreSQL started by the harness; not the container)",
+  "covers": [
+   "skewed-scope rotation without idle sleep",
+   "grant-user idle reauthorization once per elapsed tick across 8 scopes with revocation",
+   "pool queueing and snapshot scope-lock contention",
+   "healthy later population beside a blocked batch producer",
+   "6d9ef144 stuck catch-up admission and dispatch",
+   "snapshot/replay cut at H with a concurrent commit",
+   "targeted and cross-scope revocation",
+   "15 owned WebSocket delivery examples (stalled write, deadlines, four leases, seats, reclamation, poisoned admission)"
+  ]
+ },
+ "runs": [
+  {
+   "run": "before-2",
+   "revision": "7127a3d974e1792b0446bbfb3a61e0607e66a457",
+   "started_at": "2026-11-16T23:49:21.344Z",
+   "finished_at": "2026-11-16T23:52:35.091Z",
+   "error": null,
+   "durations_ms": {
+    "idle": 30013.3,
+    "contention": 120839
+   },
+   "foreground": {
+    "pooled": {
+     "n": 13750,
+     "p50": 11.4,
+     "p95": 139.9,
+     "p99": 323.1,
+     "max": 1055.8,
+     "failures": 0
+    },
+    "p95_by_variant": {
+     "task_get": 11.7,
+     "task_update_fields": 328.7,
+     "task_list_query": 12.2,
+     "search_unified": 234.4,
+     "nav_root": 283.3,
+     "nav_project": 45.9,
+     "nav_focus": 68.2,
+     "planning_counts": 9.8,
+     "project_overview": 38.5,
+     "observation_list_query": 15.9
+    },
+    "n_by_variant": {
+     "task_get": 1377,
+     "task_update_fields": 1377,
+     "task_list_query": 1375,
+     "search_unified": 1375,
+     "nav_root": 1375,
+     "nav_project": 1375,
+     "nav_focus": 1374,
+     "planning_counts": 1374,
+     "project_overview": 1374,
+     "observation_list_query": 1374
+    }
+   },
+   "capture": {
+    "seeded_append": {
+     "n": 1443,
+     "p50": 13.9,
+     "p95": 72.2,
+     "p99": 155.7,
+     "max": 480.4
+    },
+    "proof_append": {
+     "n": 703,
+     "p50": 15.2,
+     "p95": 85.8,
+     "p99": 147.2,
+     "max": 639.8
+    },
+    "proof_submit": {
+     "n": 44,
+     "p50": 9.9,
+     "p95": 70.2,
+     "p99": 81.7,
+     "max": 81.7
+    },
+    "proof_poll": {
+     "n": 46,
+     "p50": 4.6,
+     "p95": 9.5,
+     "p99": 26.4,
+     "max": 26.4
+    },
+    "statuses": {
+     "seeded_append": {
+      "200": 1443
+     },
+     "proof_append": {
+      "200": 703
+     },
+     "large_append": {
+      "200": 12
+     }
+    }
+   },
+   "hot_writes": {
+    "n": 1920,
+    "p50": 99,
+    "p95": 314.2,
+    "p99": 433.6,
+    "max": 1052,
+    "status": {
+     "200": 1920
+    }
+   },
+   "delivery": {
+    "writes_ok": 1920,
+    "delivered_by_phase_end": [
+     320,
+     319,
+     346,
+     321
+    ],
+    "commit_to_frame_p50": [
+     614.3,
+     623.4,
+     614.4,
+     615.4
+    ],
+    "commit_to_frame_p95": [
+     1282.5,
+     1308.4,
+     1209.5,
+     1268.9
+    ],
+    "commit_to_frame_max": [
+     1608.6,
+     1573.7,
+     1545.1,
+     1638.2
+    ],
+    "max_gap_ms": [
+     1647.7,
+     1613.2,
+     1514.1,
+     1676.9
+    ]
+   },
+   "stalled": {
+    "handshake": "HTTP/1.1 101 WebSocket Protocol Handshake",
+    "bytes_buffered": 2289400,
+    "change_frames": 1920,
+    "server_closed_before_resume": false
+   },
+   "snapshots_quiet": [
+    {
+     "workspace": "W0",
+     "profile": "full_v1",
+     "pages": 46,
+     "items": 4533,
+     "ms": 1251.4,
+     "item_insert_calls": 4533,
+     "scope_lock_calls": 47,
+     "same_scope_writer_max_ms": 810,
+     "same_scope_writer_n": 8
+    },
+    {
+     "workspace": "W0",
+     "profile": "workspace_shell_v1",
+     "pages": 1,
+     "items": 1,
+     "ms": 8.1,
+     "item_insert_calls": 1,
+     "scope_lock_calls": 2,
+     "same_scope_writer_max_ms": 36.1,
+     "same_scope_writer_n": 1
+    },
+    {
+     "workspace": "HOT",
+     "profile": "full_v1",
+     "pages": 45,
+     "items": 4480,
+     "ms": 1146.2,
+     "item_insert_calls": 4480,
+     "scope_lock_calls": 46,
+     "same_scope_writer_max_ms": 805.2,
+     "same_scope_writer_n": 7
+    }
+   ],
+   "snapshots_under_load": {
+    "full_hot": {
+     "at_s": 20,
+     "profile": "full_v1",
+     "pages": 45,
+     "items": 4480,
+     "ms": 2143.4
+    },
+    "shell_measured": {
+     "at_s": 25.1,
+     "profile": "workspace_shell_v1",
+     "pages": 1,
+     "items": 1,
+     "ms": 23.2
+    }
+   },
+   "idle": {
+    "ms": 30013.3,
+    "sockets": 23,
+    "outbox_scan": {
+     "statements": 3,
+     "calls": 240,
+     "total_ms": 1613.4
+    },
+    "authorization": {
+     "statements": 1,
+     "calls": 24,
+     "total_ms": 0
+    },
+    "scope_lock": {
+     "statements": 1,
+     "calls": 24,
+     "total_ms": 2
+    },
+    "transactions": 3756,
+    "checkout": null,
+    "frames": 367
+   },
+   "contention_db": {
+    "outbox_scan": {
+     "statements": 4,
+     "calls": 280,
+     "total_ms": 1185.3
+    },
+    "scope_lock": {
+     "statements": 3,
+     "calls": 319,
+     "total_ms": 1400
+    },
+    "checkout": null,
+    "lock_wait_samples": 0,
+    "samples": 109,
+    "max_ungranted": 0
+   },
+   "memory": {
+    "idle_rss_mib": 250.7,
+    "contention_rss_max_mib": 400.4,
+    "run_hwm_mib": 442.2,
+    "archive": {
+     "streams": [
+      {
+       "status": 200,
+       "compressed_bytes": 86387623,
+       "receipt_match": true,
+       "ms": 73974.7
+      },
+      {
+       "status": 200,
+       "compressed_bytes": 34812545,
+       "receipt_match": true,
+       "ms": 27026
+      }
+     ],
+     "rss_before_mib": 284,
+     "rss_during_mib": 392.1,
+     "incremental_mib": 108.1
+    },
+    "large_bodies": {
+     "appends": 12,
+     "ok": 12,
+     "ms": 1325.6,
+     "incremental_mib": 18.2
+    }
+   },
+   "stuck": {
+    "hold_s": 8,
+    "upgrade_ok": true,
+    "blocked_closed_by_1500ms": null,
+    "late_upgrade_ok": true,
+    "late_checkpoint_ms": 418.7,
+    "release_ms": 7841.4,
+    "lock_waiters": {
+     "max": 1,
+     "last_seen_ms": 7545.8
+    },
+    "lock_waiters_after_release": 0,
+    "writes": {
+     "during_hold": 32,
+     "after_release": 5,
+     "failed": 0,
+     "undelivered": 0,
+     "during_hold_ms": {
+      "n": 32,
+      "p50": 5064.9,
+      "p95": 8195.6,
+      "p99": 8254.7,
+      "max": 8254.7
+     },
+     "after_release_ms": {
+      "n": 5,
+      "p50": 953,
+      "p95": 1009.2,
+      "p99": 1009.2,
+      "max": 1009.2
+     },
+     "over_1s_sent_at_ms": [
+      0.3,
+      261.3,
+      785.3,
+      931.2,
+      1009.3,
+      1288.7,
+      1640.3,
+      1912.2,
+      2079.4,
+      2253.8,
+      2513.9,
+      3047.5
+     ]
+    },
+    "blocked_outcome": {
+     "open": true,
+     "frames": [
+      "checkpoint",
+      "session_activity_changed",
+      "session_activity_changed",
+      "session_activity_changed"
+     ]
+    },
+    "after_release_upgrade_ok": true,
+    "after_release_checkpoint_ms": 17.7
+   },
+   "evidence": [
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "3/3",
+     "proofs": {
+      "verified": 22
+     },
+     "proof_p95_ms": 151.5
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "3/3",
+     "proofs": {
+      "verified": 22
+     },
+     "proof_p95_ms": 233.5
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "1/1",
+     "proofs": {},
+     "proof_p95_ms": null
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "1/1",
+     "proofs": {},
+     "proof_p95_ms": null
+    }
+   ],
+   "observers": {
+    "hot": 4,
+    "measured": 2,
+    "warm": 1,
+    "empty": 16,
+    "stalled": 1,
+    "blocked": 1,
+    "late": 2,
+    "upgrade_ms": {
+     "n": 23,
+     "p50": 0.9,
+     "p95": 1.9,
+     "p99": 2.1,
+     "max": 2.1
+    }
+   },
+   "server_log": {
+    "joined": 0,
+    "foreground_tail": {
+     "n": 0,
+     "complete_ms": null,
+     "db_wait_ms": null,
+     "db_hold_ms": null
+    },
+    "outcomes": {},
+    "events": {
+     "request_log:/api/v1/ws:500:-:-": {
+      "count": 27,
+      "max_ms": 0
+     }
+    }
+   },
+   "drain": {
+    "stop_ms": 956.2,
+    "exit_code": 130,
+    "shutdown_logged": true,
+    "warnings": [],
+    "other_lines": []
+   }
+  },
+  {
+   "run": "after-3",
+   "revision": "8d5101d06c1c1ad839b3449f9292d7fb11141eef",
+   "started_at": "2026-11-16T23:53:10.651Z",
+   "finished_at": "2026-11-16T23:56:23.021Z",
+   "error": null,
+   "durations_ms": {
+    "idle": 30003.3,
+    "contention": 120323.7
+   },
+   "foreground": {
+    "pooled": {
+     "n": 12555,
+     "p50": 12,
+     "p95": 156.4,
+     "p99": 357.5,
+     "max": 565.9,
+     "failures": 0
+    },
+    "p95_by_variant": {
+     "task_get": 32.7,
+     "task_update_fields": 338.4,
+     "task_list_query": 31.1,
+     "search_unified": 170.5,
+     "nav_root": 286.4,
+     "nav_project": 91.2,
+     "nav_focus": 158.6,
+     "planning_counts": 25.2,
+     "project_overview": 72.3,
+     "observation_list_query": 37.8
+    },
+    "n_by_variant": {
+     "task_get": 1257,
+     "task_update_fields": 1257,
+     "task_list_query": 1257,
+     "search_unified": 1257,
+     "nav_root": 1256,
+     "nav_project": 1255,
+     "nav_focus": 1255,
+     "planning_counts": 1254,
+     "project_overview": 1254,
+     "observation_list_query": 1253
+    }
+   },
+   "capture": {
+    "seeded_append": {
+     "n": 1427,
+     "p50": 13.1,
+     "p95": 101,
+     "p99": 270.4,
+     "max": 474.2
+    },
+    "proof_append": {
+     "n": 691,
+     "p50": 15.8,
+     "p95": 109,
+     "p99": 301.9,
+     "max": 467.1
+    },
+    "proof_submit": {
+     "n": 44,
+     "p50": 6.9,
+     "p95": 101.8,
+     "p99": 306.6,
+     "max": 306.6
+    },
+    "proof_poll": {
+     "n": 45,
+     "p50": 4.7,
+     "p95": 44.7,
+     "p99": 131.5,
+     "max": 131.5
+    },
+    "statuses": {
+     "seeded_append": {
+      "200": 1427
+     },
+     "proof_append": {
+      "200": 691
+     },
+     "large_append": {
+      "200": 12
+     }
+    }
+   },
+   "hot_writes": {
+    "n": 1920,
+    "p50": 102.4,
+    "p95": 331.9,
+    "p99": 473.2,
+    "max": 728.8,
+    "status": {
+     "200": 1920
+    }
+   },
+   "delivery": {
+    "writes_ok": 1920,
+    "delivered_by_phase_end": [
+     1920,
+     1920,
+     1920,
+     1920
+    ],
+    "commit_to_frame_p50": [
+     285.5,
+     288.5,
+     294.6,
+     283
+    ],
+    "commit_to_frame_p95": [
+     698,
+     687.4,
+     696.1,
+     693
+    ],
+    "commit_to_frame_max": [
+     1089.2,
+     975.9,
+     1090.6,
+     1089.1
+    ],
+    "max_gap_ms": [
+     966.4,
+     967.6,
+     968.3,
+     967.8
+    ]
+   },
+   "stalled": {
+    "handshake": "HTTP/1.1 101 WebSocket Protocol Handshake",
+    "bytes_buffered": 296681,
+    "change_frames": 240,
+    "server_closed_before_resume": true
+   },
+   "snapshots_quiet": [
+    {
+     "workspace": "W0",
+     "profile": "full_v1",
+     "pages": 46,
+     "items": 4533,
+     "ms": 1089.6,
+     "item_insert_calls": 18,
+     "scope_lock_calls": 47,
+     "same_scope_writer_max_ms": 285.6,
+     "same_scope_writer_n": 8
+    },
+    {
+     "workspace": "W0",
+     "profile": "workspace_shell_v1",
+     "pages": 1,
+     "items": 1,
+     "ms": 9.1,
+     "item_insert_calls": 1,
+     "scope_lock_calls": 2,
+     "same_scope_writer_max_ms": 40.8,
+     "same_scope_writer_n": 1
+    },
+    {
+     "workspace": "HOT",
+     "profile": "full_v1",
+     "pages": 45,
+     "items": 4480,
+     "ms": 919.2,
+     "item_insert_calls": 18,
+     "scope_lock_calls": 46,
+     "same_scope_writer_max_ms": 343.3,
+     "same_scope_writer_n": 7
+    }
+   ],
+   "snapshots_under_load": {
+    "full_hot": {
+     "at_s": 20,
+     "profile": "full_v1",
+     "pages": 45,
+     "items": 4480,
+     "ms": 1610.7
+    },
+    "shell_measured": {
+     "at_s": 25,
+     "profile": "workspace_shell_v1",
+     "pages": 1,
+     "items": 1,
+     "ms": 28.5
+    }
+   },
+   "idle": {
+    "ms": 30003.3,
+    "sockets": 23,
+    "outbox_scan": {
+     "statements": 1,
+     "calls": 554,
+     "total_ms": 5322.4
+    },
+    "authorization": {
+     "statements": 0,
+     "calls": 0,
+     "total_ms": 0
+    },
+    "scope_lock": {
+     "statements": 0,
+     "calls": 0,
+     "total_ms": 0
+    },
+    "transactions": 4174,
+    "checkout": {
+     "checkouts": 4193,
+     "unattributed": 4193,
+     "capacity_waits": 14,
+     "wait_total_ms": 127,
+     "hold_total_ms": 10701.7,
+     "connects": 0
+    },
+    "frames": 0
+   },
+   "contention_db": {
+    "outbox_scan": {
+     "statements": 3,
+     "calls": 7107,
+     "total_ms": 66948.2
+    },
+    "scope_lock": {
+     "statements": 3,
+     "calls": 3169,
+     "total_ms": 12456
+    },
+    "checkout": {
+     "checkouts": 189771,
+     "unattributed": 20438,
+     "capacity_waits": 12942,
+     "wait_total_ms": 319986.3,
+     "hold_total_ms": 583675.3,
+     "connects": 1
+    },
+    "lock_wait_samples": 4,
+    "samples": 108,
+    "max_ungranted": 3
+   },
+   "memory": {
+    "idle_rss_mib": 243.7,
+    "contention_rss_max_mib": 347.6,
+    "run_hwm_mib": 350.2,
+    "archive": {
+     "streams": [
+      {
+       "status": 200,
+       "compressed_bytes": 86387623,
+       "receipt_match": true,
+       "ms": 42531.5
+      },
+      {
+       "status": 200,
+       "compressed_bytes": 34812545,
+       "receipt_match": true,
+       "ms": 19473.3
+      }
+     ],
+     "rss_before_mib": 283.1,
+     "rss_during_mib": 338.4,
+     "incremental_mib": 55.3
+    },
+    "large_bodies": {
+     "appends": 12,
+     "ok": 12,
+     "ms": 1704.2,
+     "incremental_mib": 20.4
+    }
+   },
+   "stuck": {
+    "hold_s": 8,
+    "upgrade_ok": true,
+    "blocked_closed_by_1500ms": 870.1,
+    "late_upgrade_ok": true,
+    "late_checkpoint_ms": 39,
+    "release_ms": 7584.9,
+    "lock_waiters": {
+     "max": 1,
+     "last_seen_ms": 7312
+    },
+    "lock_waiters_after_release": 0,
+    "writes": {
+     "during_hold": 31,
+     "after_release": 5,
+     "failed": 0,
+     "undelivered": 33,
+     "during_hold_ms": {
+      "n": 3,
+      "p50": 561.9,
+      "p95": 687.1,
+      "p99": 687.1,
+      "max": 687.1
+     },
+     "after_release_ms": {
+      "n": 0,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null
+     },
+     "over_1s_sent_at_ms": []
+    },
+    "blocked_outcome": {
+     "code": 1006,
+     "ms": 870.1
+    },
+    "after_release_upgrade_ok": true,
+    "after_release_checkpoint_ms": 31.1
+   },
+   "evidence": [
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "3/3",
+     "proofs": {
+      "verified": 22
+     },
+     "proof_p95_ms": 333.7
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "3/3",
+     "proofs": {
+      "verified": 22
+     },
+     "proof_p95_ms": 416.5
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "1/1",
+     "proofs": {},
+     "proof_p95_ms": null
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "1/1",
+     "proofs": {},
+     "proof_p95_ms": null
+    }
+   ],
+   "observers": {
+    "hot": 4,
+    "measured": 2,
+    "warm": 1,
+    "empty": 16,
+    "stalled": 1,
+    "blocked": 1,
+    "late": 2,
+    "upgrade_ms": {
+     "n": 23,
+     "p50": 1.1,
+     "p95": 2.2,
+     "p99": 2.4,
+     "max": 2.4
+    }
+   },
+   "server_log": {
+    "joined": 17091,
+    "foreground_tail": {
+     "n": 628,
+     "complete_ms": 104.5,
+     "db_wait_ms": 52.5,
+     "db_hold_ms": 54.1
+    },
+    "outcomes": {
+     "completed": 17091
+    },
+    "events": {
+     "websocket_upgrade:accepted:canonical": {
+      "count": 27,
+      "max_ms": 0.2
+     },
+     "websocket_replay:completed:initial": {
+      "count": 26,
+      "max_ms": 29.7
+     },
+     "session_prefix_proof:verified": {
+      "count": 44,
+      "max_ms": 147.3
+     },
+     "request_log:/api/v1/ws:null:upgrade_closed:upgrade": {
+      "count": 27,
+      "max_ms": 180526.5
+     },
+     "websocket_turn:retired_write_timeout": {
+      "count": 1,
+      "max_ms": 260
+     },
+     "websocket_replay:retired:live": {
+      "count": 5,
+      "max_ms": 751.4
+     },
+     "websocket_connection:closed:canonical": {
+      "count": 27,
+      "max_ms": 180526.3
+     },
+     "websocket_turn:retired_deadline": {
+      "count": 5,
+      "max_ms": 751
+     },
+     "websocket_turn:retired_closing": {
+      "count": 1,
+      "max_ms": 232.5
+     },
+     "websocket_cleanup:unfinished": {
+      "count": 1,
+      "max_ms": 250.2
+     },
+     "websocket_replay:retired:initial": {
+      "count": 1,
+      "max_ms": 1001.2
+     },
+     "websocket_reclaim:reclaimed": {
+      "count": 1,
+      "max_ms": 6835.4
+     }
+    }
+   },
+   "drain": {
+    "stop_ms": 693.1,
+    "exit_code": 130,
+    "shutdown_logged": true,
+    "warnings": [],
+    "other_lines": []
+   }
+  },
+  {
+   "run": "before-3",
+   "revision": "7127a3d974e1792b0446bbfb3a61e0607e66a457",
+   "started_at": "2026-11-16T23:56:52.622Z",
+   "finished_at": "2026-11-17T00:00:05.886Z",
+   "error": null,
+   "durations_ms": {
+    "idle": 30009.1,
+    "contention": 126440.6
+   },
+   "foreground": {
+    "pooled": {
+     "n": 14762,
+     "p50": 11,
+     "p95": 123,
+     "p99": 316.3,
+     "max": 607.4,
+     "failures": 0
+    },
+    "p95_by_variant": {
+     "task_get": 9.9,
+     "task_update_fields": 324.1,
+     "task_list_query": 13.3,
+     "search_unified": 174,
+     "nav_root": 281.8,
+     "nav_project": 36.7,
+     "nav_focus": 52.3,
+     "planning_counts": 9.8,
+     "project_overview": 24.6,
+     "observation_list_query": 17.4
+    },
+    "n_by_variant": {
+     "task_get": 1479,
+     "task_update_fields": 1479,
+     "task_list_query": 1477,
+     "search_unified": 1477,
+     "nav_root": 1475,
+     "nav_project": 1475,
+     "nav_focus": 1475,
+     "planning_counts": 1475,
+     "project_overview": 1475,
+     "observation_list_query": 1475
+    }
+   },
+   "capture": {
+    "seeded_append": {
+     "n": 1448,
+     "p50": 13.9,
+     "p95": 68.1,
+     "p99": 124.5,
+     "max": 295.3
+    },
+    "proof_append": {
+     "n": 705,
+     "p50": 15.2,
+     "p95": 78,
+     "p99": 137.4,
+     "max": 443.8
+    },
+    "proof_submit": {
+     "n": 44,
+     "p50": 7.8,
+     "p95": 53.8,
+     "p99": 464.2,
+     "max": 464.2
+    },
+    "proof_poll": {
+     "n": 48,
+     "p50": 4,
+     "p95": 10,
+     "p99": 25.7,
+     "max": 25.7
+    },
+    "statuses": {
+     "seeded_append": {
+      "200": 1448
+     },
+     "proof_append": {
+      "200": 705
+     },
+     "large_append": {
+      "200": 12
+     }
+    }
+   },
+   "hot_writes": {
+    "n": 1919,
+    "p50": 94,
+    "p95": 294.9,
+    "p99": 417.3,
+    "max": 614.6,
+    "status": {
+     "200": 1919
+    }
+   },
+   "delivery": {
+    "writes_ok": 1919,
+    "delivered_by_phase_end": [
+     246,
+     246,
+     246,
+     246
+    ],
+    "commit_to_frame_p50": [
+     586.5,
+     589.1,
+     563.1,
+     608.2
+    ],
+    "commit_to_frame_p95": [
+     1112.9,
+     1119.6,
+     1100.3,
+     1123.8
+    ],
+    "commit_to_frame_max": [
+     1388.2,
+     1389,
+     1176.7,
+     1387.8
+    ],
+    "max_gap_ms": [
+     1159,
+     1158.6,
+     1158.6,
+     1158.8
+    ]
+   },
+   "stalled": {
+    "handshake": "HTTP/1.1 101 WebSocket Protocol Handshake",
+    "bytes_buffered": 2286899,
+    "change_frames": 1919,
+    "server_closed_before_resume": false
+   },
+   "snapshots_quiet": [
+    {
+     "workspace": "W0",
+     "profile": "full_v1",
+     "pages": 46,
+     "items": 4533,
+     "ms": 1287.3,
+     "item_insert_calls": 4533,
+     "scope_lock_calls": 47,
+     "same_scope_writer_max_ms": 871.2,
+     "same_scope_writer_n": 7
+    },
+    {
+     "workspace": "W0",
+     "profile": "workspace_shell_v1",
+     "pages": 1,
+     "items": 1,
+     "ms": 7.5,
+     "item_insert_calls": 1,
+     "scope_lock_calls": 2,
+     "same_scope_writer_max_ms": 36.3,
+     "same_scope_writer_n": 1
+    },
+    {
+     "workspace": "HOT",
+     "profile": "full_v1",
+     "pages": 45,
+     "items": 4480,
+     "ms": 1319.7,
+     "item_insert_calls": 4480,
+     "scope_lock_calls": 46,
+     "same_scope_writer_max_ms": 936.7,
+     "same_scope_writer_n": 7
+    }
+   ],
+   "snapshots_under_load": {
+    "full_hot": {
+     "error": "resync_full_v1 failed with HTTP 500 Something went wrong"
+    },
+    "shell_measured": {
+     "at_s": 25.2,
+     "profile": "workspace_shell_v1",
+     "pages": 1,
+     "items": 1,
+     "ms": 19.3
+    }
+   },
+   "idle": {
+    "ms": 30009.1,
+    "sockets": 23,
+    "outbox_scan": {
+     "statements": 3,
+     "calls": 240,
+     "total_ms": 1545
+    },
+    "authorization": {
+     "statements": 1,
+     "calls": 24,
+     "total_ms": 0
+    },
+    "scope_lock": {
+     "statements": 1,
+     "calls": 24,
+     "total_ms": 2
+    },
+    "transactions": 3776,
+    "checkout": null,
+    "frames": 388
+   },
+   "contention_db": {
+    "outbox_scan": {
+     "statements": 4,
+     "calls": 221,
+     "total_ms": 897.5
+    },
+    "scope_lock": {
+     "statements": 3,
+     "calls": 219,
+     "total_ms": 393.1
+    },
+    "checkout": null,
+    "lock_wait_samples": 0,
+    "samples": 115,
+    "max_ungranted": 0
+   },
+   "memory": {
+    "idle_rss_mib": 223.7,
+    "contention_rss_max_mib": 377.3,
+    "run_hwm_mib": 421.3,
+    "archive": {
+     "streams": [
+      {
+       "status": 200,
+       "compressed_bytes": 86387623,
+       "receipt_match": true,
+       "ms": 86208.9
+      },
+      {
+       "status": 200,
+       "compressed_bytes": 34812545,
+       "receipt_match": true,
+       "ms": 51006.3
+      }
+     ],
+     "rss_before_mib": 266.3,
+     "rss_during_mib": 377.3,
+     "incremental_mib": 111
+    },
+    "large_bodies": {
+     "appends": 12,
+     "ok": 12,
+     "ms": 1471,
+     "incremental_mib": 5.6
+    }
+   },
+   "stuck": {
+    "hold_s": 8,
+    "upgrade_ok": true,
+    "blocked_closed_by_1500ms": null,
+    "late_upgrade_ok": true,
+    "late_checkpoint_ms": 160.6,
+    "release_ms": 7818.3,
+    "lock_waiters": {
+     "max": 1,
+     "last_seen_ms": 7683.8
+    },
+    "lock_waiters_after_release": 0,
+    "writes": {
+     "during_hold": 31,
+     "after_release": 6,
+     "failed": 0,
+     "undelivered": 0,
+     "during_hold_ms": {
+      "n": 31,
+      "p50": 5224.9,
+      "p95": 7648.2,
+      "p99": 8018.7,
+      "max": 8018.7
+     },
+     "after_release_ms": {
+      "n": 6,
+      "p50": 783.5,
+      "p95": 982.7,
+      "p99": 982.7,
+      "max": 982.7
+     },
+     "over_1s_sent_at_ms": [
+      0.4,
+      254.6,
+      553.6,
+      761.5,
+      1030.3,
+      1361.7,
+      1623.7,
+      1777.1,
+      2263.2,
+      2295.5,
+      2750.4,
+      2784.4
+     ]
+    },
+    "blocked_outcome": {
+     "open": true,
+     "frames": [
+      "checkpoint",
+      "session_activity_changed",
+      "session_activity_changed",
+      "session_activity_changed"
+     ]
+    },
+    "after_release_upgrade_ok": true,
+    "after_release_checkpoint_ms": 15.3,
+    "observer_closures": []
+   },
+   "evidence": [
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "3/3",
+     "proofs": {
+      "verified": 22
+     },
+     "proof_p95_ms": 224.9
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "3/3",
+     "proofs": {
+      "verified": 22
+     },
+     "proof_p95_ms": 267
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "1/1",
+     "proofs": {},
+     "proof_p95_ms": null
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "1/1",
+     "proofs": {},
+     "proof_p95_ms": null
+    }
+   ],
+   "observers": {
+    "hot": 4,
+    "measured": 2,
+    "warm": 1,
+    "empty": 16,
+    "stalled": 1,
+    "blocked": 1,
+    "late": 2,
+    "upgrade_ms": {
+     "n": 23,
+     "p50": 0.9,
+     "p95": 2.9,
+     "p99": 3.6,
+     "max": 3.6
+    }
+   },
+   "server_log": {
+    "joined": 0,
+    "foreground_tail": {
+     "n": 0,
+     "complete_ms": null,
+     "db_wait_ms": null,
+     "db_hold_ms": null
+    },
+    "outcomes": {},
+    "events": {
+     "request_log:/api/v1/ws:500:-:-": {
+      "count": 27,
+      "max_ms": 0
+     }
+    }
+   },
+   "drain": {
+    "stop_ms": 659.7,
+    "exit_code": 130,
+    "shutdown_logged": true,
+    "warnings": [],
+    "other_lines": []
+   }
+  },
+  {
+   "run": "after-4",
+   "revision": "8d5101d06c1c1ad839b3449f9292d7fb11141eef",
+   "started_at": "2026-11-17T00:00:37.764Z",
+   "finished_at": "2026-11-17T00:03:49.608Z",
+   "error": null,
+   "durations_ms": {
+    "idle": 30004.2,
+    "contention": 120949.2
+   },
+   "foreground": {
+    "pooled": {
+     "n": 12589,
+     "p50": 12,
+     "p95": 152.7,
+     "p99": 339.3,
+     "max": 632.6,
+     "failures": 0
+    },
+    "p95_by_variant": {
+     "task_get": 34.2,
+     "task_update_fields": 331.1,
+     "task_list_query": 27.3,
+     "search_unified": 172.5,
+     "nav_root": 292.1,
+     "nav_project": 101.7,
+     "nav_focus": 153.4,
+     "planning_counts": 25.9,
+     "project_overview": 71.6,
+     "observation_list_query": 38
+    },
+    "n_by_variant": {
+     "task_get": 1260,
+     "task_update_fields": 1260,
+     "task_list_query": 1260,
+     "search_unified": 1260,
+     "nav_root": 1260,
+     "nav_project": 1259,
+     "nav_focus": 1259,
+     "planning_counts": 1257,
+     "project_overview": 1257,
+     "observation_list_query": 1257
+    }
+   },
+   "capture": {
+    "seeded_append": {
+     "n": 1423,
+     "p50": 13,
+     "p95": 107.8,
+     "p99": 274.7,
+     "max": 420.9
+    },
+    "proof_append": {
+     "n": 690,
+     "p50": 13.7,
+     "p95": 123.5,
+     "p99": 298.1,
+     "max": 425.2
+    },
+    "proof_submit": {
+     "n": 44,
+     "p50": 7.3,
+     "p95": 78.6,
+     "p99": 173.5,
+     "max": 173.5
+    },
+    "proof_poll": {
+     "n": 48,
+     "p50": 4.2,
+     "p95": 17.7,
+     "p99": 282.4,
+     "max": 282.4
+    },
+    "statuses": {
+     "seeded_append": {
+      "200": 1423
+     },
+     "proof_append": {
+      "200": 690
+     },
+     "large_append": {
+      "200": 12
+     }
+    }
+   },
+   "hot_writes": {
+    "n": 1921,
+    "p50": 105.9,
+    "p95": 311.5,
+    "p99": 445.2,
+    "max": 552.4,
+    "status": {
+     "200": 1921
+    }
+   },
+   "delivery": {
+    "writes_ok": 1921,
+    "delivered_by_phase_end": [
+     1921,
+     1921,
+     1921,
+     1921
+    ],
+    "commit_to_frame_p50": [
+     245,
+     247,
+     243.7,
+     243.6
+    ],
+    "commit_to_frame_p95": [
+     599.5,
+     598,
+     594.1,
+     591
+    ],
+    "commit_to_frame_max": [
+     949.2,
+     950.4,
+     950.6,
+     950.5
+    ],
+    "max_gap_ms": [
+     937.2,
+     937.2,
+     937.1,
+     937.2
+    ]
+   },
+   "stalled": {
+    "handshake": "HTTP/1.1 101 WebSocket Protocol Handshake",
+    "bytes_buffered": 299941,
+    "change_frames": 243,
+    "server_closed_before_resume": true
+   },
+   "snapshots_quiet": [
+    {
+     "workspace": "W0",
+     "profile": "full_v1",
+     "pages": 46,
+     "items": 4533,
+     "ms": 929.3,
+     "item_insert_calls": 18,
+     "scope_lock_calls": 47,
+     "same_scope_writer_max_ms": 266.8,
+     "same_scope_writer_n": 8
+    },
+    {
+     "workspace": "W0",
+     "profile": "workspace_shell_v1",
+     "pages": 1,
+     "items": 1,
+     "ms": 262.5,
+     "item_insert_calls": 1,
+     "scope_lock_calls": 2,
+     "same_scope_writer_max_ms": 263,
+     "same_scope_writer_n": 1
+    },
+    {
+     "workspace": "HOT",
+     "profile": "full_v1",
+     "pages": 45,
+     "items": 4480,
+     "ms": 605.2,
+     "item_insert_calls": 18,
+     "scope_lock_calls": 46,
+     "same_scope_writer_max_ms": 270.9,
+     "same_scope_writer_n": 6
+    }
+   ],
+   "snapshots_under_load": {
+    "full_hot": {
+     "at_s": 20,
+     "profile": "full_v1",
+     "pages": 45,
+     "items": 4480,
+     "ms": 1347.6
+    },
+    "shell_measured": {
+     "at_s": 25,
+     "profile": "workspace_shell_v1",
+     "pages": 1,
+     "items": 1,
+     "ms": 8.3
+    }
+   },
+   "idle": {
+    "ms": 30004.2,
+    "sockets": 23,
+    "outbox_scan": {
+     "statements": 1,
+     "calls": 567,
+     "total_ms": 5181.9
+    },
+    "authorization": {
+     "statements": 0,
+     "calls": 0,
+     "total_ms": 0
+    },
+    "scope_lock": {
+     "statements": 0,
+     "calls": 0,
+     "total_ms": 0
+    },
+    "transactions": 4217,
+    "checkout": {
+     "checkouts": 4237,
+     "unattributed": 4237,
+     "capacity_waits": 13,
+     "wait_total_ms": 117.3,
+     "hold_total_ms": 10141.5,
+     "connects": 0
+    },
+    "frames": 0
+   },
+   "contention_db": {
+    "outbox_scan": {
+     "statements": 3,
+     "calls": 7777,
+     "total_ms": 74433.4
+    },
+    "scope_lock": {
+     "statements": 3,
+     "calls": 3405,
+     "total_ms": 13257.5
+    },
+    "checkout": {
+     "checkouts": 191682,
+     "unattributed": 22141,
+     "capacity_waits": 12560,
+     "wait_total_ms": 305546.2,
+     "hold_total_ms": 593578.7,
+     "connects": 0
+    },
+    "lock_wait_samples": 5,
+    "samples": 108,
+    "max_ungranted": 3
+   },
+   "memory": {
+    "idle_rss_mib": 246.3,
+    "contention_rss_max_mib": 335.7,
+    "run_hwm_mib": 341.4,
+    "archive": {
+     "streams": [
+      {
+       "status": 200,
+       "compressed_bytes": 86387623,
+       "receipt_match": true,
+       "ms": 45791.6
+      },
+      {
+       "status": 200,
+       "compressed_bytes": 34812545,
+       "receipt_match": true,
+       "ms": 16609.7
+      }
+     ],
+     "rss_before_mib": 283.3,
+     "rss_during_mib": 332.6,
+     "incremental_mib": 49.3
+    },
+    "large_bodies": {
+     "appends": 12,
+     "ok": 12,
+     "ms": 1631.6,
+     "incremental_mib": 18.2
+    }
+   },
+   "stuck": {
+    "hold_s": 8,
+    "upgrade_ok": true,
+    "blocked_closed_by_1500ms": 874.2,
+    "late_upgrade_ok": true,
+    "late_checkpoint_ms": 10.4,
+    "release_ms": 7622.8,
+    "lock_waiters": {
+     "max": 1,
+     "last_seen_ms": 7195.4
+    },
+    "lock_waiters_after_release": 0,
+    "writes": {
+     "during_hold": 30,
+     "after_release": 5,
+     "failed": 0,
+     "undelivered": 25,
+     "during_hold_ms": {
+      "n": 10,
+      "p50": 170.4,
+      "p95": 859.1,
+      "p99": 859.1,
+      "max": 859.1
+     },
+     "after_release_ms": {
+      "n": 0,
+      "p50": null,
+      "p95": null,
+      "p99": null,
+      "max": null
+     },
+     "over_1s_sent_at_ms": []
+    },
+    "blocked_outcome": {
+     "code": 1006,
+     "ms": 874.2
+    },
+    "after_release_upgrade_ok": true,
+    "after_release_checkpoint_ms": 17.6,
+    "observer_closures": [
+     {
+      "name": "hot-0",
+      "code": 1006,
+      "ms": 6654.6
+     },
+     {
+      "name": "hot-1",
+      "code": 1006,
+      "ms": 5555
+     },
+     {
+      "name": "hot-3",
+      "code": 1006,
+      "ms": 3538.9
+     },
+     {
+      "name": "blocked",
+      "code": 1006,
+      "ms": 874.2
+     }
+    ]
+   },
+   "evidence": [
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "3/3",
+     "proofs": {
+      "verified": 22
+     },
+     "proof_p95_ms": 302.1
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "3/3",
+     "proofs": {
+      "verified": 22
+     },
+     "proof_p95_ms": 411
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "1/1",
+     "proofs": {},
+     "proof_p95_ms": null
+    },
+    {
+     "terminate": 200,
+     "sha_match": true,
+     "ranges": "1/1",
+     "proofs": {},
+     "proof_p95_ms": null
+    }
+   ],
+   "observers": {
+    "hot": 4,
+    "measured": 2,
+    "warm": 1,
+    "empty": 16,
+    "stalled": 1,
+    "blocked": 1,
+    "late": 2,
+    "upgrade_ms": {
+     "n": 23,
+     "p50": 1,
+     "p95": 2.9,
+     "p99": 3.7,
+     "max": 3.7
+    }
+   },
+   "server_log": {
+    "joined": 17123,
+    "foreground_tail": {
+     "n": 630,
+     "complete_ms": 99.6,
+     "db_wait_ms": 48.1,
+     "db_hold_ms": 54
+    },
+    "outcomes": {
+     "completed": 17123
+    },
+    "events": {
+     "websocket_upgrade:accepted:canonical": {
+      "count": 27,
+      "max_ms": 0.1
+     },
+     "websocket_replay:completed:initial": {
+      "count": 26,
+      "max_ms": 11
+     },
+     "session_prefix_proof:verified": {
+      "count": 44,
+      "max_ms": 172.9
+     },
+     "request_log:/api/v1/ws:null:upgrade_closed:upgrade": {
+      "count": 27,
+      "max_ms": 180739.2
+     },
+     "websocket_turn:retired_write_timeout": {
+      "count": 1,
+      "max_ms": 268.1
+     },
+     "websocket_replay:retired:live": {
+      "count": 4,
+      "max_ms": 751.9
+     },
+     "websocket_connection:closed:canonical": {
+      "count": 27,
+      "max_ms": 180739.1
+     },
+     "websocket_turn:retired_deadline": {
+      "count": 4,
+      "max_ms": 751.1
+     },
+     "websocket_turn:retired_closing": {
+      "count": 1,
+      "max_ms": 411.4
+     },
+     "websocket_cleanup:unfinished": {
+      "count": 1,
+      "max_ms": 250.7
+     },
+     "websocket_replay:retired:initial": {
+      "count": 1,
+      "max_ms": 1001.8
+     },
+     "websocket_reclaim:reclaimed": {
+      "count": 1,
+      "max_ms": 7560.9
+     }
+    }
+   },
+   "drain": {
+    "stop_ms": 684.4,
+    "exit_code": 130,
+    "shutdown_logged": true,
+    "warnings": [],
+    "other_lines": []
+   }
+  }
+ ],
+ "preliminary_runs": "after-1, before-1 and after-2 ran earlier runner revisions (bulk appends shared the proof sessions; single-write stuck probe) and are not gate inputs. They agree in direction: foreground pooled p95 159.1 / 148.9 / 154.5 ms; cheap-read p95 2-3.5 times higher after; snapshot item inserts 18 vs 4,533; stalled observer retired after but not before; before WebSocket request-log status 500.",
+ "diagnostic_run": {
+  "run": "diag-after-n4",
+  "note": "After image with GHCRTS=-N4 (4 capabilities, so the 10-connection pool has 4 multi-connection stripes). One run, not matched: it changes RTS parallelism as well as striping.",
+  "foreground_pooled": {
+   "n": 14061,
+   "p50": 11.8,
+   "p95": 147,
+   "p99": 331.8,
+   "max": 805.3,
+   "failures": 0
+  },
+  "foreground_p95_by_variant": {
+   "task_get": 23,
+   "task_update_fields": 366.9,
+   "task_list_query": 25.6,
+   "search_unified": 45.9,
+   "nav_root": 275.2,
+   "nav_project": 47.4,
+   "nav_focus": 64.4,
+   "planning_counts": 23.1,
+   "project_overview": 49.1,
+   "observation_list_query": 25.3
+  },
+  "seeded_append_p95_ms": 52.3,
+  "delivery_commit_to_frame_p95": [
+   489.6,
+   484.4,
+   488.5,
+   489.6
+  ],
+  "stuck": {
+   "hold_s": 8,
+   "upgrade_ok": true,
+   "blocked_closed_by_1500ms": 903.5,
+   "late_upgrade_ok": true,
+   "late_checkpoint_ms": 10.9,
+   "release_ms": 7748.8,
+   "lock_waiters": {
+    "max": 1,
+    "last_seen_ms": 7232.7
+   },
+   "lock_waiters_after_release": 0,
+   "writes": {
+    "during_hold": 31,
+    "after_release": 5,
+    "failed": 0,
+    "undelivered": 0,
+    "during_hold_ms": {
+     "n": 31,
+     "p50": 469.5,
+     "p95": 1385.1,
+     "p99": 1417.8,
+     "max": 1417.8
+    },
+    "after_release_ms": {
+     "n": 5,
+     "p50": 918.4,
+     "p95": 1170.4,
+     "p99": 1170.4,
+     "max": 1170.4
+    },
+    "over_1s_sent_at_ms": [
+     1397.9,
+     1501.5,
+     3226.1,
+     3365.5,
+     3507.9,
+     3754,
+     5770.2,
+     5927.9,
+     6003.7
+    ]
+   },
+   "blocked_outcome": {
+    "code": 1006,
+    "ms": 903.5
+   },
+   "after_release_upgrade_ok": true,
+   "after_release_checkpoint_ms": 18,
+   "observer_closures": [
+    {
+     "name": "blocked",
+     "code": 1006,
+     "ms": 903.5
+    }
+   ]
+  },
+  "contention_db": {
+   "outbox_scan": {
+    "statements": 3,
+    "calls": 10511,
+    "total_ms": 90907.8
+   },
+   "scope_lock": {
+    "statements": 3,
+    "calls": 4565,
+    "total_ms": 25136.7
+   },
+   "checkout": {
+    "checkouts": 207234,
+    "unattributed": 28550,
+    "capacity_waits": 11870,
+    "wait_total_ms": 143056.1,
+    "hold_total_ms": 732438.7,
+    "connects": 7
+   },
+   "lock_wait_samples": 2,
+   "samples": 104,
+   "max_ungranted": 3
+  }
+ },
+ "gates": [
+  {
+   "name": "Ordinary foreground p95 regression vs matched baseline",
+   "source": "docs/reference/session-sync-performance.md (unrelated foreground/ordinary-MCP p95 <= 10%); docs/reference/sealed-session-archives.md (active/live and unrelated foreground, matched p95 <= 10%)",
+   "limit": "after/before <= 1.10",
+   "result": "FAIL",
+   "statistic": {
+    "before_pooled_p95_ms": [
+     139.9,
+     123
+    ],
+    "after_pooled_p95_ms": [
+     156.4,
+     152.7
+    ],
+    "ratio_of_means": 1.176,
+    "margin": -0.076,
+    "most_favourable_pairing_ratio": 1.091
+   },
+   "by_variant": {
+    "task_get": {
+     "before_p95_ms": 10.8,
+     "after_p95_ms": 33.5,
+     "ratio": 3.097
+    },
+    "task_update_fields": {
+     "before_p95_ms": 326.4,
+     "after_p95_ms": 334.8,
+     "ratio": 1.026
+    },
+    "task_list_query": {
+     "before_p95_ms": 12.8,
+     "after_p95_ms": 29.2,
+     "ratio": 2.29
+    },
+    "search_unified": {
+     "before_p95_ms": 204.2,
+     "after_p95_ms": 171.5,
+     "ratio": 0.84
+    },
+    "nav_root": {
+     "before_p95_ms": 282.6,
+     "after_p95_ms": 289.3,
+     "ratio": 1.024
+    },
+    "nav_project": {
+     "before_p95_ms": 41.3,
+     "after_p95_ms": 96.5,
+     "ratio": 2.335
+    },
+    "nav_focus": {
+     "before_p95_ms": 60.3,
+     "after_p95_ms": 156,
+     "ratio": 2.589
+    },
+    "planning_counts": {
+     "before_p95_ms": 9.8,
+     "after_p95_ms": 25.5,
+     "ratio": 2.607
+    },
+    "project_overview": {
+     "before_p95_ms": 31.6,
+     "after_p95_ms": 71.9,
+     "ratio": 2.281
+    },
+    "observation_list_query": {
+     "before_p95_ms": 16.7,
+     "after_p95_ms": 37.9,
+     "ratio": 2.276
+    }
+   },
+   "note": "Seven of ten routes regress 2.3-3.1 times at p95; task field updates, root navigation (+2-3%) and unified search (-16%) do not. No foreground request failed in any run."
+  },
+  {
+   "name": "Archive-related incremental server working set",
+   "source": "docs/reference/sealed-session-archives.md budgets",
+   "limit": "<= 128 MiB over the matching foreground baseline",
+   "result": "PASS",
+   "statistic": {
+    "after_mib": [
+     55.3,
+     49.3
+    ],
+    "before_mib": [
+     108.1,
+     111
+    ],
+    "margin_mib": 72.7
+   },
+   "note": "Whole-process RSS at 1 s cadence during two concurrent streams of 86.4 and 34.8 MB under the contention load; not a continuous peak. Receipts matched for every stream. Only these two archive sizes were exercised, not the fixed-budget 1 MiB/100 MiB/1 GiB series."
+  },
+  {
+   "name": "Stalled observer: explicit retirement and healthy observer progress",
+   "source": "ADR A01M39RTNXZ8BWZ54DXPN50GCCM (250 ms write deadline; slow observers retired while others progress)",
+   "limit": "stalled socket retired by the write deadline; healthy observers receive every committed change",
+   "result": "PASS",
+   "statistic": {
+    "after_stalled_buffered_bytes": [
+     296681,
+     299941
+    ],
+    "after_retired_write_timeout_turn_ms_max": [
+     260,
+     268.1
+    ],
+    "after_delivered_by_phase_end": [
+     [
+      1920,
+      1920,
+      1920,
+      1920
+     ],
+     [
+      1921,
+      1921,
+      1921,
+      1921
+     ]
+    ],
+    "after_commit_to_frame_p95_ms": [
+     [
+      698,
+      687.4,
+      696.1,
+      693
+     ],
+     [
+      599.5,
+      598,
+      594.1,
+      591
+     ]
+    ],
+    "before_delivered_by_phase_end": [
+     [
+      320,
+      319,
+      346,
+      321
+     ],
+     [
+      246,
+      246,
+      246,
+      246
+     ]
+    ],
+    "before_stalled_buffered_bytes": [
+     2289400,
+     2286899
+    ]
+   }
+  },
+  {
+   "name": "Stuck canonical catch-up (6d9ef144) beside healthy peers",
+   "source": "ADR A01M39RTNXZ8BWZ54DXPN50GCCM (750 ms work, 250 ms cleanup; admission and dispatch continue; reclamation; drain)",
+   "limit": "admission open, dispatch continues, healthy observers progress, stuck owner reclaimed, clean drain",
+   "result": "FAIL (healthy observers progress)",
+   "parts": {
+    "admission_open": "PASS",
+    "dispatch_continues": "PASS",
+    "healthy_observers_progress": "FAIL",
+    "reclamation": "PASS",
+    "drain": "PASS"
+   },
+   "statistic": {
+    "after_blocked_retired_ms": [
+     870.1,
+     874.2
+    ],
+    "after_late_checkpoint_ms": [
+     39,
+     10.4
+    ],
+    "after_writes_not_delivered_to_all_four_hot_observers": [
+     "33/36",
+     "25/35"
+    ],
+    "after_live_turns_retired_deadline": [
+     4,
+     3
+    ],
+    "after4_observer_closures": [
+     {
+      "name": "hot-0",
+      "code": 1006,
+      "ms": 6654.6
+     },
+     {
+      "name": "hot-1",
+      "code": 1006,
+      "ms": 5555
+     },
+     {
+      "name": "hot-3",
+      "code": 1006,
+      "ms": 3538.9
+     },
+     {
+      "name": "blocked",
+      "code": 1006,
+      "ms": 874.2
+     }
+    ],
+    "after_reclaim_quarantine_ms": [
+     6835.4,
+     7560.9
+    ],
+    "after_drain": [
+     {
+      "stop_ms": 693.1,
+      "exit_code": 130,
+      "shutdown_logged": true,
+      "warnings": [],
+      "other_lines": []
+     },
+     {
+      "stop_ms": 684.4,
+      "exit_code": 130,
+      "shutdown_logged": true,
+      "warnings": [],
+      "other_lines": []
+     }
+    ],
+    "before_during_hold_delivery_ms": [
+     {
+      "n": 32,
+      "p50": 5064.9,
+      "p95": 8195.6,
+      "p99": 8254.7,
+      "max": 8254.7
+     },
+     {
+      "n": 31,
+      "p50": 5224.9,
+      "p95": 7648.2,
+      "p99": 8018.7,
+      "max": 8018.7
+     }
+    ],
+    "before_blocked": [
+     {
+      "open": true,
+      "frames": [
+       "checkpoint",
+       "session_activity_changed",
+       "session_activity_changed",
+       "session_activity_changed"
+      ]
+     },
+     {
+      "open": true,
+      "frames": [
+       "checkpoint",
+       "session_activity_changed",
+       "session_activity_changed",
+       "session_activity_changed"
+      ]
+     }
+    ]
+   },
+   "note": "Healthy hot-workspace sockets were retired by the 750 ms work deadline while an unrelated scope lock was held (after-3: 4 retirements; after-4: three of four hot sockets closed at 3.5-6.7 s). The focused 6d9ef144 spec, which pre-warms every pool stripe and dispatches one batch directly, passes. The before revision kept every socket but stalled all dispatch until the lock was released."
+  },
+  {
+   "name": "Snapshot write round trips and replay cut",
+   "source": "Task acceptance; ADR A01M39RTNXZ8BWZ54DXPN50GCCM canonical snapshots under the scope lock",
+   "limit": "fewer snapshot write round trips; snapshot/replay cut preserved",
+   "result": "PASS",
+   "statistic": {
+    "item_insert_calls_full_measured": {
+     "before": [
+      4533,
+      4533
+     ],
+     "after": [
+      18,
+      18
+     ]
+    },
+    "items": 4533,
+    "page_token_and_scope_lock_calls": "unchanged (46 and 47)",
+    "same_scope_writer_max_ms_during_full_snapshot": {
+     "before": [
+      810,
+      805.2,
+      871.2,
+      936.7
+     ],
+     "after": [
+      285.6,
+      343.3,
+      266.8,
+      270.9
+     ]
+    },
+    "full_hot_under_load_ms": {
+     "before": [
+      2143.4,
+      "resync_full_v1 failed with HTTP 500 Something went wrong"
+     ],
+     "after": [
+      1610.7,
+      1347.6
+     ]
+    },
+    "cut": "focused spec \"holds a paginated HTTP snapshot at H and replays a concurrent direct-core commit\" passed"
+   }
+  },
+  {
+   "name": "Proof and evidence receipts",
+   "source": "docs/reference/session-sync-performance.md (bound proofs; control calls complete or report pending within 1 s); task acceptance",
+   "limit": "every proof verified, exact terminate receipts and byte-identical evidence; control calls <= 1 s",
+   "result": "PASS",
+   "statistic": {
+    "proofs_verified": [
+     44,
+     44
+    ],
+    "terminate_sha_match": [
+     "4/4",
+     "4/4"
+    ],
+    "evidence_ranges": [
+     "3/3,3/3,1/1,1/1",
+     "3/3,3/3,1/1,1/1"
+    ],
+    "archive_stream_receipts": [
+     "2/2",
+     "2/2"
+    ],
+    "proof_submit_max_ms": [
+     306.6,
+     173.5
+    ],
+    "proof_poll_max_ms": [
+     131.5,
+     282.4
+    ]
+   },
+   "note": "Same results for the before revision."
+  },
+  {
+   "name": "No full idle authorization scan per empty retained scope",
+   "source": "ADR A01M39RTNXZ8BWZ54DXPN50GCCM; task acceptance",
+   "limit": "idle authorization at most once per elapsed tick, not per empty scope",
+   "result": "PASS",
+   "statistic": {
+    "after_idle_authorization_statements_30s": [
+     0,
+     0
+    ],
+    "before_idle_authorization_statements_30s": [
+     24,
+     24
+    ],
+    "sockets": 23,
+    "empty_scopes": 16,
+    "grant_user_spec": "passed"
+   },
+   "note": "Counts the replay authority statement (the users/workspace_memberships check that runs with each scope-locked replay page; trusted principals short-circuit inside it). Before ran it with scope locks for idle sockets; after ran neither while idle. Local trusted principals skip the separate idle role query, so the grant-user path is qualified only by the focused spec. Idle outbox polling is separate: see findings."
+  },
+  {
+   "name": "Truthful upgrade and HTTP phase telemetry",
+   "source": "docs/reference/websocket-telemetry.md, docs/reference/request-logging.md, docs/reference/request-performance.md",
+   "limit": "upgrades not reported as HTTP failures; WebSocket outcomes match client observations",
+   "result": "PASS",
+   "statistic": {
+    "after_ws_request_log": [
+     "27 of 27 status null, response upgrade, outcome upgrade_closed",
+     "27 of 27 status null, response upgrade, outcome upgrade_closed"
+    ],
+    "before_ws_request_log": "27 of 27 logged with status 500 in both runs",
+    "after_handshake_ms_max": [
+     0.2,
+     0.1
+    ],
+    "after_foreground_requests_joined": [
+     17091,
+     17123
+    ]
+   },
+   "note": "retired_write_timeout matched the stalled observer closed before resume; retired_deadline counts matched observer closures; replay retired:initial matched the blocked catch-up."
+  }
+ ],
+ "observations": {
+  "foreground_tail_after": [
+   {
+    "n": 628,
+    "complete_ms": 104.5,
+    "db_wait_ms": 52.5,
+    "db_hold_ms": 54.1
+   },
+   {
+    "n": 630,
+    "complete_ms": 99.6,
+    "db_wait_ms": 48.1,
+    "db_hold_ms": 54
+   }
+  ],
+  "pool_checkout_after_contention": [
+   {
+    "checkouts": 189771,
+    "unattributed": 20438,
+    "capacity_waits": 12942,
+    "wait_total_ms": 319986.3,
+    "hold_total_ms": 583675.3,
+    "connects": 1
+   },
+   {
+    "checkouts": 191682,
+    "unattributed": 22141,
+    "capacity_waits": 12560,
+    "wait_total_ms": 305546.2,
+    "hold_total_ms": 593578.7,
+    "connects": 0
+   }
+  ],
+  "database_work_per_contention_phase": {
+   "outbox_scan": {
+    "before": [
+     {
+      "statements": 4,
+      "calls": 280,
+      "total_ms": 1185.3
+     },
+     {
+      "statements": 4,
+      "calls": 221,
+      "total_ms": 897.5
+     }
+    ],
+    "after": [
+     {
+      "statements": 3,
+      "calls": 7107,
+      "total_ms": 66948.2
+     },
+     {
+      "statements": 3,
+      "calls": 7777,
+      "total_ms": 74433.4
+     }
+    ]
+   },
+   "scope_lock": {
+    "before": [
+     {
+      "statements": 3,
+      "calls": 319,
+      "total_ms": 1400
+     },
+     {
+      "statements": 3,
+      "calls": 219,
+      "total_ms": 393.1
+     }
+    ],
+    "after": [
+     {
+      "statements": 3,
+      "calls": 3169,
+      "total_ms": 12456
+     },
+     {
+      "statements": 3,
+      "calls": 3405,
+      "total_ms": 13257.5
+     }
+    ]
+   }
+  },
+  "idle_database_work_30s": {
+   "outbox_scan": {
+    "before": [
+     {
+      "statements": 3,
+      "calls": 240,
+      "total_ms": 1613.4
+     },
+     {
+      "statements": 3,
+      "calls": 240,
+      "total_ms": 1545
+     }
+    ],
+    "after": [
+     {
+      "statements": 1,
+      "calls": 554,
+      "total_ms": 5322.4
+     },
+     {
+      "statements": 1,
+      "calls": 567,
+      "total_ms": 5181.9
+     }
+    ]
+   },
+   "transactions": {
+    "before": [
+     3756,
+     3776
+    ],
+    "after": [
+     4174,
+     4217
+    ]
+   },
+   "after_checkouts": [
+    {
+     "checkouts": 4193,
+     "unattributed": 4193,
+     "capacity_waits": 14,
+     "wait_total_ms": 127,
+     "hold_total_ms": 10701.7,
+     "connects": 0
+    },
+    {
+     "checkouts": 4237,
+     "unattributed": 4237,
+     "capacity_waits": 13,
+     "wait_total_ms": 117.3,
+     "hold_total_ms": 10141.5,
+     "connects": 0
+    }
+   ],
+   "idle_frames": {
+    "before": [
+     367,
+     388
+    ],
+    "after": [
+     0,
+     0
+    ]
+   }
+  },
+  "capture": {
+   "seeded_append_p95_ms": {
+    "before": [
+     72.2,
+     68.1
+    ],
+    "after": [
+     101,
+     107.8
+    ],
+    "ratio_of_means": 1.488
+   },
+   "hot_update_p95_ms": {
+    "before": [
+     314.2,
+     294.9
+    ],
+    "after": [
+     331.9,
+     311.5
+    ]
+   },
+   "failures": "none apart from the stated before snapshot error"
+  },
+  "memory_mib": {
+   "before": [
+    {
+     "idle": 250.7,
+     "contention_max": 400.4,
+     "large_bodies_incremental": 18.2
+    },
+    {
+     "idle": 223.7,
+     "contention_max": 377.3,
+     "large_bodies_incremental": 5.6
+    }
+   ],
+   "after": [
+    {
+     "idle": 243.7,
+     "contention_max": 347.6,
+     "large_bodies_incremental": 20.4
+    },
+    {
+     "idle": 246.3,
+     "contention_max": 335.7,
+     "large_bodies_incremental": 18.2
+    }
+   ]
+  }
+ },
+ "findings": [
+  "Foreground regression: under this contention the after revision raises ordinary foreground p95 by 17.6% pooled and 2.3-3.1 times for cheap reads, and seeded capture append p95 by 49%. Its dispatcher and per-socket replay ran 7,107-7,777 outbox scans (67-74 s of statement time) and 3,169-3,405 scope locks per phase against 221-280 scans (0.9-1.2 s) and 219-319 scope locks before. Scans average about 9.5 ms; request-performance finding 3 attributes this to the replay predicate not being index-compatible. About half of the slowest 5% of after foreground time is pool wait. The extra replay work is the leading explanation consistent with these counts and waits, but it is not isolated: the before revision has no pool counters, outbox and scope-lock statement time is only 13.6-14.8% of after held connection time (79-88 s of 584-594 s), and no ablation or matched run separates the scans from other after-only changes (per-request, pool and WebSocket telemetry; 10-15 times the scope-lock calls).",
+  "Stuck catch-up and pool stripes: with ten one-connection stripes, three or four of four healthy hot-workspace sockets were retired by the 750 ms work deadline in each after run while an unrelated scope lock was held. The leading explanation is that the blocked catch-up keeps its pool connection for the whole hold, so delivery turns that need that stripe overrun the budget. The -N4 diagnostic (four multi-connection stripes) kept every healthy socket and delivered every write during the hold (p95 1.39 s), but it is one unmatched run that also cuts RTS capabilities from 24 to 4, so it is consistent with that explanation without isolating it.",
+  "Stalled observers: before, one socket that stopped reading blocked live dispatch for every client until it resumed (13-18% of hot changes delivered by phase end, 2.29 MB queued to the stalled socket). After, it was retired after about 0.3 MB and four healthy sockets received all 1,920-1,921 changes with commit-to-frame p95 0.59-0.70 s.",
+  "Snapshots: batched item writes cut insert round trips from 4,533 to 18 for 4,533 items and same-scope writer waits from 0.81-0.94 s to 0.27-0.34 s; scope-lock and page-token counts are unchanged. One before run failed a full snapshot under load with HTTP 500.",
+  "Idle: after sends no frames and runs no authorization statements while idle, but polls every retained scope once per idle sweep: 554-567 outbox scans per 30 s (5.2-5.3 s of statement time) against 240 (1.5-1.6 s) before. The cost scales with retained scope counters, not sockets. Idle transactions, including background session and archive workers, were about 125/s before (3,756-3,776 per 30 s) and 139-141/s after (4,174-4,217).",
+  "Memory: after streams archives with 49-55 MiB incremental RSS against 108-111 MiB before, and peaks 336-348 MiB under contention against 377-400 MiB before.",
+  "Telemetry: the before revision logs every WebSocket upgrade as HTTP 500; after logs them as upgrade_closed with no status and its WebSocket events agree with what clients observed."
+ ],
+ "dispositions": {
+  "qualified_in_container": [
+   "Stalled-observer retirement and healthy delivery beside it",
+   "Batched snapshot writes with unchanged lock and token work",
+   "Proof, terminate and evidence receipts",
+   "Archive streaming working set within 128 MiB",
+   "Metadata-only WebSocket request logging and WebSocket telemetry outcomes",
+   "Idle authorization without per-scope queries (trusted local principals)",
+   "Stuck catch-up admission, dispatch, reclamation and drain"
+  ],
+  "not_qualified": [
+   "Ordinary foreground p95 within 10% of the matched baseline (FAIL)",
+   "Healthy observer progress beside a stuck catch-up (FAIL with one-connection pool stripes)"
+  ],
+  "production_rollout_decisions": [
+   "Whether to deploy the change-stream delivery repairs (fbc30801) before the replay predicate is index-compatible (request-performance candidate 4). This receipt measured a foreground and capture regression for which the extra replay and polling scans are the leading, unisolated explanation; a matched rerun after that repair is required before claiming the 10% gate.",
+   "Pool striping (request-performance candidate 2) or keeping blocked database work outside delivery-turn budgets, before relying on healthy-peer progress during cold or locked catch-ups. Needs a scoped repair with a matched rerun of the stuck case on production pool settings.",
+   "Idle polling capacity: one outbox scan per retained scope per idle sweep at production scope count and outbox size (7 times this seed). Measure passively after deployment or bound it first.",
+   "OIDC grant-user audiences, TLS and reverse-proxy topologies, and production pool and RTS settings remain unqualified by this container run; confirm with passive production telemetry after any rollout."
+  ]
+ },
+ "container_cannot_satisfy": [
+  "Revocation and per-user idle reauthorization: local authentication makes every principal the trusted local superadmin, so no access_revoked path or authorization query can occur in the container. Covered only by the focused grant-user specs.",
+  "Production request mix, scope count, PostgreSQL version and settings, and network path: the container is synthetic, PostgreSQL 17 with 128 MB shared buffers, plain HTTP on loopback through Docker port publishing."
+ ],
+ "limitations": [
+  "Two matched runs per revision on one shared host; before-to-before pooled p95 varied by 13% (139.9 vs 123.0 ms). The most favourable pairing still regresses 9.1% pooled and every cheap read 2-3 times.",
+  "Closed-loop foreground clients: the faster before revision completed 9.2-17.6% more foreground requests in the same window. Hot writes were open-loop and matched (1,919-1,921).",
+  "No ablation or matched run isolates the explanations in the first two findings; the -N4 diagnostic changes RTS parallelism as well as pool striping.",
+  "The archive working-set gate exercised two streams of 86.4 and 34.8 MB only, not the fixed-budget 1 MiB/100 MiB/1 GiB series of the sealed-archive budgets.",
+  "Delivery latency uses the write response end; frames that arrive before the response are counted as zero or negative and are a lower bound on commit-to-visible time.",
+  "RSS sampling at 1 s does not capture continuous peaks; increments are relative to the preceding 10 s under concurrent load.",
+  "The stalled observer runs on the Docker network; the blocked catch-up holds the lock from a separate psql session for 8 s, longer than the focused spec. Admission limits (128/32) were not approached: 27 sockets shared one audience.",
+  "MCP follower diagnostics (HMEM_SESSION_TRAFFIC_DIAGNOSTICS) were not collected: capture used HTTP clients, not hmem-mcp followers. Server session_traffic warnings did not occur; every terminal proof logged verified.",
+  "The before revision has no request phases, pool counters, WebSocket or session-traffic telemetry, so those comparisons use client and pg_stat_statements measurements only."
+ ],
+ "scratch_disposition": "Teardown removed the hmem-perftest compose stack and network, hmem-perftest-pgdata and hmem-perftest-pgdata-base, images hmem-perftest:7127a3d9 and hmem-perftest:8d5101d0, .tmp/perftest and .tmp/perftest-073d6bfb. No git worktree was created."
+}

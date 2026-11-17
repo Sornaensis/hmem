@@ -1068,7 +1068,7 @@ spec = describe "Session follower" $ do
             | otherwise = putMVar gotMetadata () >> readMVar finishMetadata >> pure (Right (fakeMetadata sid 0))
       proof <- fakeProofTransport sid "" "verified" metadata
       let action verb target body = do
-            when (verb == "GET" && "/prefix-verifications/" `T.isInfixOf` T.pack target) $ do
+            when ("/prefix-verifications" `T.isInfixOf` T.pack target) $ do
               first <- atomically $ do old <- readTVar blockedProof; writeTVar blockedProof True; pure (not old)
               when first $ putMVar gotProof () >> readMVar finishProof
             proof verb target body
@@ -1087,14 +1087,23 @@ spec = describe "Session follower" $ do
         timeout 2000000 (readMVar gotProof) >>= (`shouldSatisfy` isJustValue)
         atomically $ writeTVar clock (addUTCTime 19 epoch)
         threadDelay 80000
-        -- The additional authorized resume checkpoint has also completed;
-        -- the pending proof read and local saves do not refresh its deadline.
-        readTVarIO beats `shouldReturn` 2
+        -- The pending resume proof request and local saves do not refresh
+        -- the acknowledgement or idle heartbeat deadline.
+        readTVarIO beats `shouldReturn` 1
         local <- control registry manager "http://unused.invalid" workspace sid "session_upload_status"
         field "last_ack_at" local `shouldBe` Just (toJSON (addUTCTime 10 epoch))
         atomically $ writeTVar clock (addUTCTime 20 epoch)
         putMVar finishProof ()
-        waitUntil $ (== 3) <$> readTVarIO beats
+        -- At 20 s the idle heartbeat due from the 10 s completion runs, then
+        -- the resume cursor checkpoint.
+        _ <- await registry manager "http://unused.invalid" workspace sid (hasStatus "caught_up")
+        readTVarIO beats `shouldReturn` 3
+        -- Repeated local quiet sweeps do not refresh the idle heartbeat deadline.
+        atomically $ writeTVar clock (addUTCTime 29 epoch)
+        threadDelay 80000
+        readTVarIO beats `shouldReturn` 3
+        atomically $ writeTVar clock (addUTCTime 30 epoch)
+        waitUntil $ (== 4) <$> readTVarIO beats
       attempts <- newTVarIO (0 :: Int)
       began <- newEmptyMVar; finish <- newEmptyMVar
       atomically $ writeTVar clock epoch
@@ -1176,17 +1185,19 @@ spec = describe "Session follower" $ do
       withSourceFile original $ \path -> do
         sid <- UUID.nextRandom
         clock <- newTVarIO epoch
-        proofs <- newTVarIO (0 :: Int); pages <- newTVarIO (0 :: Int); beats <- newTVarIO (0 :: Int)
+        proofs <- newTVarIO (0 :: Int); pages <- newTVarIO (0 :: Int); beats <- newTVarIO (0 :: Int); sweeps <- newTVarIO (0 :: Int)
         let setClock seconds = atomically $ writeTVar clock (addUTCTime seconds epoch)
             metadata _ target _ = do
               when ("/heartbeat" `T.isSuffixOf` T.pack target) $ atomically $ modifyTVar' beats (+1)
               pure (Right (fakeMetadata sid (BS.length original)))
-            page name = when (name == "local_prefix_page") $ atomically $ modifyTVar' pages (+1)
+            page name = do
+              when (name == "local_prefix_page") $ atomically $ modifyTVar' pages (+1)
+              when (name == "periodic_verification_complete") $ atomically $ modifyTVar' sweeps (+1)
             reach label condition = do
               let loop = condition >>= \ready -> unless ready (threadDelay 10000 >> loop)
               reached <- timeout 3000000 loop
-              counts <- (,,) <$> readTVarIO proofs <*> readTVarIO pages <*> readTVarIO beats
-              unless (isJustValue reached) $ expectationFailure (label <> ": (proofs,pages,beats) = " <> show counts)
+              counts <- (,,,) <$> readTVarIO proofs <*> readTVarIO pages <*> readTVarIO beats <*> readTVarIO sweeps
+              unless (isJustValue reached) $ expectationFailure (label <> ": (proofs,pages,beats,sweeps) = " <> show counts)
         proof <- fakeProofTransport sid original "verified" metadata
         let action verb target body = do
               when ("/prefix-verifications" `T.isInfixOf` T.pack target) $ atomically $ modifyTVar' proofs (+1)
@@ -1195,7 +1206,7 @@ spec = describe "Session follower" $ do
           _ <- start registry manager base workspace sid path
           _ <- await registry manager base workspace sid (hasStatus "caught_up")
           -- Resume: one proof request, a hashing pass and the second local pass.
-          -- Unchanged quiet sweeps reuse that proof with one lookup each.
+          -- Unchanged quiet sweeps rehash locally and need no further request.
           readTVarIO proofs `shouldReturn` 1
           readTVarIO pages `shouldReturn` 64
           resumeBeats <- readTVarIO beats
@@ -1204,19 +1215,61 @@ spec = describe "Session follower" $ do
           reach "idle heartbeat at 15 s" $ (> resumeBeats) <$> readTVarIO beats
           threadDelay 200000
           readTVarIO pages `shouldReturn` 64
-          readTVarIO proofs `shouldReturn` 1
           setClock 21
-          reach "periodic lookup at 21 s" $ (== 2) <$> readTVarIO proofs
-          reach "periodic hash at 21 s" $ (== 96) <$> readTVarIO pages
-          -- Let the sweep complete at 21 s before moving the clock.
-          threadDelay 200000
+          reach "periodic sweep at 21 s" $ (== 1) <$> readTVarIO sweeps
+          readTVarIO pages `shouldReturn` 96
           periodicBeats <- readTVarIO beats
           setClock 40
           reach "idle heartbeat at 40 s" $ (> periodicBeats) <$> readTVarIO beats
           threadDelay 200000
-          readTVarIO proofs `shouldReturn` 2
+          readTVarIO pages `shouldReturn` 96
           setClock 41.5
-          reach "periodic lookup at 41.5 s" $ (== 3) <$> readTVarIO proofs
+          reach "periodic sweep at 41.5 s" $ (== 2) <$> readTVarIO sweeps
+          readTVarIO pages `shouldReturn` 128
+          readTVarIO proofs `shouldReturn` 1
+
+  it "PrefixProofClient completes unchanged quiet sweeps locally and submits a new operation once its proof is five minutes old" $
+    quietFollower $ \_ _ _ _ setClock sweeps events -> do
+      let proofRequests = filter ((/= "HEARTBEAT") . fst) <$> readTVarIO events
+      recorded <- proofRequests
+      map fst recorded `shouldBe` ["POST"]
+      forM_ (zip [1..] [15, 150, 285]) $ \(count, seconds) -> do
+        setClock seconds
+        waitUntil ((== count) <$> readTVarIO sweeps)
+        proofRequests `shouldReturn` recorded
+      -- The first sweep at 300 s submits a new UUID; the old one is never read.
+      setClock 300
+      waitUntil ((== 4) <$> readTVarIO sweeps)
+      later <- proofRequests
+      map fst later `shouldBe` ["POST","POST"]
+      snd (later !! 1) `shouldNotBe` snd (head recorded)
+
+  it "PrefixProofClient flush after skipped quiet sweeps still confirms the proof and checkpoints the cursor before its receipt" $
+    quietFollower $ \registry manager sid _ setClock sweeps events -> do
+      setClock 15
+      waitUntil ((== 1) <$> readTVarIO sweeps)
+      recorded <- readTVarIO events
+      let first = snd (head (filter ((== "POST") . fst) recorded))
+      _ <- control registry manager "http://unused.invalid" workspace sid "session_upload_flush"
+      flushed <- await registry manager "http://unused.invalid" workspace sid hasReceipt
+      nested ["receipt","source_verified"] flushed `shouldBe` Just (Bool True)
+      nested ["receipt","committed_offset"] flushed `shouldBe` Just (Number 3)
+      -- One remote confirmation of the recent proof, then the cursor checkpoint.
+      drop (length recorded) <$> readTVarIO events `shouldReturn` [("GET",first),("HEARTBEAT","")]
+      -- Re-receiving that result does not extend its lifetime from 0 s.
+      setClock 300
+      waitUntil ((== 2) <$> readTVarIO sweeps)
+      map fst . filter ((/= "HEARTBEAT") . fst) <$> readTVarIO events `shouldReturn` ["POST","GET","POST"]
+
+  it "PrefixProofClient submits a new operation when a quiet sweep's digest changes at the same boundary" $
+    quietFollower $ \registry manager sid path setClock _ events -> do
+      stamp <- getModificationTime path
+      BS.writeFile path "[]\n"
+      setModificationTime path stamp
+      setClock 15
+      failed <- await registry manager "http://unused.invalid" workspace sid (hasStatus "failed")
+      field "error" failed `shouldBe` Just (String "source_identity_or_prefix_changed")
+      map fst . filter ((/= "HEARTBEAT") . fst) <$> readTVarIO events `shouldReturn` ["POST","POST"]
 
   it "atomically admits/completes controls across retirement and stop-finalization races" $
     withManager $ \manager -> withSourceFile "" $ \path -> do
@@ -1355,6 +1408,32 @@ spec = describe "Session follower" $ do
             cleanupFinished <- getCurrentTime
             diffUTCTime cleanupFinished cleanupStarted `shouldSatisfy` (< 9.5)
           ) `finally` (do closed <- hIsClosed send; unless closed (hClose send); putMVar release (); receipts)
+
+-- A caught-up three-byte follower with an injected clock and a fake transport
+-- that verifies proofs at once. Events list proof requests as (verb, operation
+-- UUID) and heartbeats; the counter tracks completed periodic sweeps.
+quietFollower :: (Registry -> Manager -> UUID -> FilePath -> (NominalDiffTime -> IO ()) -> TVar Int -> TVar [(String,String)] -> IO a) -> IO a
+quietFollower body = withManager $ \manager -> withSourceFile "{}\n" $ \path -> do
+  sid <- UUID.nextRandom
+  clock <- newTVarIO epoch
+  sweeps <- newTVarIO 0; events <- newTVarIO []
+  let base = "http://unused.invalid"
+      setClock seconds = atomically $ writeTVar clock (addUTCTime seconds epoch)
+      note event = atomically $ modifyTVar' events (<> [event])
+      metadata _ target _ = do
+        when ("/heartbeat" `T.isSuffixOf` T.pack target) $ note ("HEARTBEAT","")
+        pure (Right (fakeMetadata sid 3))
+      hook name = when (name == "periodic_verification_complete") $ atomically $ modifyTVar' sweeps (+1)
+  proof <- fakeProofTransport sid "{}\n" "verified" metadata
+  let action verb target request = do
+        when ("/prefix-verifications" `T.isInfixOf` T.pack target) $ note $ if verb == "POST"
+          then ("POST", maybe "" (\value -> case field "operation_id" value of Just (String operation) -> T.unpack operation; _ -> "") request)
+          else (BS8.unpack verb, reverse (takeWhile (/= '/') (reverse target)))
+        proof verb target request
+  withRegistry fast {intervalMicros = 1000000, now = readTVarIO clock, requestOverride = Just action, transition = hook} $ \registry -> do
+    _ <- start registry manager base workspace sid path
+    _ <- await registry manager base workspace sid (hasStatus "caught_up")
+    body registry manager sid path setClock sweeps events
 
 fast :: FollowerOptions
 fast = defaultFollowerOptions {intervalMicros = 1000, controlWaitMicros = 50000, helperExecutable = testHelperExecutable}

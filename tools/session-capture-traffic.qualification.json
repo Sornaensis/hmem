@@ -568,7 +568,7 @@
   "dispositions": {
     "pendingProofPolls": "Adopted: bounded pending-poll backoff. With unchanged submissions the large cohort made 57% fewer polls (61% fewer pending); resume was unchanged and each finite receipt was delayed by less than one interval.",
     "periodicFullPrefixProofs": "Adopted: periodic interval scaled with prefix size above 16 MiB, at most 60 s. The large cohort halved its submissions, server compute fell 58% and local hashing 40%; small prefixes are unchanged.",
-    "reusedProofLookups": "Rejected for this change: refreshing a reused proof before its five-minute terminal lifetime cannot show a reduction in the matched cohorts (expiry is simulated by advancing only the server clock) and saves at most one lookup and one local rehash per five quiet minutes; eviction losses remain. Whether an unchanged verified boundary needs a remote lookup at all remains an API/MCP decision question under A01M39QPB23CYS9QHCWQSATSJE9.",
+    "reusedProofLookups": "Superseded by task 45047152 (quietProofSkip below): under the A01M39QPB23CYS9QHCWQSATSJE9 amendment an unchanged periodic sweep completes locally while its verified result is under five minutes old and the latest heartbeat reports the same boundary; older results are never looked up and a fresh operation is submitted.",
     "appendsHeartbeatsMetadata": "No change to source-check, append, heartbeat or metadata logic.",
     "missRecovery": "Unchanged: bounded at four consecutive losses; one extra submission and one local rehash per loss."
   },
@@ -578,5 +578,361 @@
     "Thirty-second live cohorts end before a 100 MiB follower reaches its 60 s periodic interval, so the measured periodic reduction is the removal of all in-window periodic sweeps; longer followers keep one sweep per minute.",
     "Restart is modelled by routing to a second server application with an empty registry sharing the database, not by restarting the native server.",
     "Server compute uses the registry clock from admission to the terminal result and includes queueing behind the two workers."
-  ]
+  ],
+  "quietProofSkip": {
+    "task": "45047152-1b41-4400-b96a-a3a211851097",
+    "decision": "A01M39QPB23CYS9QHCWQSATSJE9 amendment (c70c8ab0)",
+    "base": "f206ff72a01482436ff22dca4eaee9844931384d",
+    "state": "uncommitted working tree on base; measured source hashes below",
+    "inputs": {
+      "hmem-mcp/src/HMem/MCP/SessionFollower.hs": {
+        "before": "4c6ffcdaa257869e28811d40a3efff014e23c409fb488a764950b4b200290086",
+        "after": "946e75faf3a2fca1f72900e7528456847062f54c9d1a7b539160774882b73112"
+      },
+      "hmem-mcp/test/HMem/MCP/SessionFollowerSpec.hs": {
+        "before": "d61b4cfbec9a728fc5921cc977f5fd524cb812a25be0c173393a9e09405cde7f",
+        "after": "678026f55ca8940e1bd70348a7c0e77c7c6851aec9d76d3f94e6a145cdd9101c"
+      },
+      "hmem-mcp/src/HMem/MCP/Server.hs": "cdf71b33728561d328abef5c7811b51bed76645bceec9416f70fb5b8a774af4e",
+      "hmem-server/src/HMem/Server/SessionTraffic.hs": "b9ad8ae59478b76be1b8aef231220cfb0698caad3bfeaceb2da43f28fcf35b7e",
+      "hmem-server/src/HMem/Server/SessionPrefix.hs": "0371874b7dc29b060de508673de70daf69d52ed5bdf2281b34a37e18ad10c098",
+      "hmem-server/src/HMem/Server/API.hs": "ff638697a8f1928920fdee212663447b4c0337c306de4e5d6d43ceedc35b1524"
+    },
+    "change": "A periodic sweep whose complete local rehash reproduces the boundary, revision and digest of a verified result received less than 300 s earlier, while the latest heartbeat reports that boundary for an active session, completes without a proof request. Otherwise it submits a new operation. Resume, resumed append and finite receipts keep the server lookup and cursor checkpoint.",
+    "method": "The same opt-in measurement, cohorts, rates and durations as above. Test executables built from the before and after sources ran alternately (before, after, before, after) on one host with the same helper executable. Values are means over two runs per variant; stopMs covers three sequential stop receipts (four in the mixed cohort).",
+    "runs": [
+      {
+        "variant": "before",
+        "result": "1 example, 0 failures",
+        "duration": "263.2 s"
+      },
+      {
+        "variant": "after",
+        "result": "1 example, 0 failures",
+        "duration": "259.1 s"
+      },
+      {
+        "variant": "before",
+        "result": "1 example, 0 failures",
+        "duration": "263.3 s"
+      },
+      {
+        "variant": "after",
+        "result": "1 example, 0 failures",
+        "duration": "262.4 s"
+      }
+    ],
+    "cohorts": [
+      {
+        "cohort": "small_live",
+        "mode": "live",
+        "before": {
+          "runs": 2,
+          "perLifecycle": {
+            "append": 40.34,
+            "heartbeat": 3.0,
+            "metadata": 1.0,
+            "proof_poll": 7.67,
+            "proof_submit": 5.0
+          },
+          "pendingPollsPerLifecycle": 2.67,
+          "verificationUnknownPolls": 0.0,
+          "unknownReasons": {},
+          "proofRecoveries": 0.0,
+          "serverProofs": 15.0,
+          "serverComputeMs": 813.3,
+          "localHashMiBPerLifecycle": 13.82,
+          "resumeMs": 341.35,
+          "stopMs": 325.75,
+          "receiptsVerified": 3.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        },
+        "after": {
+          "runs": 2,
+          "perLifecycle": {
+            "append": 41.33,
+            "heartbeat": 3.0,
+            "metadata": 1.0,
+            "proof_poll": 8.0,
+            "proof_submit": 5.0
+          },
+          "pendingPollsPerLifecycle": 3.0,
+          "verificationUnknownPolls": 0.0,
+          "unknownReasons": {},
+          "proofRecoveries": 0.0,
+          "serverProofs": 15.0,
+          "serverComputeMs": 796.3,
+          "localHashMiBPerLifecycle": 13.84,
+          "resumeMs": 405.6,
+          "stopMs": 327.85,
+          "receiptsVerified": 3.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        }
+      },
+      {
+        "cohort": "large_live",
+        "mode": "live",
+        "before": {
+          "runs": 2,
+          "perLifecycle": {
+            "append": 35.84,
+            "heartbeat": 3.0,
+            "metadata": 1.0,
+            "proof_poll": 13.5,
+            "proof_submit": 2.0
+          },
+          "pendingPollsPerLifecycle": 11.5,
+          "verificationUnknownPolls": 0.0,
+          "unknownReasons": {},
+          "proofRecoveries": 0.0,
+          "serverProofs": 6.0,
+          "serverComputeMs": 4869.65,
+          "localHashMiBPerLifecycle": 403.52,
+          "resumeMs": 2222.2,
+          "stopMs": 4736.5,
+          "receiptsVerified": 3.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        },
+        "after": {
+          "runs": 2,
+          "perLifecycle": {
+            "append": 39.0,
+            "heartbeat": 3.0,
+            "metadata": 1.0,
+            "proof_poll": 13.5,
+            "proof_submit": 2.0
+          },
+          "pendingPollsPerLifecycle": 11.5,
+          "verificationUnknownPolls": 0.0,
+          "unknownReasons": {},
+          "proofRecoveries": 0.0,
+          "serverProofs": 6.0,
+          "serverComputeMs": 4889.2,
+          "localHashMiBPerLifecycle": 403.52,
+          "resumeMs": 2200.95,
+          "stopMs": 4849.25,
+          "receiptsVerified": 3.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        }
+      },
+      {
+        "cohort": "restart",
+        "mode": "quiet",
+        "before": {
+          "runs": 2,
+          "perLifecycle": {
+            "heartbeat": 6.0,
+            "metadata": 1.0,
+            "proof_poll": 7.17,
+            "proof_submit": 2.0
+          },
+          "pendingPollsPerLifecycle": 1.17,
+          "verificationUnknownPolls": 3.0,
+          "unknownReasons": {
+            "unknown_since_start": 3.0
+          },
+          "proofRecoveries": 3.0,
+          "serverProofs": 6.0,
+          "serverComputeMs": 351.6,
+          "localHashMiBPerLifecycle": 8.0,
+          "resumeMs": 389.85,
+          "stopMs": 96.1,
+          "receiptsVerified": 3.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        },
+        "after": {
+          "runs": 2,
+          "perLifecycle": {
+            "heartbeat": 6.0,
+            "metadata": 1.0,
+            "proof_poll": 3.17,
+            "proof_submit": 2.0
+          },
+          "pendingPollsPerLifecycle": 0.17,
+          "verificationUnknownPolls": 3.0,
+          "unknownReasons": {
+            "unknown_since_start": 3.0
+          },
+          "proofRecoveries": 3.0,
+          "serverProofs": 6.0,
+          "serverComputeMs": 199.1,
+          "localHashMiBPerLifecycle": 8.0,
+          "resumeMs": 281.1,
+          "stopMs": 350.5,
+          "receiptsVerified": 3.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        }
+      },
+      {
+        "cohort": "expiry",
+        "mode": "quiet",
+        "before": {
+          "runs": 2,
+          "perLifecycle": {
+            "heartbeat": 6.0,
+            "metadata": 1.0,
+            "proof_poll": 7.33,
+            "proof_submit": 2.0
+          },
+          "pendingPollsPerLifecycle": 1.33,
+          "verificationUnknownPolls": 3.0,
+          "unknownReasons": {
+            "expired": 3.0
+          },
+          "proofRecoveries": 3.0,
+          "serverProofs": 6.0,
+          "serverComputeMs": 278.4,
+          "localHashMiBPerLifecycle": 8.0,
+          "resumeMs": 401.35,
+          "stopMs": 95.6,
+          "receiptsVerified": 3.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        },
+        "after": {
+          "runs": 2,
+          "perLifecycle": {
+            "heartbeat": 6.0,
+            "metadata": 1.0,
+            "proof_poll": 3.5,
+            "proof_submit": 2.0
+          },
+          "pendingPollsPerLifecycle": 0.5,
+          "verificationUnknownPolls": 3.0,
+          "unknownReasons": {
+            "expired": 3.0
+          },
+          "proofRecoveries": 3.0,
+          "serverProofs": 6.0,
+          "serverComputeMs": 184.4,
+          "localHashMiBPerLifecycle": 8.0,
+          "resumeMs": 283.15,
+          "stopMs": 367.85,
+          "receiptsVerified": 3.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        }
+      },
+      {
+        "cohort": "eviction",
+        "mode": "quiet",
+        "before": {
+          "runs": 2,
+          "perLifecycle": {
+            "heartbeat": 6.0,
+            "metadata": 1.0,
+            "proof_poll": 7.0,
+            "proof_submit": 2.0
+          },
+          "pendingPollsPerLifecycle": 1.0,
+          "verificationUnknownPolls": 3.0,
+          "unknownReasons": {
+            "evicted": 3.0
+          },
+          "proofRecoveries": 3.0,
+          "serverProofs": 22.0,
+          "serverComputeMs": 266.85,
+          "localHashMiBPerLifecycle": 8.0,
+          "resumeMs": 357.5,
+          "stopMs": 94.15,
+          "receiptsVerified": 3.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        },
+        "after": {
+          "runs": 2,
+          "perLifecycle": {
+            "heartbeat": 6.0,
+            "metadata": 1.0,
+            "proof_poll": 3.83,
+            "proof_submit": 2.0
+          },
+          "pendingPollsPerLifecycle": 0.83,
+          "verificationUnknownPolls": 3.0,
+          "unknownReasons": {
+            "evicted": 3.0
+          },
+          "proofRecoveries": 3.0,
+          "serverProofs": 22.0,
+          "serverComputeMs": 223.2,
+          "localHashMiBPerLifecycle": 8.0,
+          "resumeMs": 326.8,
+          "stopMs": 487.85,
+          "receiptsVerified": 3.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        }
+      },
+      {
+        "cohort": "mixed_churn",
+        "mode": "mixed",
+        "before": {
+          "runs": 2,
+          "perLifecycle": {
+            "append": 62.5,
+            "heartbeat": 4.5,
+            "metadata": 1.0,
+            "proof_poll": 13.5,
+            "proof_submit": 6.5
+          },
+          "pendingPollsPerLifecycle": 5.25,
+          "verificationUnknownPolls": 1.0,
+          "unknownReasons": {
+            "evicted": 1.0
+          },
+          "proofRecoveries": 1.0,
+          "serverProofs": 26.0,
+          "serverComputeMs": 1863.85,
+          "localHashMiBPerLifecycle": 24.3,
+          "resumeMs": 451.6,
+          "stopMs": 407.7,
+          "receiptsVerified": 4.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        },
+        "after": {
+          "runs": 2,
+          "perLifecycle": {
+            "append": 62.25,
+            "heartbeat": 4.5,
+            "metadata": 1.0,
+            "proof_poll": 10.88,
+            "proof_submit": 6.5
+          },
+          "pendingPollsPerLifecycle": 4.12,
+          "verificationUnknownPolls": 1.0,
+          "unknownReasons": {
+            "evicted": 1.0
+          },
+          "proofRecoveries": 1.0,
+          "serverProofs": 26.0,
+          "serverComputeMs": 1791.8,
+          "localHashMiBPerLifecycle": 24.2,
+          "resumeMs": 370.2,
+          "stopMs": 483.15,
+          "receiptsVerified": 4.0,
+          "transientRetries": 0.0,
+          "droppedEvents": 0.0
+        }
+      }
+    ],
+    "observations": [
+      "Quiet cohorts: proof polls per lifecycle fell from 7.0-7.3 to 3.2-3.8 at unchanged submissions (2.0), heartbeats (6.0), server proofs and local hashing (8 MiB).",
+      "Every disturbance still produced exactly one verification_unknown per follower with the expected reason (unknown_since_start, expired, evicted) and one recovery; with no periodic lookups the loss now surfaces at the stop-receipt lookup.",
+      "Three sequential quiet stop receipts took about 95 ms before and 350-490 ms after, because each receipt now absorbs the recovery (local rehash, new submission and polls) that a periodic lookup previously absorbed.",
+      "Mixed cohort: proof polls per lifecycle 13.5 before and 10.9 after; the quiet follower still lost its retained result to eviction once per run.",
+      "Live cohorts are unchanged within run-to-run variation.",
+      "All receipts verified, no transient retries, no dropped telemetry events."
+    ],
+    "limitations": [
+      "One host and loopback HTTP; two runs per variant.",
+      "The 34 s quiet window stays inside the five-minute reuse lifetime, so the measured cohorts do not include the fresh submission a quiet follower makes every five minutes; that path is covered by the clock-injected SessionFollower tests."
+    ]
+  }
 }

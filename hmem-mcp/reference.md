@@ -218,6 +218,12 @@ A pending prefix proof is polled after 50 ms, then after half the time it has
 been pending, at most one second apart. Periodic verification of the complete
 prefix follows ten seconds after the last verification for prefixes up to
 16 MiB; larger prefixes wait proportionally longer, at most one minute.
+A periodic sweep makes no proof request when its local rehash reproduces the
+boundary, revision and digest of a verified result received less than five
+minutes earlier and the latest heartbeat still reports that boundary. Otherwise
+it submits a new operation; a result older than five minutes is never looked up
+again. Resume, resumed append, flush and stop still confirm their proof with the
+server and checkpoint the latest cursor.
 
 Each HTTP operation has a five-second deadline and a 2 MiB response cap. A
 transient failure preserves the exact pending append for retry, with exponential

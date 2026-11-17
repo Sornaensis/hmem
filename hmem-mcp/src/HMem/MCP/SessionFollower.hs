@@ -105,6 +105,11 @@ pendingPollDelay base cap pendingFor = max base (min cap (pendingFor / 2))
 periodicVerificationDelay :: NominalDiffTime -> Int64 -> NominalDiffTime
 periodicVerificationDelay base bytes = base * min 6 (max 1 (fromIntegral bytes / 16777216))
 
+-- | How long a received verified result may be reused: the server's maximum
+-- terminal-result lifetime. Older operations are never looked up again.
+proofReuseLifetime :: NominalDiffTime
+proofReuseLifetime = 300
+
 data ImportScan = ImportScan !Int64 !Int64 !(Context SHA256) !ByteString
 
 data ImportFault = InvalidImport | ImportDeadline deriving (Show,Eq)
@@ -119,7 +124,8 @@ data JobState = JobState
   , observedSize :: Int64
   , lastHeartbeat :: Maybe UTCTime
   , failureDetails :: Maybe Value
-  , nextVerification :: UTCTime, lastProof :: Maybe (Wire.PrefixProofRequest,Text), lostProofs :: Int
+  -- | Last verified proof, its audience and when this job first received it.
+  , nextVerification :: UTCTime, lastProof :: Maybe (Wire.PrefixProofRequest,Text,UTCTime), lostProofs :: Int
   , importScan :: Maybe ImportScan, importManifest :: Maybe (Int64,Text), importDeadline :: Maybe UTCTime, importCompleted :: Maybe Core.AgentSession
   }
 
@@ -641,8 +647,9 @@ turn registry job = do
                   proof <- maybe (throwIO SourceUnavailable) pure verify.proof
                   unless (proof.sha256 == digest) $ throwIO SourceChanged
                   _ <- checkSource source (max verify.end (maybe verify.end id (control >>= (.boundary))))
-                  if verify.purpose == Periodic then
+                  if verify.purpose == Periodic then do
                     save state {sweep = Nothing, verifyNext = False, nextVerification = addUTCTime (verificationDelay verify.end) time}
+                    registry.options.transition "periodic_verification_complete"
                   else do
                     -- This existing write-authorized endpoint supplies one latest
                     -- cursor checkpoint after the final local pass. A downgraded
@@ -689,9 +696,16 @@ turn registry job = do
                   Nothing -> do
                     let digest = T.pack (show (hashFinalize verify.context :: Digest SHA256))
                         reusable = case state.lastProof of
-                          Just (proof,audience) | proof.expectedOffset == verify.end && proof.expectedRevision == verify.revision && proof.sha256 == digest -> Just (proof,audience)
+                          Just (proof,audience,receivedAt) | proof.expectedOffset == verify.end && proof.expectedRevision == verify.revision && proof.sha256 == digest
+                            && diffUTCTime time receivedAt < proofReuseLifetime -> Just (proof,audience)
                           _ -> Nothing
+                        current = maybe False (\session -> session.state /= Core.Terminated
+                          && session.committedBytes == verify.end && session.revision == verify.revision) state.remote
                     case reusable of
+                      -- Committed bytes at a verified boundary are immutable: an
+                      -- unchanged quiet sweep completes locally without a lookup.
+                      Just (proof,audience) | verify.purpose == Periodic && current ->
+                        save state {sweep = Just verify {proof = Just proof, audience = Just audience, submitted = True, proven = True}}
                       Just (proof,audience) -> save state {sweep = Just verify {proof = Just proof, audience = Just audience, submitted = True}}
                       Nothing -> do
                         operation <- UUID.nextRandom
@@ -726,7 +740,11 @@ turn registry job = do
                             let checked = verify {audience = Just reply.audience, submitted = True, proven = True, nextPoll = Nothing, pendingSince = Nothing
                                   , offset = if verify.purpose == Periodic then verify.offset else 0
                                   , context = if verify.purpose == Periodic then verify.context else hashInit}
-                            acknowledge state {sweep = Just checked, lastProof = Just (proof,reply.audience), lostProofs = 0}
+                            -- Re-receiving the same result never extends its reuse window.
+                            let receivedAt = case state.lastProof of
+                                  Just (previous,_,at) | previous.operationId == proof.operationId -> at
+                                  _ -> time
+                            acknowledge state {sweep = Just checked, lastProof = Just (proof,reply.audience,receivedAt), lostProofs = 0}
                           "pending" -> do
                             -- A slow reply must not spend the next polling interval.
                             -- Longer-pending proofs are polled less often (bounded).

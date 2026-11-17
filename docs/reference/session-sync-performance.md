@@ -518,8 +518,24 @@ Each deliberate disturbance of quiet 1 MiB followers produced exactly one
 later proofs `evicted`. Each loss cost one recovery: one renewed local hash
 of the prefix, one submission, one or two polls and one server proof. All
 receipts verified with no retries. In the mixed cohort, a quiet follower beside
-three live peers lost its retained result to eviction once per run. These
-cohorts are unchanged by the poll and interval changes.
+three live peers lost its retained result to eviction once per run.
+
+An unchanged periodic sweep now completes locally while its verified result is
+less than five minutes old and the latest heartbeat reports the same boundary
+(decision A01M39QPB23CYS9QHCWQSATSJE9). A matched rerun, two runs per variant:
+
+| Quiet cohort | Proof polls before | Proof polls after | Three stop receipts before | After |
+| --- | ---: | ---: | ---: | ---: |
+| Restart | 7.2 | 3.2 | 96 ms | 351 ms |
+| Expiry | 7.3 | 3.5 | 96 ms | 368 ms |
+| Eviction | 7.0 | 3.8 | 94 ms | 488 ms |
+
+Polls are per lifecycle; submissions (2.0), heartbeats, server proofs and the
+8 MiB of local hashing per lifecycle are unchanged. The disturbance still
+causes one `verification_unknown` and one recovery per follower, now at the
+stop-receipt lookup, so finite receipts absorb the recovery a periodic lookup
+used to absorb. The mixed cohort made 10.9 polls per lifecycle instead of
+13.5; live cohorts are unchanged within run-to-run variation.
 
 Dispositions:
 
@@ -527,13 +543,10 @@ Dispositions:
   large-cohort polls at unchanged submissions.
 - **Periodic full-prefix proofs while growing**: interval scaled with prefix
   size and capped at 60 s, so sweeps continue; adopted.
-- **Reused proofs of quiet followers** become unknown when the five-minute
-  terminal lifetime ends (about 1 in 31 reuse polls by construction) or sooner
-  under eviction churn. Submitting a fresh operation before the lifetime ends
-  was rejected: the matched cohorts cannot show a reduction (expiry advances
-  only the server clock), and it would save at most one lookup and one local
-  hash per five quiet minutes. Whether a verified unchanged boundary still
-  needs a remote lookup is an API/MCP decision question.
+- **Proof lookups of quiet followers**: an unchanged periodic sweep needs no
+  request while its verified result is under five minutes old; older results
+  are never looked up, and the follower submits a fresh operation. Adopted;
+  quiet cohorts made about half the polls.
 - **Appends, heartbeats and metadata reads** follow output, idle time and
   lifecycle starts. They are needed for commit latency and liveness; no change.
 - **Restart, expiry and eviction recovery** is bounded at four losses and

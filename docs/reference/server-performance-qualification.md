@@ -237,3 +237,17 @@ The runner writes one summary to `.tmp/perftest/combined` (or
 `PERFTEST_OUT`) and stops the server. The receipt's `commands` list the exact
 build, restore and focused-spec commands. The production-default rerun ran a
 scratch runner copy, not the committed file (see its receipt `inputs`).
+
+The committed runner now reports what that copy added. The idle, contention
+and stuck catch-up phases each carry health deltas: `checkout` (main pool, as
+before), `delivery_checkout`, `pools` (active and maximum connections of both
+pools at the phase start and end) and `http_admission` (counter deltas and end
+gauges). Fields for a pool or admission object the image does not report are
+null. The stuck-phase deltas come from health GETs before the lock holder
+starts and 1.5 s after it releases, outside the hold. Statement classes match
+the full normalized statement text; earlier receipts matched a 160-character
+prefix and missed statements marked later, so their class counts are lower
+bounds. `top` statements keep a 160-character prefix and add `queryid`. The
+workload and timings are unchanged. `node tools/perftest/combined.mjs
+--self-test` checks classification and the delta computation without Docker;
+receipts record the runner's SHA-256.

@@ -8,6 +8,7 @@
 // network. Credentials and tickets are never printed.
 //
 //   node tools/perftest/combined.mjs [--label NAME] [--idle-s 30] [--contention-s 120]
+//   node tools/perftest/combined.mjs --self-test
 //
 // Reads PERFTEST_DIR (default .tmp/perftest) secrets.env and state.json from
 // perftest.mjs seeding, writes one summary JSON to PERFTEST_OUT (default
@@ -17,6 +18,8 @@
 // Unknown, repeated or valueless flags are rejected. The server image needs the
 // hmem.perftest.revision label; PERFTEST_OBSERVER_IMAGE overrides the stalled
 // observer's node image, pinned by default to the digest the receipt records.
+// --self-test checks statement classification and the health deltas offline,
+// without Docker or PERFTEST_DIR.
 import { createHash, randomUUID } from 'node:crypto'
 import { execFileSync, spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -25,9 +28,9 @@ import { join } from 'node:path'
 const DIR = process.env.PERFTEST_DIR || '.tmp/perftest', OUT = process.env.PERFTEST_OUT || join(DIR, 'combined')
 const PG = 'hmem-perftest-postgres', SERVER = 'hmem-perftest-server', NETWORK = 'hmem-perftest-net'
 const OBSERVER_IMAGE = process.env.PERFTEST_OBSERVER_IMAGE || 'node:24.18.0-bookworm@sha256:5711a0d445a1af54af9589066c646df387d1831a608226f4cd694fc59e745059'
-const USAGE = 'usage: node tools/perftest/combined.mjs [--label NAME] [--idle-s 30] [--contention-s 120]'
-const argv = process.argv.slice(2), opt = {}
-for (let i = 0; i < argv.length; i += 2) {
+const USAGE = 'usage: node tools/perftest/combined.mjs [--label NAME] [--idle-s 30] [--contention-s 120] | --self-test'
+const argv = process.argv.slice(2), opt = {}, SELF_TEST = argv.length === 1 && argv[0] === '--self-test'
+for (let i = 0; !SELF_TEST && i < argv.length; i += 2) {
   const name = argv[i].startsWith('--') ? argv[i].slice(2) : '', value = argv[i + 1]
   if (!['label', 'idle-s', 'contention-s'].includes(name) || name in opt || value === undefined || value.startsWith('--')) throw new Error(USAGE)
   opt[name] = value
@@ -37,6 +40,80 @@ const IDLE_MS = Number(opt['idle-s'] || 30) * 1000, CONTENTION_MS = Number(opt['
 if (!(IDLE_MS > 0) || !(CONTENTION_MS >= 80000)) throw new Error('--idle-s must be positive and --contention-s at least 80')
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const r1 = x => Math.round(x * 10) / 10
+
+// -------------------------------------------------------- reporting helpers
+
+// Classes match the full whitespace-normalized statement text: markers may lie
+// past any prefix. Only the reported top statements are shortened.
+const CLASSES = {
+  outbox_scan: /FROM change_stream_outbox/i, scope_lock: /hmem_change_stream_lock/i,
+  snapshot_item_insert: /INSERT INTO change_stream_snapshot_items/i, snapshot_session_insert: /INSERT INTO change_stream_snapshot_sessions/i,
+  snapshot_token_insert: /INSERT INTO change_stream_snapshot_page_tokens/i, resume_token: /change_stream_resume_tokens/i,
+  authorization: /workspace_memberships|workspace_member|grant_users|user_workspace|global_permission|superadmin|hmem_.*authori[sz]/i,
+}
+function classifyStatements(rows) {
+  const classes = {}
+  for (const [name, re] of Object.entries(CLASSES)) {
+    const hit = rows.filter(r => re.test(r.query))
+    classes[name] = { statements: hit.length, calls: hit.reduce((a, r) => a + Number(r.calls), 0), total_ms: r1(hit.reduce((a, r) => a + Number(r.total_ms), 0)) }
+  }
+  return { classes, total_calls: rows.reduce((a, r) => a + Number(r.calls), 0),
+    top: [...rows].sort((a, b) => b.calls - a.calls).slice(0, 8).map(r => ({ queryid: r.queryid ?? null, calls: Number(r.calls), total_ms: Number(r.total_ms), query: r.query.slice(0, 160) })) }
+}
+
+// Health deltas between two /api/v1/health bodies (null when a GET failed).
+// Images without a delivery pool or HTTP admission report null for those.
+const CHECKOUT_COUNTERS = ['checkouts', 'unattributed', 'capacity_waits', 'wait_total_ms', 'hold_total_ms', 'connects']
+const ADMISSION_COUNTERS = ['admitted', 'rejected_queue_full', 'rejected_timeout', 'wait_total_ms']
+const ADMISSION_GAUGES = ['concurrency', 'heavy_concurrency', 'queue_limit', 'queue_timeout_ms', 'in_flight', 'heavy_in_flight', 'queued', 'wait_max_ms']
+const counterDelta = (a, b, keys) => a && b ? Object.fromEntries(keys.map(k => [k, r1(b[k] - a[k])])) : null
+const checkoutDelta = (a, b) => counterDelta(a?.checkout, b?.checkout, CHECKOUT_COUNTERS)
+const poolGauges = p => p ? { active: p.active_connections ?? null, max: p.max_connections ?? null } : null
+const gauges = h => h ? { pool: poolGauges(h.pool), delivery_pool: poolGauges(h.delivery_pool) } : null
+function healthDelta(a, b) {
+  const x = a?.http_admission, y = b?.http_admission
+  return { checkout: checkoutDelta(a?.pool, b?.pool), delivery_checkout: checkoutDelta(a?.delivery_pool, b?.delivery_pool),
+    pools: { start: gauges(a), end: gauges(b) },
+    http_admission: x && y ? { ...counterDelta(x, y, ADMISSION_COUNTERS), end: Object.fromEntries(ADMISSION_GAUGES.map(k => [k, y[k] ?? null])) } : null }
+}
+
+function selfTest() {
+  let checks = 0
+  const check = (ok, what) => { checks++; if (!ok) throw new Error('self-test failed: ' + what) }
+  const pad = 'x'.repeat(200), long = 'SELECT /* ' + pad + ' */ cursor FROM change_stream_outbox WHERE scope = $1'
+  const rows = [
+    { queryid: '-9007199254740993', query: long, calls: 5, total_ms: 1.25 },
+    { queryid: '2', query: 'SELECT authorization_epoch, next_cursor FROM hmem_change_stream_lock($1, $2)', calls: 7, total_ms: 2 },
+    { queryid: '3', query: 'SELECT ' + pad + ' FROM workspace_memberships WHERE user_id = $1', calls: 3, total_ms: 0.5 },
+  ]
+  check(long.length > 160 && long.slice(0, 160).search(CLASSES.outbox_scan) < 0, 'fixture marker lies past 160 characters')
+  const s = classifyStatements(rows)
+  check(s.classes.outbox_scan.statements === 1 && s.classes.outbox_scan.calls === 5 && s.classes.outbox_scan.total_ms === 1.3, 'long outbox statement classified')
+  check(s.classes.authorization.calls === 3 && s.classes.scope_lock.calls === 7 && s.classes.resume_token.calls === 0, 'other classes')
+  check(s.total_calls === 15 && s.top.length === 3 && s.top[0].queryid === '2' && s.top.every(t => t.query.length <= 160), 'top statements')
+  check(s.top[1].queryid === '-9007199254740993' && s.top[1].query === long.slice(0, 160), 'queryid kept as text, query shortened')
+  const prefix = classifyStatements(rows.map(r => ({ ...r, query: r.query.slice(0, 160) })))
+  check(prefix.classes.outbox_scan.calls === 0 && prefix.classes.authorization.calls === 0, 'a 160-character prefix misses both markers')
+  const pool = (active, max, n) => ({ active_connections: active, max_connections: max, checkout: { checkouts: 100 * n, unattributed: 10 * n, capacity_waits: n,
+    wait_total_ms: 1.25 * n, hold_total_ms: 50.5 * n, connects: n, wait_max_ms: 9, wait_buckets: [] } })
+  const admission = (n, inFlight) => ({ concurrency: 15, heavy_concurrency: 4, queue_limit: 64, queue_timeout_ms: 5000, in_flight: inFlight, heavy_in_flight: 0,
+    queued: 0, admitted: 1000 * n, rejected_queue_full: n, rejected_timeout: 0, wait_total_ms: 2.5 * n, wait_max_ms: 7.5, wait_buckets: [] })
+  const h1 = { pool: pool(2, 15, 1), delivery_pool: pool(0, 10, 2), http_admission: admission(1, 3) }
+  const h2 = { pool: pool(0, 15, 4), delivery_pool: pool(1, 10, 4), http_admission: admission(3, 1) }
+  const d = healthDelta(h1, h2)
+  check(JSON.stringify(d.checkout) === JSON.stringify({ checkouts: 300, unattributed: 30, capacity_waits: 3, wait_total_ms: 3.8, hold_total_ms: 151.5, connects: 3 }), 'main pool delta')
+  check(JSON.stringify(d.delivery_checkout) === JSON.stringify({ checkouts: 200, unattributed: 20, capacity_waits: 2, wait_total_ms: 2.5, hold_total_ms: 101, connects: 2 }), 'delivery pool delta')
+  check(JSON.stringify(d.pools) === JSON.stringify({ start: { pool: { active: 2, max: 15 }, delivery_pool: { active: 0, max: 10 } }, end: { pool: { active: 0, max: 15 }, delivery_pool: { active: 1, max: 10 } } }), 'pool gauges')
+  check(d.http_admission.admitted === 2000 && d.http_admission.rejected_queue_full === 2 && d.http_admission.wait_total_ms === 5 && d.http_admission.end.in_flight === 1 && d.http_admission.end.wait_max_ms === 7.5, 'admission delta')
+  const one = { pool: pool(1, 15, 1) }, two = { pool: pool(0, 15, 2), delivery_pool: null }
+  const old = healthDelta(one, two)
+  check(old.checkout.checkouts === 100 && old.delivery_checkout === null && old.http_admission === null && old.pools.end.delivery_pool === null, 'one-pool image')
+  const lost = healthDelta(null, h2)
+  check(lost.checkout === null && lost.delivery_checkout === null && lost.http_admission === null && lost.pools.start === null, 'failed health GET')
+  console.log(JSON.stringify({ self_test: 'pass', checks }))
+}
+if (SELF_TEST) { selfTest(); process.exit(0) }
+
 const secrets = Object.fromEntries(readFileSync(join(DIR, 'secrets.env'), 'utf8').split(/\r?\n/).filter(Boolean)
   .map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]))
 const state = JSON.parse(readFileSync(join(DIR, 'state.json'), 'utf8'))
@@ -158,26 +235,11 @@ function stalledObserver(ticketValue, holdMs) {
 
 // --------------------------------------------------------------- telemetry
 
-const STATEMENTS = "SELECT coalesce(json_agg(s), '[]') FROM (SELECT left(regexp_replace(query, '\\s+', ' ', 'g'), 160) query, calls, round(total_exec_time::numeric, 1) total_ms, rows FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query NOT LIKE '%pg_stat_%' AND query NOT LIKE '%pg_locks%') s"
-const CLASSES = {
-  outbox_scan: /FROM change_stream_outbox/i, scope_lock: /hmem_change_stream_lock/i,
-  snapshot_item_insert: /INSERT INTO change_stream_snapshot_items/i, snapshot_session_insert: /INSERT INTO change_stream_snapshot_sessions/i,
-  snapshot_token_insert: /INSERT INTO change_stream_snapshot_page_tokens/i, resume_token: /change_stream_resume_tokens/i,
-  authorization: /workspace_memberships|workspace_member|grant_users|user_workspace|global_permission|superadmin|hmem_.*authori[sz]/i,
-}
-function statements() {
-  const rows = JSON.parse(psql(STATEMENTS) || '[]'), classes = {}
-  for (const [name, re] of Object.entries(CLASSES)) {
-    const hit = rows.filter(r => re.test(r.query))
-    classes[name] = { statements: hit.length, calls: hit.reduce((a, r) => a + Number(r.calls), 0), total_ms: r1(hit.reduce((a, r) => a + Number(r.total_ms), 0)) }
-  }
-  return { classes, total_calls: rows.reduce((a, r) => a + Number(r.calls), 0),
-    top: rows.sort((a, b) => b.calls - a.calls).slice(0, 8).map(r => ({ calls: Number(r.calls), total_ms: Number(r.total_ms), query: r.query })) }
-}
+const STATEMENTS = "SELECT coalesce(json_agg(s), '[]') FROM (SELECT queryid::text queryid, regexp_replace(query, '\\s+', ' ', 'g') query, calls, round(total_exec_time::numeric, 1) total_ms, rows FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database()) AND query NOT LIKE '%pg_stat_%' AND query NOT LIKE '%pg_locks%') s"
+const statements = () => classifyStatements(JSON.parse(psql(STATEMENTS) || '[]'))
 const resetStatements = () => psql('SELECT pg_stat_statements_reset()')
-const health = async () => { const r = await call('probe', 'health', 'GET', '/api/v1/health', undefined, false); try { return r.json().pool?.checkout ?? null } catch { return null } }
-const checkoutDelta = (a, b) => a && b ? Object.fromEntries(['checkouts', 'unattributed', 'capacity_waits', 'wait_total_ms', 'hold_total_ms', 'connects']
-  .map(k => [k, r1(b[k] - a[k])])) : null
+// The whole health body, or null; see healthDelta.
+const health = async () => { const r = await call('probe', 'health', 'GET', '/api/v1/health', undefined, false); try { return r.status === 200 ? r.json() : null } catch { return null } }
 function serverMemory() {
   const text = execFileSync('docker', ['exec', SERVER, 'sh', '-c',
     'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = hmem-server ] && grep -E "^(VmRSS|VmHWM):" $p/status; done'], { encoding: 'utf8' })
@@ -345,7 +407,7 @@ async function run() {
     await sleep(2000)
     let h0 = await health(); resetStatements(); const idleStart = performance.now()
     await sleep(IDLE_MS)
-    P.idle = { ms: r1(performance.now() - idleStart), scopes: observers.length, statements: statements(), checkout: checkoutDelta(h0, await health()),
+    P.idle = { ms: r1(performance.now() - idleStart), scopes: observers.length, statements: statements(), ...healthDelta(h0, await health()),
       frames_received: observers.reduce((a, o) => a + o.frames.filter(f => f.at >= idleStart).length, 0), memory: memorySummary(mem.rows, idleStart) }
 
     // Contention: foreground, capture, proofs, skewed writes, a stalled socket,
@@ -404,7 +466,7 @@ async function run() {
     await Promise.all(tasks)
     const appended = await Promise.all(appenders)
     const cEnd = performance.now()
-    P.contention = { ms: r1(cEnd - cStart), statements: statements(), checkout: checkoutDelta(h0, await health()), events,
+    P.contention = { ms: r1(cEnd - cStart), statements: statements(), ...healthDelta(h0, await health()), events,
       seeded_appenders: seeded.length, seeded_appends: appended.reduce((a, b) => a + b, 0), memory: memorySummary(mem.rows, cStart, cEnd) }
     const archiveEvent = events.archive_stream
     if (archiveEvent?.streams) archiveEvent.rss_during_max = memorySummary(mem.rows, cStart + 40000, cStart + 40000 + Math.max(...archiveEvent.streams.map(s => s.ms)) + 1000).rss_max
@@ -428,6 +490,8 @@ async function run() {
     const HOLD_S = 8
     const blockSnap = await resync('stuck', blockWs, 'workspace_shell_v1'), blockTicket = await ticket('stuck', blockWs, blockSnap.resume)
     const lateResume = (await resync('stuck', empties[0], 'workspace_shell_v1')).resume
+    // Pool deltas span the hold; both health GETs lie outside it.
+    const stuckHealth = await health()
     const holder = spawn('docker', ['exec', '-i', PG, 'psql', '-U', 'hmem', '-d', 'hmem', '-AtqX'])
     holder.stdin.end(`BEGIN; SELECT hmem_change_stream_lock('workspace', '${blockWs}'); SELECT pg_sleep(${HOLD_S}); ROLLBACK;
 `)
@@ -454,6 +518,7 @@ async function run() {
     stuck.late_checkpoint_ms = lateCheckpoint ? r1(lateCheckpoint.at - lateStart) : null
     await holderDone; await writer; await sampling
     await sleep(1500)
+    Object.assign(stuck, healthDelta(stuckHealth, await health()))
     stuck.release_ms = r1(released - sStart)
     stuck.lock_waiters = { max: Math.max(0, ...waiterSamples.map(x => x.n)), last_seen_ms: r1(Math.max(0, ...waiterSamples.filter(x => x.n > 0).map(x => x.at - sStart))) }
     stuck.lock_waiters_after_release = waiters()

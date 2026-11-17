@@ -11,7 +11,6 @@ import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
-import Data.Text qualified as T
 import HMem.Server.WebSocketDelivery
 import HMem.Server.WebSocketTelemetry
 import System.Log.FastLogger (fromLogStr)
@@ -119,37 +118,38 @@ spec = describe "owned WebSocket delivery" $ do
     withDeliveryTurn owner (const (write >> write)) `shouldReturn` DeliveryCompleted ()
     finishDeliveryOwner owner
 
-  it "uses at most four leases and wakes a waiting producer on closing" $ do
-    hub <- newDeliveryHub
-    owners <- replicateM 4 (admitted hub (pure ()))
-    waiting <- admitted hub (pure ())
-    gates <- replicateM 4 newEmptyMVar
-    entered <- replicateM 4 newEmptyMVar
-    fifth <- newEmptyMVar
-    let run owner gate ready = withDeliveryTurn owner $ \_ -> putMVar ready () >> takeMVar gate
-        runAll [] body = body
-        runAll (action:rest) body = withAsync action $ \worker ->
-          runAll rest (body >> void (wait worker))
-        unblock = forM_ gates (\gate -> void (tryPutMVar gate ()))
-    runAll (zipWith3 run owners gates entered) $
-      (do
-        forM_ entered (within "lease entered" . takeMVar)
-        withAsync (withDeliveryTurn waiting (const (putMVar fifth ()))) $ \producer -> do
-          timeout 30000 (readMVar fifth) `shouldReturn` Nothing
-          gauges <- deliveryGauges hub
-          (gauges.leasesInUse, gauges.leaseWaiters, gauges.leasesQuarantined) `shouldBe` (4, 1, 0)
-          abortDeliveryOwner waiting
-          within "waiting producer woke" (wait producer) `shouldReturn` DeliveryRetired
-          tryTakeMVar fifth `shouldReturn` Nothing
-          stats <- hubStats hub
-          countOf stats turnRefused `shouldBe` 1
-          countOf stats ("websocket_lease", "", "refused") `shouldBe` 1
-          (.leaseWaiters) <$> deliveryGauges hub `shouldReturn` 0)
-      `finally` unblock
-    forM_ (waiting:owners) finishDeliveryOwner
-    awaitDeliveryDrain hub 250000
-    stats <- hubStats hub
-    countOf stats turnCompleted `shouldBe` 4
+  forM_ [(4, newDeliveryHub), (9, newDeliveryHubLeases 9)] $ \(leases, makeHub) ->
+    it ("uses exactly " <> show leases <> " leases and wakes a waiting producer on closing") $ do
+      hub <- makeHub
+      owners <- replicateM leases (admitted hub (pure ()))
+      waiting <- admitted hub (pure ())
+      gates <- replicateM leases newEmptyMVar
+      entered <- replicateM leases newEmptyMVar
+      extra <- newEmptyMVar
+      let run owner gate ready = withDeliveryTurn owner $ \_ -> putMVar ready () >> takeMVar gate
+          runAll [] body = body
+          runAll (action:rest) body = withAsync action $ \worker ->
+            runAll rest (body >> void (wait worker))
+          unblock = forM_ gates (\gate -> void (tryPutMVar gate ()))
+      runAll (zipWith3 run owners gates entered) $
+        (do
+          forM_ entered (within "lease entered" . takeMVar)
+          withAsync (withDeliveryTurn waiting (const (putMVar extra ()))) $ \producer -> do
+            timeout 30000 (readMVar extra) `shouldReturn` Nothing
+            gauges <- deliveryGauges hub
+            (gauges.leasesInUse, gauges.leaseCapacity, gauges.leaseWaiters, gauges.leasesQuarantined) `shouldBe` (leases, leases, 1, 0)
+            abortDeliveryOwner waiting
+            within "waiting producer woke" (wait producer) `shouldReturn` DeliveryRetired
+            tryTakeMVar extra `shouldReturn` Nothing
+            stats <- hubStats hub
+            countOf stats turnRefused `shouldBe` 1
+            countOf stats ("websocket_lease", "", "refused") `shouldBe` 1
+            (.leaseWaiters) <$> deliveryGauges hub `shouldReturn` 0)
+        `finally` unblock
+      forM_ (waiting:owners) finishDeliveryOwner
+      awaitDeliveryDrain hub 250000
+      stats <- hubStats hub
+      countOf stats turnCompleted `shouldBe` leases
 
   it "rejects a foreign participant before an application Close mutates state" $ do
     hub <- newDeliveryHub
@@ -164,26 +164,28 @@ spec = describe "owned WebSocket delivery" $ do
     tryTakeMVar entered `shouldReturn` Nothing
     forM_ [first, second] finishDeliveryOwner
 
-  it "holds physical seats through abort until outer worker completion" $ do
+  it "admits uncapped physical connections and holds each seat through abort until outer worker completion" $ do
     hub <- newDeliveryHub
-    same <- replicateM 32 (admitted hub (pure ()))
-    refused <- newDeliveryOwner hub (pure ())
-    let oldest = head same
-    reservePhysicalConnection refused "audience" `shouldReturn` False
-    abortDeliveryOwner oldest
-    reservePhysicalConnection refused "audience" `shouldReturn` False
-    finishDeliveryOwner oldest
-    reservePhysicalConnection refused "audience" `shouldReturn` True
-    others <- mapM (\n -> do
+    -- 129 owners, beyond the former 32-per-audience and 128 caps, are all admitted.
+    same <- replicateM 33 (admitted hub (pure ()))
+    others <- mapM (\_ -> do
       owner <- newDeliveryOwner hub (pure ())
-      reservePhysicalConnection owner (T.pack (show n)) `shouldReturn` True
+      reservePhysicalConnection owner `shouldReturn` True
       pure owner) [1..96 :: Int]
+    (.physicalAdmitted) <$> deliveryGauges hub `shouldReturn` 129
+    let oldest = head same
+    abortDeliveryOwner oldest
+    (.physicalAdmitted) <$> deliveryGauges hub `shouldReturn` 129
+    finishDeliveryOwner oldest
+    (.physicalAdmitted) <$> deliveryGauges hub `shouldReturn` 128
+    duplicate <- pure (head others)
+    reservePhysicalConnection duplicate `shouldReturn` False
     extra <- newDeliveryOwner hub (pure ())
-    reservePhysicalConnection extra "over capacity" `shouldReturn` False
     beginDeliveryShutdown hub
-    reservePhysicalConnection extra "closed" `shouldReturn` False
-    forM_ (refused:tail same <> others) finishDeliveryOwner
+    reservePhysicalConnection extra `shouldReturn` False
+    forM_ (tail same <> others) finishDeliveryOwner
     awaitDeliveryDrain hub 250000
+    (.physicalAdmitted) <$> deliveryGauges hub `shouldReturn` 0
 
   it "retains a lease after an unfinished join without closing other admission" $ do
     hub <- newDeliveryHub
@@ -240,17 +242,15 @@ spec = describe "owned WebSocket delivery" $ do
       withDeliveryTurn owner (const (controlledWrite owner write)) `shouldReturn` DeliveryRetired
       within "masked writer entered" (takeMVar writing)
       finishDeliveryOwner owner
-      -- The aborted owner's seat still counts toward its audience limit.
-      refused <- newDeliveryOwner hub (pure ())
-      reservePhysicalConnection refused "audience" `shouldReturn` False
       forM_ same finishDeliveryOwner
+      -- The aborted owner's seat is still counted, as retained.
+      gauges <- deliveryGauges hub
+      (gauges.physicalAdmitted, gauges.physicalRetained) `shouldBe` (1, 1)
       awaitDeliveryDrain hub 50000 `shouldThrow` (== DeliveryUnconfirmed)
       putMVar release ()
       within "released writer actually ended" (takeMVar childEnded)
       awaitDeliveryDrain hub 250000
-      reservePhysicalConnection refused "audience" `shouldReturn` True
-      finishDeliveryOwner refused
-      awaitDeliveryDrain hub 250000)
+      (.physicalAdmitted) <$> deliveryGauges hub `shouldReturn` 0)
       `finally` void (tryPutMVar release ())
 
   it "preserves cancellation after a successful native abort and join" $ do
@@ -363,21 +363,21 @@ spec = describe "owned WebSocket delivery" $ do
     abortDeliveryOwner owner `shouldThrow` (== DeliveryUnconfirmed)
     finishDeliveryOwner owner `shouldThrow` (== DeliveryUnconfirmed)
     extra <- newDeliveryOwner hub (pure ())
-    reservePhysicalConnection extra "other" `shouldReturn` False
+    reservePhysicalConnection extra `shouldReturn` False
     awaitDeliveryDrain hub 250000 `shouldThrow` (== DeliveryUnconfirmed)
 
 -- Another owner is admitted and completes a turn, then leaves no residue.
 assertAdmissionOpen :: DeliveryHub -> IO ()
 assertAdmissionOpen hub = do
   extra <- newDeliveryOwner hub (pure ())
-  reservePhysicalConnection extra "other" `shouldReturn` True
+  reservePhysicalConnection extra `shouldReturn` True
   withDeliveryTurn extra (const (controlledWrite extra (pure ()))) `shouldReturn` DeliveryCompleted ()
   finishDeliveryOwner extra
 
 admitted :: DeliveryHub -> IO () -> IO DeliveryOwner
 admitted hub abort = do
   owner <- newDeliveryOwner hub abort
-  reservePhysicalConnection owner "audience" `shouldReturn` True
+  reservePhysicalConnection owner `shouldReturn` True
   pure owner
 
 hubStats :: DeliveryHub -> IO (Map OutcomeKey OutcomeStats)

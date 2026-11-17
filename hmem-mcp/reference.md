@@ -234,7 +234,8 @@ authorization fails closed. Status distinguishes `validating`, `following`,
 The registry retains at most sixteen terminal entries for five minutes.
 
 Route prefix verification submission and polling to the same server process.
-Restart, eviction or routing to a different process can make the operation
+A server restart, server eviction of a terminal result beyond its 65,536-result
+retention ceiling, or routing to a different process can make the operation
 unknown. The follower rehashes the local prefix and submits a fresh operation
 ID. It allows four such recoveries without a verified proof, then reports
 `verification_retry_exhausted`. Correct the routing or server availability and
@@ -371,9 +372,8 @@ To change filters, explicitly create a context with optional
 `replace_context_token`. Optional caller-owned `search_session` and increasing
 `generation` (1..2147483647) must be paired on creation; continuations omit both.
 MCP synthesizes no session state and never replaces an expired context
-automatically. A 409 `discovery_restart_required` requires a fresh query; a 429
-`discovery_capacity` preserves the current query for retry. Both retain structured
-HTTP status/details. Nested SHA validation errors identify the actual
+automatically. A 409 `discovery_restart_required` requires a fresh query; it and
+other HTTP failures retain structured HTTP status/details. Nested SHA validation errors identify the actual
 `filters.git_sha`, `filters.current_git_sha`, or `filters.history_git_sha`, with
 null attribution when several are invalid.
 

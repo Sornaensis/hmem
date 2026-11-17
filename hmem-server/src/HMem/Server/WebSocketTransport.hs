@@ -4,6 +4,7 @@ module HMem.Server.WebSocketTransport
   ( NativeTransport
   , NativeConnection
   , newNativeTransport
+  , newNativeTransportWithLeases
   , withNativeTransportSettings
   , runNativePlain
   , runPlainSocket
@@ -16,6 +17,7 @@ module HMem.Server.WebSocketTransport
   , awaitNativeDrain
   , nativeTelemetry
   , nativeGauges
+  , nativeAdmissionOpen
   , DeliveryTurn
   , DeliveryResult(..)
   , DeliveryFailure(..)
@@ -63,9 +65,13 @@ data Startup = Startup !Socket.Socket !(TVar StartupState)
 data StartupState = AwaitingFork | ForkReturned | Claimed | Cancelled
 
 newNativeTransport :: IO NativeTransport
-newNativeTransport =
+newNativeTransport = newNativeTransportWithLeases Delivery.defaultDeliveryLeases
+
+-- | A transport whose delivery hub has the given number of shared leases.
+newNativeTransportWithLeases :: Int -> IO NativeTransport
+newNativeTransportWithLeases leases =
   NativeTransport <$> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty
-    <*> newTVarIO [] <*> Delivery.newDeliveryHub <*> newTVarIO 0
+    <*> newTVarIO [] <*> Delivery.newDeliveryHubLeases leases <*> newTVarIO 0
 
 runNativePlain :: NativeTransport -> Settings -> Application -> IO ()
 runNativePlain transport settings application = Socket.withSocketsDo $
@@ -233,7 +239,7 @@ abortSocket socket =
   (Socket.shutdown socket Socket.ShutdownBoth `catch` \(_ :: IOException) -> pure ())
     `finally` Socket.close' socket
 
-reservePhysicalConnection :: NativeConnection -> Text -> IO Bool
+reservePhysicalConnection :: NativeConnection -> IO Bool
 reservePhysicalConnection (NativeConnection owner) = Delivery.reservePhysicalConnection owner
 
 withDeliveryTurn :: NativeConnection -> (DeliveryTurn -> IO a) -> IO (DeliveryResult a)
@@ -253,6 +259,10 @@ nativeTelemetry transport = Delivery.deliveryTelemetry transport.deliveryHub
 
 nativeGauges :: NativeTransport -> IO DeliveryGauges
 nativeGauges transport = Delivery.deliveryGauges transport.deliveryHub
+
+-- | Cheap check that new physical admissions are still accepted.
+nativeAdmissionOpen :: NativeTransport -> IO Bool
+nativeAdmissionOpen transport = Delivery.deliveryAdmissionOpen transport.deliveryHub
 
 beginNativeShutdown :: NativeTransport -> IO ()
 beginNativeShutdown transport = Delivery.beginDeliveryShutdown transport.deliveryHub

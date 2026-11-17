@@ -62,7 +62,8 @@ function classifyStatements(rows) {
 }
 
 // Health deltas between two /api/v1/health bodies (null when a GET failed).
-// Images without a delivery pool or HTTP admission report null for those.
+// Images without a delivery pool report null for it. http_admission is
+// optional legacy: current servers have no HTTP admission and report null.
 const CHECKOUT_COUNTERS = ['checkouts', 'unattributed', 'capacity_waits', 'wait_total_ms', 'hold_total_ms', 'connects']
 const ADMISSION_COUNTERS = ['admitted', 'rejected_queue_full', 'rejected_timeout', 'wait_total_ms']
 const ADMISSION_GAUGES = ['concurrency', 'heavy_concurrency', 'queue_limit', 'queue_timeout_ms', 'in_flight', 'heavy_in_flight', 'queued', 'wait_max_ms']

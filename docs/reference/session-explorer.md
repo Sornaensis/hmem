@@ -368,7 +368,7 @@ The five-minute delivery capability expires with `session_activity_expired` and 
 Close frame. The server stops hints; a cooperative client reconnects with a new
 ticket and readiness baseline. A peer that does not complete Close retains its
 physical slot until the handler exits.
-Ticket and live-client registries each cap at 128 globally and eight per principal.
+Ticket and live-client registries are not capped; expired tickets are pruned.
 Each hint rechecks workspace read access; own membership controls refresh session
 and catalogue authority. The client bounds ticket and ready/handshake phases to
 15 seconds, retains the physical fetch admission through its callback, and uses

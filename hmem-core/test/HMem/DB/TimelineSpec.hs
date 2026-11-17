@@ -5,7 +5,10 @@ import Data.ByteString.Char8 qualified as BS8
 import Data.Functor.Contravariant (contramap)
 import Data.List (sort)
 import Data.Text (Text)
-import Data.Time (UTCTime(..), addDays, addUTCTime, getCurrentTime, utctDay)
+import Data.Time (UTCTime(..), addDays, addUTCTime, diffUTCTime, getCurrentTime, utctDay)
+import Data.Pool (Pool)
+import Data.Text qualified as T
+import Hasql.Connection qualified as Hasql
 import Data.UUID (UUID)
 import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
@@ -19,13 +22,62 @@ import HMem.DB.Pool (runSession)
 import HMem.DB.Project
 import HMem.DB.Task qualified as Task
 import HMem.DB.TestHarness
-import HMem.DB.Timeline
+import HMem.DB.Timeline hiding (listWorkspaceTimelineBuckets)
+import HMem.DB.Timeline qualified as Timeline
 import HMem.DB.Workspace (getWorkspacePlanningCounts)
 import HMem.Types
 
 spec :: Spec
 spec = beforeAll setupTestPool $ aroundWith withTestTransaction $
   describe "Timeline buckets" $ do
+    it "plans bucket inventory without whole-audit sequential scans or per-bucket range joins" $ \env -> do
+      workspace <- createTestWorkspace env "timeline-plan"
+      _ <- stockProject env workspace.id Nothing
+      retimePending env workspace.id (utc "2020-01-01 00:00:00 UTC")
+      mutateAudit env workspace.id "UPDATE audit_log SET workspace_id = NULL WHERE workspace_id = $1 AND entity_type = 'project'"
+      plans <- mapM (\mode -> explainBuckets env mode workspace.id) ["force_generic_plan", "force_custom_plan"]
+      mapM_ (\plan -> do
+        filter (T.isInfixOf "Seq Scan on audit_log") plan `shouldBe` []
+        -- Buckets and inventory samples join by key, never by time range.
+        filter (\line -> T.isInfixOf "Join Filter" line && T.isInfixOf ">=" line) plan `shouldBe` []) plans
+      -- The workspace stays correct with its legacy rows.
+      _ <- listWorkspaceTimelineBuckets env.pool workspace.id (utc "2019-12-30 00:00:00 UTC") (utc "2020-01-06 00:00:00 UTC") "week"
+      pure ()
+
+    it "matches the pre-repair statement across bucket sizes and range boundaries" $ \env -> do
+      workspace <- createTestWorkspace env "timeline-equivalence"
+      root <- stockProject env workspace.id Nothing
+      nested <- stockProject env workspace.id (Just root.id)
+      parent <- stockTask env workspace.id (Just root.id) Nothing
+      child <- stockTask env workspace.id (Just root.id) (Just parent.id)
+      loose <- stockTask env workspace.id Nothing Nothing
+      firstObservation <- stockObservation env workspace.id
+      _ <- stockObservation env workspace.id
+      retimePending env workspace.id (utc "2020-01-30 10:00:00 UTC")
+      setTaskStatus env child.id Done
+      setTaskStatus env loose.id Cancelled
+      setProjectStatus env root.id ProjPaused
+      retimePending env workspace.id (utc "2020-02-03 00:00:00 UTC")
+      _ <- Task.updateTask env.pool child.id UpdateTask
+        { title = Nothing, description = Unchanged, projectId = Unchanged, parentId = SetNull, status = Nothing, priority = Nothing, metadata = Nothing }
+      setProjectStatus env root.id ProjActive
+      deleteObservation env.pool workspace.id firstObservation.id `shouldReturn` True
+      retimePending env workspace.id (utc "2020-03-31 23:59:59 UTC")
+      deleteProjectCascade env.pool nested.id >>= (`shouldSatisfy` (/= Nothing))
+      retimePending env workspace.id (utc "2020-04-01 00:00:00 UTC")
+      restoreProject env.pool nested.id `shouldReturn` True
+      setTaskStatus env loose.id Todo
+      retimePending env workspace.id (utc "2020-07-15 12:00:00 UTC")
+      mutateAudit env workspace.id "UPDATE audit_log SET workspace_id = NULL WHERE workspace_id = $1 AND entity_type = 'observation'"
+      mapM_ (\(size, since, untilTime) -> listWorkspaceTimelineBuckets env.pool workspace.id (utc since) (utc untilTime) size)
+        [ ("day", "2020-01-29 00:00:00 UTC", "2020-02-05 00:00:00 UTC")
+        , ("day", "2020-03-31 12:00:00 UTC", "2020-04-02 06:00:00 UTC")
+        , ("week", "2020-01-01 00:00:00 UTC", "2020-08-01 00:00:00 UTC")
+        , ("month", "2019-11-15 00:00:00 UTC", "2020-09-01 00:00:00 UTC")
+        , ("quarter", "2019-10-01 00:00:00 UTC", "2021-01-01 00:00:00 UTC")
+        , ("quarter", "2020-02-03 00:00:00 UTC", "2020-04-01 00:00:00 UTC")
+        , ("day", "2019-01-01 00:00:00 UTC", "2020-03-01 00:00:00 UTC") ]
+
     it "reconstructs observation carry-in and visible/out-of-range hard deletes at exclusive cutoffs" $ \env -> do
       workspace <- createTestWorkspace env "timeline-observation-carry"
       first <- stockObservation env workspace.id
@@ -562,3 +614,264 @@ insertAuditStatement = Statement.Statement
    (contramap (\(_,_,_,_,_,_,g) -> g) (Enc.param (Enc.nonNullable Enc.timestamptz))))
   Dec.noResult
   True
+
+-- The pre-repair bucket statement, kept verbatim as an equivalence oracle.
+oracleBucketsStatement :: Statement.Statement (UUID, UTCTime, UTCTime, Text) [WorkspaceTimelineBucket]
+oracleBucketsStatement = Statement.Statement sql encoder (Dec.rowList timelineBucketRowDecoder) True
+  where
+    sql = BS8.pack $ unlines $
+      [ "WITH bounds AS ("
+      , "  SELECT"
+      , "    date_trunc($4, $2 AT TIME ZONE 'UTC') AS series_start,"
+      , "    date_trunc($4, ($3 - interval '1 microsecond') AT TIME ZONE 'UTC') AS series_end,"
+      , "    CASE $4"
+      , "      WHEN 'day' THEN interval '1 day'"
+      , "      WHEN 'week' THEN interval '1 week'"
+      , "      WHEN 'month' THEN interval '1 month'"
+      , "      WHEN 'quarter' THEN interval '3 months'"
+      , "    END AS step"
+      , "), buckets AS ("
+      , "  SELECT"
+      , "    gs.bucket_start AS bucket_start_utc,"
+      , "    gs.bucket_start + bounds.step AS bucket_end_utc"
+      , "  FROM bounds"
+      , "  CROSS JOIN LATERAL generate_series(bounds.series_start, bounds.series_end, bounds.step) AS gs(bucket_start)"
+      , ")"
+      ] <> oracleInventoryCtes <>
+      [ ", candidates AS ("
+      , "  SELECT"
+      , "    a.id AS audit_id,"
+      , "    a.workspace_id AS workspace_id,"
+      , "    a.entity_id::uuid AS entity_uuid,"
+      , "    a.changed_at AS occurred_at,"
+      , "    a.entity_type AS raw_entity_type,"
+      , "    a.action::text AS action_text,"
+      , "    NULLIF(a.old_values ->> 'status', '') AS old_status,"
+      , "    NULLIF(a.new_values ->> 'status', '') AS new_status,"
+      , "    NULLIF(a.old_values ->> 'deleted_at', '') AS old_deleted_at,"
+      , "    NULLIF(a.new_values ->> 'deleted_at', '') AS new_deleted_at,"
+      , "    NULLIF(CASE"
+      , "      WHEN a.new_values ? 'parent_id' THEN a.new_values ->> 'parent_id'"
+      , "      WHEN a.old_values ? 'parent_id' THEN a.old_values ->> 'parent_id'"
+      , "      ELSE t.parent_id::text"
+      , "    END, '')::uuid AS parent_task_uuid,"
+      , "    NULLIF(CASE"
+      , "      WHEN a.new_values ? 'parent_id' THEN a.new_values ->> 'parent_id'"
+      , "      WHEN a.old_values ? 'parent_id' THEN a.old_values ->> 'parent_id'"
+      , "      ELSE p.parent_id::text"
+      , "    END, '')::uuid AS parent_project_uuid"
+      , "  FROM audit_log a"
+      , "  LEFT JOIN tasks t ON a.entity_type = 'task' AND t.id = a.entity_id::uuid"
+      , "  LEFT JOIN projects p ON a.entity_type = 'project' AND p.id = a.entity_id::uuid"
+      , "  WHERE a.workspace_id = $1"
+      , "    AND a.entity_type IN ('project', 'task', 'observation')"
+      , "    AND a.action::text IN ('create', 'update', 'delete')"
+      , "    AND a.changed_at >= $2"
+      , "    AND a.changed_at < $3"
+      , "), events AS ("
+      , "  SELECT"
+      , "    c.occurred_at,"
+      , "    CASE"
+      , "      WHEN c.raw_entity_type = 'project' AND c.parent_project_uuid IS NOT NULL THEN 'subproject'"
+      , "      WHEN c.raw_entity_type = 'project' THEN 'project'"
+      , "      WHEN c.raw_entity_type = 'task' AND c.parent_task_uuid IS NOT NULL THEN 'subtask'"
+      , "      ELSE 'task'"
+      , "    END AS legacy_entity_kind,"
+      , "    CASE"
+      , "      WHEN c.raw_entity_type = 'project' AND c.action_text = 'create' THEN 'created'"
+      , "      WHEN c.raw_entity_type = 'project' AND c.action_text = 'update' AND c.old_status IS NOT NULL AND c.new_status IN ('completed', 'archived') AND c.old_status <> c.new_status THEN 'completed'"
+      , "      WHEN c.raw_entity_type = 'task' AND c.action_text = 'create' THEN 'created'"
+      , "      WHEN c.raw_entity_type = 'task' AND c.action_text = 'update' AND c.old_status IS NOT NULL AND c.new_status = 'done' AND c.old_status <> c.new_status THEN 'completed'"
+      , "      WHEN c.raw_entity_type = 'task' AND c.action_text = 'update' AND c.old_status IS NOT NULL AND c.new_status = 'cancelled' AND c.old_status <> c.new_status THEN 'cancelled'"
+      , "      ELSE NULL"
+      , "    END AS legacy_lifecycle_action,"
+      , "    CASE"
+      , "      WHEN c.raw_entity_type = 'project' THEN 'project'"
+      , "      WHEN c.raw_entity_type = 'task' AND c.parent_task_uuid IS NOT NULL THEN 'subtask'"
+      , "      WHEN c.raw_entity_type = 'task' THEN 'task'"
+      , "      WHEN c.raw_entity_type = 'observation' THEN 'observation'"
+      , "    END AS canonical_entity_kind,"
+      , "    CASE"
+      , "      WHEN c.action_text = 'create' THEN 'created'"
+      , "      WHEN c.raw_entity_type = 'project' AND c.action_text = 'update' AND c.old_status IS DISTINCT FROM c.new_status AND c.new_status = 'completed' THEN 'completed'"
+      , "      WHEN c.raw_entity_type = 'task' AND c.action_text = 'update' AND c.old_status IS DISTINCT FROM c.new_status AND c.new_status = 'done' THEN 'completed'"
+      , "      WHEN c.raw_entity_type = 'project' AND c.action_text = 'update' AND c.old_status IS DISTINCT FROM c.new_status AND c.new_status = 'archived' THEN 'archived'"
+      , "      WHEN c.raw_entity_type = 'task' AND c.action_text = 'update' AND c.old_status IS DISTINCT FROM c.new_status AND c.new_status = 'cancelled' THEN 'cancelled'"
+      , "      WHEN c.action_text = 'delete' THEN 'deleted'"
+      , "      WHEN c.raw_entity_type IN ('project', 'task') AND c.action_text = 'update' AND c.old_deleted_at IS NULL AND c.new_deleted_at IS NOT NULL THEN 'deleted'"
+      , "      ELSE NULL"
+      , "    END AS canonical_lifecycle_action"
+      , "  FROM candidates c"
+      , "), lifecycle_buckets AS ("
+      , "SELECT"
+      , "  b.bucket_start_utc AT TIME ZONE 'UTC' AS bucket_start,"
+      , "  b.bucket_end_utc AT TIME ZONE 'UTC' AS bucket_end,"
+      , "  CASE $4"
+      , "    WHEN 'quarter' THEN ('Q' || EXTRACT(quarter FROM b.bucket_start_utc)::int::text || ' ' || to_char(b.bucket_start_utc, 'YYYY'))"
+      , "    WHEN 'month' THEN to_char(b.bucket_start_utc, 'Mon YYYY')"
+      , "    ELSE to_char(b.bucket_start_utc, 'YYYY-MM-DD')"
+      , "  END AS label,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'project' AND e.legacy_lifecycle_action = 'created'))::int4 AS project_created,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'project' AND e.legacy_lifecycle_action = 'completed'))::int4 AS project_completed,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'project' AND e.legacy_lifecycle_action = 'cancelled'))::int4 AS project_cancelled,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subproject' AND e.legacy_lifecycle_action = 'created'))::int4 AS subproject_created,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subproject' AND e.legacy_lifecycle_action = 'completed'))::int4 AS subproject_completed,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subproject' AND e.legacy_lifecycle_action = 'cancelled'))::int4 AS subproject_cancelled,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'task' AND e.legacy_lifecycle_action = 'created'))::int4 AS task_created,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'task' AND e.legacy_lifecycle_action = 'completed'))::int4 AS task_completed,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'task' AND e.legacy_lifecycle_action = 'cancelled'))::int4 AS task_cancelled,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subtask' AND e.legacy_lifecycle_action = 'created'))::int4 AS subtask_created,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subtask' AND e.legacy_lifecycle_action = 'completed'))::int4 AS subtask_completed,"
+      , "  (COUNT(e.legacy_lifecycle_action) FILTER (WHERE e.legacy_entity_kind = 'subtask' AND e.legacy_lifecycle_action = 'cancelled'))::int4 AS subtask_cancelled,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'project' AND e.canonical_lifecycle_action = 'created'))::int4 AS series_project_created,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'project' AND e.canonical_lifecycle_action = 'completed'))::int4 AS series_project_completed,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'project' AND e.canonical_lifecycle_action = 'deleted'))::int4 AS series_project_deleted,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'project' AND e.canonical_lifecycle_action = 'archived'))::int4 AS series_project_archived,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'project' AND e.canonical_lifecycle_action = 'cancelled'))::int4 AS series_project_cancelled,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'task' AND e.canonical_lifecycle_action = 'created'))::int4 AS series_task_created,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'task' AND e.canonical_lifecycle_action = 'completed'))::int4 AS series_task_completed,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'task' AND e.canonical_lifecycle_action = 'deleted'))::int4 AS series_task_deleted,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'task' AND e.canonical_lifecycle_action = 'archived'))::int4 AS series_task_archived,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'task' AND e.canonical_lifecycle_action = 'cancelled'))::int4 AS series_task_cancelled,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'subtask' AND e.canonical_lifecycle_action = 'created'))::int4 AS series_subtask_created,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'subtask' AND e.canonical_lifecycle_action = 'completed'))::int4 AS series_subtask_completed,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'subtask' AND e.canonical_lifecycle_action = 'deleted'))::int4 AS series_subtask_deleted,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'subtask' AND e.canonical_lifecycle_action = 'archived'))::int4 AS series_subtask_archived,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'subtask' AND e.canonical_lifecycle_action = 'cancelled'))::int4 AS series_subtask_cancelled,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'observation' AND e.canonical_lifecycle_action = 'created'))::int4 AS series_observation_created,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'observation' AND e.canonical_lifecycle_action = 'completed'))::int4 AS series_observation_completed,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'observation' AND e.canonical_lifecycle_action = 'deleted'))::int4 AS series_observation_deleted,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'observation' AND e.canonical_lifecycle_action = 'archived'))::int4 AS series_observation_archived,"
+      , "  (COUNT(e.canonical_lifecycle_action) FILTER (WHERE e.canonical_entity_kind = 'observation' AND e.canonical_lifecycle_action = 'cancelled'))::int4 AS series_observation_cancelled"
+      , "FROM buckets b"
+      , "LEFT JOIN events e"
+      , "  ON (e.legacy_lifecycle_action IS NOT NULL OR e.canonical_lifecycle_action IS NOT NULL)"
+      , " AND e.occurred_at >= (b.bucket_start_utc AT TIME ZONE 'UTC')"
+      , " AND e.occurred_at < (b.bucket_end_utc AT TIME ZONE 'UTC')"
+      , "GROUP BY b.bucket_start_utc, b.bucket_end_utc"
+      , "ORDER BY b.bucket_start_utc ASC"
+      , "LIMIT 367"
+      , ")"
+      , "SELECT l.*,"
+      , "  CASE WHEN s.open_status = 'available' THEN s.projects END,"
+      , "  CASE WHEN s.open_status = 'available' THEN s.tasks END,"
+      , "  CASE WHEN s.open_status <> 'future' THEN s.cutoff END, s.open_status,"
+      , "  CASE WHEN s.observation_status = 'available' THEN s.observations END,"
+      , "  CASE WHEN s.observation_status <> 'future' THEN s.cutoff END, s.observation_status"
+      , "FROM lifecycle_buckets l JOIN inventory_samples s ON s.bucket_start_utc AT TIME ZONE 'UTC' = l.bucket_start"
+      , "ORDER BY l.bucket_start ASC"
+      ]
+    encoder =
+      contramap (\(a,_,_,_) -> a) (Enc.param (Enc.nonNullable Enc.uuid)) <>
+      contramap (\(_,b,_,_) -> b) (Enc.param (Enc.nonNullable Enc.timestamptz)) <>
+      contramap (\(_,_,c,_) -> c) (Enc.param (Enc.nonNullable Enc.timestamptz)) <>
+      contramap (\(_,_,_,d) -> d) (Enc.param (Enc.nonNullable Enc.text))
+
+oracleInventoryCtes :: [String]
+oracleInventoryCtes =
+  [ ", inventory_clock AS (SELECT statement_timestamp() AS as_of), inventory_current AS ("
+  , "  SELECT 'project'::text AS kind, id::text AS entity_id, (deleted_at IS NULL AND status IN ('active', 'paused'))::int AS open FROM projects WHERE workspace_id = $1"
+  , "  UNION ALL SELECT 'task', id::text, (deleted_at IS NULL AND status IN ('todo', 'in_progress', 'blocked'))::int FROM tasks WHERE workspace_id = $1"
+  , "  UNION ALL SELECT 'observation', id::text, 1 FROM observations WHERE workspace_id = $1"
+  , "), inventory_audit AS MATERIALIZED ("
+  , "  SELECT a.*, a.action::text AS action_text FROM audit_log a"
+  , "  WHERE a.entity_type IN ('project', 'task', 'observation') AND (a.workspace_id = $1 OR (a.workspace_id IS NULL AND"
+  , "    (a.new_values ->> 'workspace_id' = $1::text OR a.old_values ->> 'workspace_id' = $1::text)))"
+  , "), inventory_states AS ("
+  , "  SELECT a.entity_type AS kind, a.entity_id, a.changed_at, a.action_text,"
+  , "    CASE WHEN side = 'old' THEN -1 ELSE 1 END AS sign, value,"
+  , "    (a.action_text = 'create' AND side = 'old') OR (a.action_text = 'delete' AND side = 'new') AS absent"
+  , "  FROM inventory_audit a CROSS JOIN LATERAL (VALUES ('old', a.old_values), ('new', a.new_values)) snapshots(side, value)"
+  , "), inventory_state_values AS MATERIALIZED ("
+  , "  SELECT s.*, CASE WHEN absent THEN 0 ELSE 1 END AS existence,"
+  , "    CASE WHEN NOT absent AND value ->> 'deleted_at' IS NULL AND"
+  , "      ((kind = 'project' AND value ->> 'status' IN ('active', 'paused')) OR (kind = 'task' AND value ->> 'status' IN ('todo', 'in_progress', 'blocked')) OR kind = 'observation') THEN 1 ELSE 0 END AS open"
+  , "  FROM inventory_states s"
+  , "), inventory_deltas AS MATERIALIZED ("
+  , "  SELECT kind, entity_id, changed_at, bool_or(action_text = 'create') AS has_create,"
+  , "    sum(open * sign) AS delta, sum(existence * sign) AS existence_delta,"
+  , "    bool_and(CASE WHEN absent THEN value IS NULL OR value = 'null'::jsonb ELSE"
+  , "      COALESCE(value ?& ARRAY['id','workspace_id'] AND value ->> 'id' = entity_id AND value ->> 'workspace_id' = $1::text AND"
+  , "      (kind = 'observation' OR (value ?& ARRAY['status','deleted_at'] AND"
+  , "       ((kind = 'project' AND value ->> 'status' IN ('active','paused','completed','archived')) OR"
+  , "        (kind = 'task' AND value ->> 'status' IN ('todo','in_progress','blocked','done','cancelled'))))), false) END"
+  , "      AND action_text IN ('create','update','delete')) AS valid"
+  , "  FROM inventory_state_values GROUP BY kind, entity_id, changed_at"
+  , "), inventory_history AS ("
+  , "  SELECT kind, entity_id, min(changed_at) AS first_at, max(changed_at) FILTER (WHERE NOT valid) AS invalid_at, bool_or(has_create) AS has_create"
+  , "  FROM inventory_deltas GROUP BY kind, entity_id"
+  , "), inventory_group_ends AS ("
+  , "  SELECT d.*, COALESCE(c.open, 0) - COALESCE(sum(d.delta) OVER later, 0) AS after_open,"
+  , "    CASE WHEN c.entity_id IS NULL THEN 0 ELSE 1 END - COALESCE(sum(d.existence_delta) OVER later, 0) AS after_existence"
+  , "  FROM inventory_deltas d LEFT JOIN inventory_current c USING (kind, entity_id)"
+  , "  WINDOW later AS (PARTITION BY d.kind, d.entity_id ORDER BY d.changed_at ROWS BETWEEN 1 FOLLOWING AND UNBOUNDED FOLLOWING)"
+  , "), inventory_group_boundaries AS ("
+  , "  SELECT g.*, after_open - delta AS before_open, after_existence - existence_delta AS before_existence FROM inventory_group_ends g"
+  , "), inventory_group_checks AS ("
+  , "  SELECT g.kind, g.entity_id, g.changed_at,"
+  , "    g.before_existence IN (0,1) AND g.after_existence IN (0,1) AND g.before_open IN (0,1) AND g.after_open IN (0,1)"
+  , "    AND g.before_open <= g.before_existence AND g.after_open <= g.after_existence"
+  , "    AND bool_or(s.sign = -1 AND s.existence = g.before_existence AND s.open = g.before_open)"
+  , "    AND bool_or(s.sign = 1 AND s.existence = g.after_existence AND s.open = g.after_open) AS agrees"
+  , "  FROM inventory_group_boundaries g JOIN inventory_state_values s USING (kind, entity_id, changed_at)"
+  , "  GROUP BY g.kind, g.entity_id, g.changed_at, g.before_existence, g.after_existence, g.before_open, g.after_open"
+  , "), inventory_reconciliation AS ("
+  , "  SELECT kind, entity_id, bool_and(agrees) AS agrees FROM inventory_group_checks GROUP BY kind, entity_id"
+  , "), inventory_coverage AS ("
+  , "  SELECT max(unknown_through) FILTER (WHERE kind <> 'observation') AS open_unknown_through,"
+  , "    max(unknown_through) FILTER (WHERE kind = 'observation') AS observation_unknown_through FROM ("
+  , "  SELECT kind, CASE WHEN h.entity_id IS NULL THEN clock.as_of"
+  , "    WHEN NOT reconciliation.agrees THEN clock.as_of"
+  , "    ELSE greatest(h.invalid_at, CASE WHEN NOT h.has_create THEN h.first_at END) END AS unknown_through"
+  , "  FROM inventory_current c FULL JOIN inventory_history h USING (kind, entity_id)"
+  , "  LEFT JOIN inventory_reconciliation reconciliation USING (kind, entity_id) CROSS JOIN inventory_clock clock"
+  , "  ) coverage"
+  , "), inventory_anchor AS ("
+  , "  SELECT COALESCE(sum(open) FILTER (WHERE kind = 'project'), 0) AS projects, COALESCE(sum(open) FILTER (WHERE kind = 'task'), 0) AS tasks,"
+  , "    count(*) FILTER (WHERE kind = 'observation') AS observations FROM inventory_current"
+  , "), inventory_cutoffs AS ("
+  , "  SELECT b.*, clock.as_of, least(b.bucket_end_utc AT TIME ZONE 'UTC', $3, clock.as_of) AS cutoff"
+  , "  FROM buckets b CROSS JOIN inventory_clock clock"
+  , "), inventory_samples AS ("
+  , "  SELECT b.bucket_start_utc, b.cutoff,"
+  , "    (a.projects - COALESCE(sum(d.delta) FILTER (WHERE d.kind = 'project'), 0))::bigint AS projects,"
+  , "    (a.tasks - COALESCE(sum(d.delta) FILTER (WHERE d.kind = 'task'), 0))::bigint AS tasks,"
+  , "    (a.observations - COALESCE(sum(d.existence_delta) FILTER (WHERE d.kind = 'observation'), 0))::bigint AS observations,"
+  , "    CASE WHEN b.bucket_start_utc AT TIME ZONE 'UTC' >= b.as_of THEN 'future'"
+  , "      WHEN b.cutoff < b.as_of AND b.cutoff <= coverage.open_unknown_through THEN 'history_unavailable' ELSE 'available' END AS open_status,"
+  , "    CASE WHEN b.bucket_start_utc AT TIME ZONE 'UTC' >= b.as_of THEN 'future'"
+  , "      WHEN b.cutoff < b.as_of AND b.cutoff <= coverage.observation_unknown_through THEN 'history_unavailable' ELSE 'available' END AS observation_status"
+  , "  FROM inventory_cutoffs b CROSS JOIN inventory_anchor a CROSS JOIN inventory_coverage coverage"
+  , "  LEFT JOIN inventory_deltas d ON d.changed_at >= b.cutoff AND b.cutoff < b.as_of"
+  , "  GROUP BY b.bucket_start_utc, b.cutoff, b.as_of, a.projects, a.tasks, a.observations, coverage.open_unknown_through, coverage.observation_unknown_through"
+  , ")"
+  ]
+
+-- Every bucket listing in this spec is also checked against the oracle.
+-- Values derived from the statement clock may differ only for a bucket that
+-- reaches the current time.
+listWorkspaceTimelineBuckets :: Pool Hasql.Connection -> UUID -> UTCTime -> UTCTime -> Text -> IO [WorkspaceTimelineBucket]
+listWorkspaceTimelineBuckets pool workspace since untilTime size = do
+  actual <- Timeline.listWorkspaceTimelineBuckets pool workspace since untilTime size
+  expected <- runSession pool (Session.statement (workspace, since, untilTime, size) oracleBucketsStatement)
+  now <- getCurrentTime
+  let recent value = maybe False (\at -> abs (diffUTCTime at now) < 60) value
+      clockFree bucket
+        | recent bucket.timelineBucketOpenAsOf || recent bucket.timelineBucketObservationAsOf =
+            bucket { timelineBucketOpenAsOf = Nothing, timelineBucketObservationAsOf = Nothing }
+        | otherwise = bucket
+  map clockFree actual `shouldBe` map clockFree expected
+  pure actual
+
+-- EXPLAIN of the bucket statement under a forced generic or custom plan, with
+-- sequential scans disabled so any remaining one has no index alternative.
+explainBuckets :: TestEnv -> BS8.ByteString -> UUID -> IO [Text]
+explainBuckets env mode workspace = runSession env.pool $ do
+  let Statement.Statement sqlText _ _ _ = Timeline.listWorkspaceTimelineBucketsStatement
+  Session.sql ("SET LOCAL enable_seqscan = off; SET LOCAL plan_cache_mode = " <> mode)
+  Session.sql ("PREPARE timeline_bucket_plan(uuid, timestamptz, timestamptz, text) AS " <> sqlText)
+  plan <- Session.statement () (Statement.Statement
+    ("EXPLAIN EXECUTE timeline_bucket_plan('" <> BS8.pack (show workspace) <> "', '2019-06-01T00:00:00Z', '2021-01-01T00:00:00Z', 'week')")
+    Enc.noParams (Dec.rowList (Dec.column (Dec.nonNullable Dec.text))) False)
+  Session.sql "DEALLOCATE timeline_bucket_plan"
+  pure plan

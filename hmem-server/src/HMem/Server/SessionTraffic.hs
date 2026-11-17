@@ -95,7 +95,7 @@ data MissReason
   = MissUnknownOperation  -- ^ never retained by this process, which is older than an operation lifetime
   | MissUnknownSinceStart -- ^ never retained by this process, which started within an operation lifetime
   | MissExpired           -- ^ terminal result removed after its five-minute lifetime
-  | MissEvicted           -- ^ terminal result evicted oldest-first on a later admission
+  | MissEvicted           -- ^ terminal result evicted earliest-expiring-first above the retention ceiling
   | MissTargetMismatch    -- ^ retained, but bound to another workspace, session or audience
   deriving stock (Show, Eq, Ord, Enum, Bounded)
 
@@ -114,7 +114,6 @@ data TrafficOutcome
   | OutcomeConflict
   | OutcomeTerminated
   | OutcomeEvidenceUnavailable
-  | OutcomeBusy
   | OutcomeUnavailable
   | OutcomeError
   deriving stock (Show, Eq, Ord)
@@ -236,7 +235,6 @@ warnOutcome = \case
   OutcomeUnknown _ -> True
   OutcomeMismatch -> True
   OutcomeFailed -> True
-  OutcomeBusy -> True
   OutcomeUnavailable -> True
   OutcomeError -> True
   _ -> False
@@ -269,7 +267,6 @@ outcomeLabel = \case
   OutcomeConflict -> "conflict"
   OutcomeTerminated -> "terminated"
   OutcomeEvidenceUnavailable -> "evidence_unavailable"
-  OutcomeBusy -> "busy"
   OutcomeUnavailable -> "unavailable"
   OutcomeError -> "error"
 

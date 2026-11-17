@@ -76,9 +76,11 @@ Direct `docker run` deployments need an external PostgreSQL connection, mounted
 secrets, and writable temporary directories despite the read-only image.
 Use the [container runtime reference](config/container-runtime-contract.md)
 for the required mounts, ownership, limits, and environment settings.
-Each server process uses about 25 PostgreSQL connections with the default
-pool sizes (at most 28 main plus 10 delivery); size `max_connections` for all
-replicas and other clients.
+Each server process opens at most 74 PostgreSQL connections with the default
+pool sizes (64 main plus 10 delivery), and `hmem-ctl` at most 4. PostgreSQL's
+default `max_connections` of 100 fits one server; size it for all replicas and
+other clients, and raise the container `nofile` limit above the expected
+concurrent client connections.
 
 ## Shared OIDC authentication
 

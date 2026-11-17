@@ -5,13 +5,14 @@ module HMem.DB.ChangeStream
   ( ChangeScope(..), ChangeAudience(..), SnapshotToken(..), ResumeToken(..)
   , ChangeStreamError(..), OutboxRecord(..), SnapshotBegin(..), SnapshotPage(..), ReplayPage(..)
   , ReplayScanWindow(..), ReplayScanPage(..), readReplayScanPage, acknowledgeReplayScan
-  , beginResync, beginResyncWithStartKey, beginResyncWithStartKeyAndProfile, readSnapshotPage, readSnapshotPageWithTtl, readSnapshotPageWithTtls, readSnapshotPageWithStoredTtls, validateCanonicalResumeToken, replayAndRotateResumeToken, replayUnacknowledgedResumeToken, replacementResumeToken, acknowledgeReplayPage, rebaseResumeTokenAfterHidden
+  , beginResync, beginResyncWithStartKey, beginResyncWithStartKeyAndProfile, beginResyncWithStartKeyProfileAndAttempts, resyncStartAttempts, readSnapshotPage, readSnapshotPageWithTtl, readSnapshotPageWithTtls, readSnapshotPageWithStoredTtls, validateCanonicalResumeToken, replayAndRotateResumeToken, replayUnacknowledgedResumeToken, replacementResumeToken, acknowledgeReplayPage, rebaseResumeTokenAfterHidden
   , listOutboxAfter, listOutboxScopes, pruneOutboxBefore, pruneOutboxScopeBefore
   , OutboxBacklog(..), outboxBacklog, listRetentionScopes, listDispatchScopes, cleanupChangeStream
   -- * Statement plan inspection
   , listOutboxAfterStatement, listOutboxRangeStatement
   ) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (catch, throwIO)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Aeson (Value, encode)
@@ -33,6 +34,7 @@ import Hasql.Decoders qualified as Dec
 import Hasql.Encoders qualified as Enc
 import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
+import System.Random (randomRIO)
 
 import HMem.DB.Pool (DBException(..), runSerializableTransaction, runSession, runTransaction)
 import HMem.Types (SnapshotProfile(..), snapshotProfileToText)
@@ -104,7 +106,7 @@ validateCanonicalResumeToken pool scope audience token = runTransaction pool $ d
 beginResync :: Pool Hasql.Connection -> NominalDiffTime -> ChangeScope -> ChangeAudience
   -> Session.Session [Value] -> IO (Either ChangeStreamError SnapshotBegin)
 beginResync pool ttl scope audience materialize =
-  beginResyncInternal pool ttl scope audience Nothing Nothing FullV1 materialize
+  beginResyncInternal resyncStartAttempts pool ttl scope audience Nothing Nothing FullV1 materialize
 
 -- | Public starts bind an opaque client retry key and requested page size to
 -- one durable session. Retrying the same start after response loss returns the
@@ -118,14 +120,25 @@ beginResyncWithStartKey pool ttl scope audience startKey pageSize materialize =
 -- same start key must not turn a full snapshot into a shell, or vice versa.
 beginResyncWithStartKeyAndProfile :: Pool Hasql.Connection -> NominalDiffTime -> ChangeScope -> ChangeAudience
   -> Text -> Int -> SnapshotProfile -> Session.Session [Value] -> IO (Either ChangeStreamError SnapshotBegin)
-beginResyncWithStartKeyAndProfile pool ttl scope audience startKey pageSize profile materialize =
-  beginResyncInternal pool ttl scope audience (Just (tokenHash startKey)) (Just pageSize) profile materialize
+beginResyncWithStartKeyAndProfile = beginResyncWithStartKeyProfileAndAttempts resyncStartAttempts
 
-beginResyncInternal :: Pool Hasql.Connection -> NominalDiffTime -> ChangeScope -> ChangeAudience
+-- | Test seam: an explicit number of serializable attempts (at least one).
+beginResyncWithStartKeyProfileAndAttempts :: Int -> Pool Hasql.Connection -> NominalDiffTime -> ChangeScope -> ChangeAudience
+  -> Text -> Int -> SnapshotProfile -> Session.Session [Value] -> IO (Either ChangeStreamError SnapshotBegin)
+beginResyncWithStartKeyProfileAndAttempts attempts pool ttl scope audience startKey pageSize profile materialize =
+  beginResyncInternal attempts pool ttl scope audience (Just (tokenHash startKey)) (Just pageSize) profile materialize
+
+-- | Serializable attempts for one resync start, including the first. A
+-- serialization failure or deadlock under concurrent writers rolls the
+-- attempt back; jittered backoff between attempts sleeps at most 310 ms.
+resyncStartAttempts :: Int
+resyncStartAttempts = 6
+
+beginResyncInternal :: Int -> Pool Hasql.Connection -> NominalDiffTime -> ChangeScope -> ChangeAudience
   -> Maybe ByteString -> Maybe Int -> SnapshotProfile -> Session.Session [Value] -> IO (Either ChangeStreamError SnapshotBegin)
-beginResyncInternal pool ttl scope audience startHash pageSize profile materialize = do
+beginResyncInternal attempts pool ttl scope audience startHash pageSize profile materialize = do
   freshSessionHash <- tokenHash <$> newOpaque "hmem_snapshot_session_v1_"
-  (retrySerializable 3 $ do
+  (retrySerializable attempts $ do
     let createSnapshot sessionHash epoch watermark = do
           let raw = snapshotTokenForSession sessionHash
           items <- materialize
@@ -566,13 +579,22 @@ newOpaque prefix = do
 tokenHash :: Text -> ByteString
 tokenHash token = TE.encodeUtf8 $ T.pack $ show (hash (TE.encodeUtf8 token) :: Digest SHA256)
 
--- Hasql keeps serializable failures typed at the pool boundary.  The concrete
--- retry policy is deliberately bounded and attempt-local; materialization is
--- run again only after PostgreSQL has rolled the failed attempt back.
+-- Hasql keeps serializable failures (and deadlocks) typed at the pool
+-- boundary.  The concrete retry policy is deliberately bounded and
+-- attempt-local; materialization is run again only after PostgreSQL has
+-- rolled the failed attempt back.  Backoff doubles from 5-10 ms with jitter
+-- so contending starts do not retry in lockstep; exhaustion rethrows.
 retrySerializable :: Int -> IO a -> IO a
-retrySerializable attempts action = action `catch` \err -> case err of
-  DBSerializationFailure | attempts > 1 -> retrySerializable (attempts - 1) action
-  _ -> throwIO err
+retrySerializable = go 0
+  where
+    go :: Int -> Int -> IO a -> IO a
+    go attempt remaining action = action `catch` \err -> case err of
+      DBSerializationFailure | remaining > 1 -> do
+        let base = 5000 * 2 ^ min 4 attempt
+        delay <- randomRIO (base, 2 * base)
+        threadDelay delay
+        go (attempt + 1) (remaining - 1) action
+      _ -> throwIO err
 
 lockScopeStatement :: Statement.Statement (Text, Maybe UUID) (Int64, Int64)
 lockScopeStatement = Statement.Statement "SELECT authorization_epoch, next_cursor FROM hmem_change_stream_lock($1, $2)"

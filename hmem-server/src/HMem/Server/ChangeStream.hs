@@ -257,6 +257,7 @@ isUncleanDelivery err
 failureKind :: SomeException -> String
 failureKind err = case fromException err of
   Just DBStatementTimeout -> "statement_timeout"
+  Just DBPoolCheckoutTimeout -> "pool_checkout_timeout"
   Just (DBOtherError message) | "lock timeout" `T.isInfixOf` message -> "lock_timeout"
   Just (_ :: DBException) -> "database_error"
   Nothing -> "worker_error"

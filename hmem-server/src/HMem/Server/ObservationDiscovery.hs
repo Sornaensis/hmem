@@ -14,14 +14,18 @@ module HMem.Server.ObservationDiscovery
   , StoredDiscoveryContext(..)
   , DiscoveryContextError(..)
   , newObservationDiscoveryWithClock
+  , newObservationDiscoveryWithClockAndBound
+  , discoveryContextBound
   , createDiscoveryContext
   , createDiscoveryContextInSession
   , lookupDiscoveryContext
   , retireDiscoveryContext
   , discoveryQueryCapability
+  , discoverySemantic
+  , discoveryContextCount
   ) where
 
-import Control.Concurrent.STM (TVar, atomically, newTVarIO, readTVar, writeTVar)
+import Control.Concurrent.STM (TVar, atomically, modifyTVar', newTVarIO, readTVar, writeTVar)
 import Control.Exception (SomeAsyncException, SomeException, catch, evaluate, fromException, throwIO, onException, mask)
 import Data.Aeson (ToJSON(..), object, (.=))
 import Data.ByteString qualified as BS
@@ -30,7 +34,10 @@ import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Time (UTCTime, getCurrentTime, addUTCTime)
+import Data.Vector.Unboxed qualified as VU
 import Data.UUID (UUID)
 import Data.UUID.V4 qualified as UUID
 import System.Timeout (timeout)
@@ -41,10 +48,56 @@ import HMem.Server.Embedding.Provider
 import HMem.Types (ObservationDiscoveryFilter)
 
 data ObservationDiscovery = ObservationDiscovery !Bool !(TVar (Integer, Maybe EmbeddingProvider))
-  !(TVar (Map UUID StoredDiscoveryContext)) !(IO UTCTime)
+  !(TVar Contexts) !(IO UTCTime) !Int
 
--- No result catalog or public vector serialization is retained. Pending slots
--- count toward admission before provider work, preventing a keystroke flood.
+-- Retained contexts with an expiry-ordered index (expiry and eviction) and a
+-- per-session index (generation supersession), so admission, lookup and
+-- pruning cost O(log n) and write only when something changes. At most one
+-- context exists per owner/workspace/search session.
+data Contexts = Contexts
+  { byToken :: !(Map UUID StoredDiscoveryContext)
+  , byExpiry :: !(Set (UTCTime, UUID))
+  , bySession :: !(Map (Text, UUID, UUID) UUID) }
+
+emptyContexts :: Contexts
+emptyContexts = Contexts Map.empty Set.empty Map.empty
+
+sessionKey :: StoredDiscoveryContext -> Maybe (Text, UUID, UUID)
+sessionKey entry = (\(key,_) -> (entry.owner, entry.workspace, key)) <$> entry.sessionGeneration
+
+insertContext :: StoredDiscoveryContext -> Contexts -> Contexts
+insertContext entry (Contexts tokens expiry sessions) = Contexts
+  (Map.insert entry.token entry tokens)
+  (Set.insert (entry.expiresAt, entry.token) expiry)
+  (maybe sessions (\key -> Map.insert key entry.token sessions) (sessionKey entry))
+
+deleteContext :: UUID -> Contexts -> Contexts
+deleteContext token state@(Contexts tokens expiry sessions) = case Map.lookup token tokens of
+  Nothing -> state
+  Just entry -> Contexts (Map.delete token tokens) (Set.delete (entry.expiresAt, token) expiry)
+    (maybe sessions (\key -> Map.update (\current -> if current == token then Nothing else Just current) key sessions) (sessionKey entry))
+
+-- Drop contexts whose absolute expiry has passed; Nothing when none has.
+expireContexts :: UTCTime -> Contexts -> Maybe Contexts
+expireContexts now state = case Set.lookupMin state.byExpiry of
+  Just (expiresAt, _) | expiresAt <= now ->
+    let (due, _) = Set.spanAntitone (\(at, _) -> at <= now) state.byExpiry
+    in Just (foldr (deleteContext . snd) state (Set.toList due))
+  _ -> Nothing
+
+-- Keep at most the given number of contexts, evicting those that expire
+-- earliest. Never rejects a new context.
+evictWithin :: Int -> Contexts -> Contexts
+evictWithin limit state
+  | Map.size state.byToken <= max 0 limit = state
+  | otherwise = case Set.lookupMin state.byExpiry of
+      Just (_, token) -> evictWithin limit (deleteContext token state)
+      Nothing -> state
+
+-- No result catalog or public vector serialization is retained. Contexts are
+-- not capped per audience (2026-11-17 user decision); memory is bounded by
+-- their absolute expiry, supersession and 'discoveryContextBound'. The
+-- provider's own admission gate protects it from a keystroke flood.
 data StoredDiscoveryContext = StoredDiscoveryContext
   { token :: !UUID, owner :: !Text, workspace :: !UUID
   , sessionGeneration :: !(Maybe (UUID,Int))
@@ -52,8 +105,16 @@ data StoredDiscoveryContext = StoredDiscoveryContext
   , preparedQuery :: !(Maybe DiscoveryQuery)
   } deriving stock (Eq)
 
-data DiscoveryContextError = DiscoveryContextUnavailable | DiscoveryContextCapacity
+data DiscoveryContextError = DiscoveryContextUnavailable
   deriving stock (Eq, Show)
+
+-- | Retained contexts across all audiences, a memory backstop. A worst-case
+-- hybrid context holds a 1536-dimension unboxed Double vector (12 KiB), three
+-- 4 KiB filter texts and small bindings: under 32 KiB, so at most about
+-- 256 MiB. Creating one beyond it evicts the context that expires earliest,
+-- including a pending reservation; the evicted context behaves as expired.
+discoveryContextBound :: Int
+discoveryContextBound = 8192
 
 instance Show StoredDiscoveryContext where
   show value = "StoredDiscoveryContext {token = " <> show value.token <> ", query = <redacted>}"
@@ -67,8 +128,14 @@ data DiscoveryReason
 -- | The hybrid vector is server-private and always in the pinned exact space.
 data DiscoveryQuery
   = DiscoveryFts !DiscoveryReason
-  | DiscoveryHybrid ![Double] !Text
+  | DiscoveryHybrid !(VU.Vector Double) !Text
   deriving stock (Eq)
+
+-- | The semantic component for a discovery statement, if any.
+discoverySemantic :: DiscoveryQuery -> Maybe ([Double], Text)
+discoverySemantic = \case
+  DiscoveryFts _ -> Nothing
+  DiscoveryHybrid vector space -> Just (VU.toList vector, space)
 
 instance Show DiscoveryQuery where
   show (DiscoveryFts reason) = "DiscoveryFts " <> show reason
@@ -102,14 +169,22 @@ newObservationDiscovery :: Bool -> IO ObservationDiscovery
 newObservationDiscovery enabled = newObservationDiscoveryWithClock enabled getCurrentTime
 
 newObservationDiscoveryWithClock :: Bool -> IO UTCTime -> IO ObservationDiscovery
-newObservationDiscoveryWithClock enabled clock =
-  ObservationDiscovery enabled <$> newTVarIO (0, Nothing) <*> newTVarIO Map.empty <*> pure clock
+newObservationDiscoveryWithClock enabled clock = newObservationDiscoveryWithClockAndBound enabled clock discoveryContextBound
+
+-- | Test seam: a lower retained-context bound.
+newObservationDiscoveryWithClockAndBound :: Bool -> IO UTCTime -> Int -> IO ObservationDiscovery
+newObservationDiscoveryWithClockAndBound enabled clock bound =
+  ObservationDiscovery enabled <$> newTVarIO (0, Nothing) <*> newTVarIO emptyContexts <*> pure clock <*> pure (max 1 bound)
+
+-- | Retained contexts, including pending reservations and tombstones.
+discoveryContextCount :: ObservationDiscovery -> IO Int
+discoveryContextCount (ObservationDiscovery _ _ contexts _ _) = Map.size . (.byToken) <$> atomically (readTVar contexts)
 
 -- | Publish the existing validated provider, including its transport admission
 -- gate. Withdrawal precedes provider invalidation/join. An old withdrawal
 -- cannot clear a replacement, even if both use the same endpoint.
 publishDiscoveryProvider :: ObservationDiscovery -> EmbeddingProvider -> IO (IO ())
-publishDiscoveryProvider (ObservationDiscovery _ state _ _) provider = atomically $ do
+publishDiscoveryProvider (ObservationDiscovery _ state _ _ _) provider = atomically $ do
   (generation, _) <- readTVar state
   let next = generation + 1
   writeTVar state (next, Just provider)
@@ -124,7 +199,7 @@ publishDiscoveryProvider (ObservationDiscovery _ state _ _) provider = atomicall
 -- same gate/deadline; no second provider or transport is constructed here.
 discoveryCapability :: ObservationDiscovery -> IO (Maybe Bool) -> IO DiscoveryCapability
 discoveryCapability service storage = do
-  result <- bounded $ withAvailable service storage $ \_ -> pure (DiscoveryHybrid [] "")
+  result <- bounded $ withAvailable service storage $ \_ -> pure (DiscoveryHybrid VU.empty "")
   pure (discoveryQueryCapability result)
 
 discoveryQueryCapability :: DiscoveryQuery -> DiscoveryCapability
@@ -148,14 +223,15 @@ prepareDiscoveryQuery service storage query = bounded $
           [vector] -> do
             -- Force validation and every normalized coordinate inside the
             -- deadline; a lazy result must not escape the bounded operation.
-            _ <- evaluate (foldr seq () vector)
-            pure (DiscoveryHybrid vector batch.spaceFingerprint)
+            -- The retained copy is unboxed (8 bytes per coordinate).
+            packed <- evaluate (VU.fromList vector)
+            pure (DiscoveryHybrid packed batch.spaceFingerprint)
           _ -> pure (DiscoveryFts DiscoveryInvalidResponse)
 
 withAvailable
   :: ObservationDiscovery -> IO (Maybe Bool)
   -> (EmbeddingProvider -> IO DiscoveryQuery) -> IO DiscoveryQuery
-withAvailable (ObservationDiscovery enabled state _ _) storage action
+withAvailable (ObservationDiscovery enabled state _ _ _) storage action
   | not enabled = pure (DiscoveryFts DiscoveryDisabled)
   | otherwise = do
       (generation, provider) <- atomically (readTVar state)
@@ -206,69 +282,73 @@ createDiscoveryContext service audience workspaceId filters predecessor =
 createDiscoveryContextInSession
   :: ObservationDiscovery -> Text -> UUID -> ObservationDiscoveryFilter -> Maybe UUID
   -> Maybe (UUID,Int) -> IO DiscoveryQuery -> IO (Either DiscoveryContextError StoredDiscoveryContext)
-createDiscoveryContextInSession (ObservationDiscovery _ _ contexts clock) audience workspaceId filters predecessor session prepare = mask $ \restore -> do
+createDiscoveryContextInSession (ObservationDiscovery _ _ contexts clock bound) audience workspaceId filters predecessor session prepare = mask $ \restore -> do
   now <- clock
   contextId <- UUID.nextRandom
   let reserved = StoredDiscoveryContext contextId audience workspaceId session filters (addUTCTime 300 now) Nothing
   admitted <- atomically $ do
-    previous <- Map.filter (\entry -> entry.expiresAt > now) <$> readTVar contexts
-    let validOwner entry = entry.owner == audience && entry.workspace == workspaceId
-        foreignPredecessor = maybe False (\key -> maybe False (not . validOwner) (Map.lookup key previous)) predecessor
-        incompatiblePredecessor = maybe False (\key -> maybe False (\entry -> case entry.sessionGeneration of
+    stored <- readTVar contexts
+    let previous = maybe stored id (expireContexts now stored)
+        validOwner entry = entry.owner == audience && entry.workspace == workspaceId
+        predecessorEntry = predecessor >>= (`Map.lookup` previous.byToken)
+        foreignPredecessor = maybe False (not . validOwner) predecessorEntry
+        incompatiblePredecessor = maybe False (\entry -> case entry.sessionGeneration of
           Nothing -> False
           Just (oldSession,_) -> case session of
             Just (newSession,_) -> oldSession /= newSession
-            Nothing -> True) (Map.lookup key previous)) predecessor
-        peers = Map.filter (\entry -> validOwner entry && case (session,entry.sessionGeneration) of
-          (Just (key,_),Just (oldKey,_)) -> key == oldKey
-          _ -> False) previous
-        outdated = case session of
-          Just (_,nextGeneration) -> any (\entry -> maybe False ((>= nextGeneration) . snd) entry.sessionGeneration) (Map.elems peers)
-          Nothing -> False
-        withoutPeers = foldr Map.delete previous (Map.keys peers)
-        entries = maybe withoutPeers (`Map.delete` withoutPeers) predecessor
-    if foreignPredecessor || incompatiblePredecessor || outdated then pure (Left DiscoveryContextUnavailable)
-    else if Map.size entries >= 64 || length (filter ((== audience) . (.owner)) (Map.elems entries)) >= 8
-      then writeTVar contexts previous >> pure (Left DiscoveryContextCapacity)
-      else writeTVar contexts (Map.insert contextId reserved entries) >> pure (Right ())
+            Nothing -> True) predecessorEntry
+        -- The single retained context of this owner/workspace/session, if any.
+        peer = session >>= \(key,_) -> Map.lookup (audience, workspaceId, key) previous.bySession
+        outdated = case (session, peer >>= (`Map.lookup` previous.byToken)) of
+          (Just (_,nextGeneration), Just entry) -> maybe False ((>= nextGeneration) . snd) entry.sessionGeneration
+          _ -> False
+        withoutPeer = maybe previous (`deleteContext` previous) peer
+        entries = maybe withoutPeer (`deleteContext` withoutPeer) predecessor
+    if foreignPredecessor || incompatiblePredecessor || outdated
+      then mapM_ (writeTVar contexts) (expireContexts now stored) >> pure (Left DiscoveryContextUnavailable)
+      else writeTVar contexts (insertContext reserved (evictWithin (bound - 1) entries)) >> pure (Right ())
   case admitted of
     Left failure -> pure (Left failure)
     Right () -> do
-      let abandon = atomically $ do
-            entries <- readTVar contexts
+      let abandon = atomically $
             -- Keyed tombstones retain the high-water generation until its
             -- absolute expiry; the next edit reuses this same bounded slot.
             case session of
-              Nothing -> writeTVar contexts (Map.delete contextId entries)
+              Nothing -> modifyTVar' contexts (deleteContext contextId)
               Just _ -> pure ()
       result <- restore prepare `onException` abandon
       finished <- clock
+      -- An evicted, expired or superseded reservation is unavailable: the
+      -- caller receives 409 discovery_restart_required.
       atomically $ do
         entries <- readTVar contexts
-        case Map.lookup contextId entries of
+        case Map.lookup contextId entries.byToken of
           Just entry | entry.expiresAt > finished -> do
             let completed = entry { preparedQuery = Just result }
-            writeTVar contexts (Map.insert contextId completed entries)
+            writeTVar contexts entries { byToken = Map.insert contextId completed entries.byToken }
             pure (Right completed)
-          _ -> writeTVar contexts (Map.delete contextId entries) >> pure (Left DiscoveryContextUnavailable)
+          Just _ -> writeTVar contexts (deleteContext contextId entries) >> pure (Left DiscoveryContextUnavailable)
+          Nothing -> pure (Left DiscoveryContextUnavailable)
 
 lookupDiscoveryContext :: ObservationDiscovery -> Text -> UUID -> UUID -> IO (Either DiscoveryContextError StoredDiscoveryContext)
-lookupDiscoveryContext (ObservationDiscovery _ _ contexts clock) audience workspaceId contextId = do
+lookupDiscoveryContext (ObservationDiscovery _ _ contexts clock _) audience workspaceId contextId = do
   now <- clock
   atomically $ do
-    entries <- Map.filter (\entry -> entry.expiresAt > now) <$> readTVar contexts
-    writeTVar contexts entries
-    pure $ case Map.lookup contextId entries of
+    stored <- readTVar contexts
+    entries <- case expireContexts now stored of
+      Nothing -> pure stored
+      Just pruned -> writeTVar contexts pruned >> pure pruned
+    pure $ case Map.lookup contextId entries.byToken of
       Just entry | entry.owner == audience && entry.workspace == workspaceId
         , Just _ <- entry.preparedQuery -> Right entry
       _ -> Left DiscoveryContextUnavailable
 
 retireDiscoveryContext :: ObservationDiscovery -> Text -> UUID -> UUID -> IO ()
-retireDiscoveryContext (ObservationDiscovery _ _ contexts _) audience workspaceId contextId = atomically $ do
+retireDiscoveryContext (ObservationDiscovery _ _ contexts _ _) audience workspaceId contextId = atomically $ do
   entries <- readTVar contexts
-  case Map.lookup contextId entries of
+  case Map.lookup contextId entries.byToken of
     Just entry | entry.owner == audience && entry.workspace == workspaceId ->
       case entry.sessionGeneration of
-        Nothing -> writeTVar contexts (Map.delete contextId entries)
-        Just _ -> writeTVar contexts (Map.insert contextId (entry { preparedQuery = Nothing }) entries)
+        Nothing -> writeTVar contexts (deleteContext contextId entries)
+        Just _ -> writeTVar contexts entries { byToken = Map.insert contextId (entry { preparedQuery = Nothing }) entries.byToken }
     _ -> pure ()

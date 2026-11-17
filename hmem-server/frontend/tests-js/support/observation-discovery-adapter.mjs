@@ -10,7 +10,7 @@ const ordered = values => [...values].sort((a, b) => b.updated_at.localeCompare(
 export function createObservationDiscoveryAdapter(fixtures, { allObservations, actor = () => 'fixture-user' }) {
   const contexts = new Map(), generations = new Map(), receipts = []
   let nextToken = 1, mode = 'fts_only', reason = 'disabled', semantic = () => false, maximum = 0, expiresAt = () => '2099-01-01T00:00:00Z'
-  const failure = (status, receipt) => ({ status, body: { error: status === 409 ? 'discovery_restart_required' : 'discovery_capacity' }, receipt })
+  const failure = (status, receipt) => ({ status, body: { error: 'discovery_restart_required' }, receipt })
   const adapter = {
     contexts, receipts, configure(value) { mode = value.mode || mode; reason = value.reason === undefined ? reason : value.reason; semantic = value.semantic || semantic; expiresAt = value.expiresAt || expiresAt },
     expire(token) { const context = contexts.get(token); assert.ok(context, 'Known fixture token'); context.retired = true },

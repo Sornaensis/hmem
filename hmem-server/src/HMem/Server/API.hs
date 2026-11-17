@@ -30,6 +30,9 @@ module HMem.Server.API
   , authorizeSessionRead
   , requireBotSessionEvidence
   , archiveAudience
+  , handleDBErrors
+  , resyncDBErrors
+  , handleSessionErrors
   ) where
 
 import Control.Exception (SomeAsyncException, SomeException, fromException, try, throwIO)
@@ -330,7 +333,16 @@ handleDBErrors action = do
           }
         DBCapabilityUnavailable{} -> err503 { errBody = Aeson.encode (object ["error" .= ("capability_unavailable" :: Text), "message" .= ("pgvector embedding support is unavailable" :: Text)]) }
         DBStatementTimeout -> err504 { errBody = Aeson.encode (object ["error" .= ("timeout" :: Text)]) }
+        DBPoolCheckoutTimeout -> databaseUnavailable
         _ -> err500 { errBody = Aeson.encode (object ["error" .= ("internal" :: Text)]) }
+
+-- | No pool connection became free within the checkout timeout: a safety net
+-- against a hung database, retryable after five seconds.
+databaseUnavailable :: ServerError
+databaseUnavailable = err503
+  { errBody = Aeson.encode (object ["error" .= ("database_unavailable" :: Text), "message" .= ("Database connection unavailable; retry later" :: Text)])
+  , errHeaders = [("Content-Type", "application/json"), ("Retry-After", "5")]
+  }
 
 badRequest :: Text -> Text -> ServerError
 badRequest kind message = err400
@@ -528,6 +540,7 @@ handleSessionErrors action = do
       DBUniqueViolation{} -> sessionError err409 "session_conflict" "Concurrent session mutation conflicts"
       DBSerializationFailure -> sessionError err409 "session_conflict" "Concurrent session mutation conflicts"
       DBStatementTimeout -> sessionError err504 "session_timeout" "Session operation timed out"
+      DBPoolCheckoutTimeout -> databaseUnavailable
       _ -> sessionError err500 "session_internal" "Session operation failed"
     Right (Left _) -> throwError $ (sessionError err503 "archive_unavailable" "Complete archived evidence is unavailable")
       {errHeaders=[("Content-Type","application/json"),("Retry-After","1")]}
@@ -685,10 +698,12 @@ sessionRangeIO expectedState workspace action = do
   -- cancellation retains its inherited limitations; this is not a global
   -- preemptive deadline. Active ranges keep their existing work deadline.
   let workMicros = if expectedState == AgentSession.Terminated then 25000000 else 30000000
+  -- A busy reader cache falls back to an uncached read; only a cache closed
+  -- for shutdown is unavailable.
   result <- handleSessionErrors $ withWorkspaceIdContext (Just workspace)
-    (try @AgentSessions.ReaderCacheBusy $ timeout workMicros action)
+    (try @AgentSessions.ReaderCacheClosed $ timeout workMicros action)
   case result of
-    Left _ -> throwError $ (sessionError err503 "archive_busy" "Evidence readers are busy; retry shortly")
+    Left _ -> throwError $ (sessionError err503 "archive_unavailable" "Evidence readers are shutting down; retry shortly")
       {errHeaders=[("Content-Type","application/json"),("Retry-After","1")]}
     Right Nothing -> throwError $ (sessionError err503 "archive_unavailable" "Evidence range timed out; retry shortly")
       {errHeaders=[("Content-Type","application/json"),("Retry-After","1")]}
@@ -732,7 +747,7 @@ classifySessionError failure = case failure.errHTTPCode of
     Just "session_terminated" -> Traffic.OutcomeTerminated
     Just "original_evidence_unavailable" -> Traffic.OutcomeEvidenceUnavailable
     _ -> Traffic.OutcomeConflict
-  503 -> if code == Just "verification_busy" then Traffic.OutcomeBusy else Traffic.OutcomeUnavailable
+  503 -> Traffic.OutcomeUnavailable
   status | status `elem` [400, 413, 415, 422] -> Traffic.OutcomeInvalid
   _ -> Traffic.OutcomeError
   where
@@ -792,7 +807,6 @@ agentSessions readers prefixes pool workspace = listH :<|> facetsH :<|> createH 
     proofError = \case
       Prefix.PrefixInvalid -> sessionError err400 "verification_target_invalid" "Prefix target must be an exact committed append boundary and SHA-256"
       Prefix.PrefixConflict -> sessionError err409 "verification_operation_conflict" "Operation UUID is already bound to another target"
-      Prefix.PrefixBusy -> sessionError err503 "verification_busy" "Prefix verification admission is full"
       Prefix.PrefixClosed -> sessionError err503 "verification_unavailable" "Prefix verification service unavailable"
     listH rawLimit timestamp identifier rawState rawFreshness rawActivity project task = do
       readAccess
@@ -970,7 +984,7 @@ discoveryH pool configured request = do
               (Discovery.prepareDiscoveryQuery service (discoveryStorage pool request.workspaceId) (fromMaybe "" filters.contentQuery))
   context <- liftIO resolve >>= either discoveryContextError pure
   prepared <- maybe (discoveryContextError Discovery.DiscoveryContextUnavailable) pure context.preparedQuery
-  let semantic = case prepared of Discovery.DiscoveryFts _ -> Nothing; Discovery.DiscoveryHybrid vector space -> Just (vector,space)
+  let semantic = Discovery.discoverySemantic prepared
   attempted <- liftIO $ try (Observation.discoverObservations pool context.filterInputs request semantic)
   result <- case attempted of
     Right value -> pure value
@@ -988,8 +1002,6 @@ discoveryH pool configured request = do
 
 discoveryContextError :: Discovery.DiscoveryContextError -> Handler a
 discoveryContextError failure = throwError $ case failure of
-  Discovery.DiscoveryContextCapacity -> err429
-    { errBody = Aeson.encode (object ["error" .= ("discovery_capacity" :: Text),"message" .= ("Discovery is busy; retry the current query." :: Text)]) }
   Discovery.DiscoveryContextUnavailable -> err409
     { errBody = Aeson.encode (object ["error" .= ("discovery_restart_required" :: Text),"message" .= ("Restart the current discovery query." :: Text)]) }
 
@@ -1038,6 +1050,7 @@ health pool tracker wsState = do
   where
     poolJson metrics checkout = object
       [ "active_connections" .= metrics.activeConnections, "max_connections" .= metrics.maxConnections
+      , "pending_checkouts" .= metrics.pendingCheckouts
       , "checkout" .= poolCheckoutJson checkout ]
 
 -- | Cumulative counters of one pool handle with fixed bucket labels; see
@@ -1045,7 +1058,7 @@ health pool tracker wsState = do
 poolCheckoutJson :: PoolCheckoutMetrics -> Value
 poolCheckoutJson m = object
   [ "checkouts" .= m.checkouts, "unattributed" .= m.unattributedCheckouts
-  , "connects" .= m.connects, "capacity_waits" .= m.capacityWaits
+  , "connects" .= m.connects, "capacity_waits" .= m.capacityWaits, "checkout_timeouts" .= m.checkoutTimeouts
   , "wait_total_ms" .= nsMs m.waitTotalNs, "wait_max_ms" .= nsMs m.waitMaxNs
   , "connect_total_ms" .= nsMs m.connectTotalNs, "hold_total_ms" .= nsMs m.holdTotalNs
   , "wait_buckets" .= zipWith (\bound count -> object ["le_ms" .= fmap nsMs bound, "count" .= count])
@@ -1812,6 +1825,7 @@ activityTicket pool state = do
     _ -> pure False
   unless allowed $ throwError err401
   issued <- liftIO $ WS.createActivityTicket state principal
+  -- Tickets are uncapped; issuance fails only during shutdown.
   maybe (throwError err503 {errHeaders=[("Retry-After","1")]}) pure issued
 
 ticket :: Pool Hasql.Connection -> WS.WSState -> WebSocketTicketRequest -> Handler WebSocketTicketResponse
@@ -1833,7 +1847,7 @@ resync changeStreamConfig pool request = do
   forM_ request.pageSize $ \pageSize ->
     when (pageSize < 1 || pageSize > 1000) $
       throwError (badRequest "validation_error" "page_size must be between 1 and 1000")
-  result <- liftIO $ case request.pageToken of
+  result <- resyncDBErrors $ case request.pageToken of
     Nothing -> do
       let pageSize = fromMaybe 100 request.pageSize
       case request.startIdempotencyKey of
@@ -1893,6 +1907,21 @@ decodeSnapshotItem value = case Aeson.fromJSON value of
 resyncRequired :: ServerError
 resyncRequired = err409
   { errBody = Aeson.encode (object ["error" .= ("resync_required" :: Text)]) }
+
+-- | 'handleDBErrors' for resync, where a serialization failure or deadlock
+-- that outlasts the bounded retries is transient contention with concurrent
+-- writers: 503 resync_busy with Retry-After, never a generic 500.
+resyncDBErrors :: IO a -> Handler a
+resyncDBErrors action = do
+  result <- liftIO (try action)
+  case result of
+    Right value -> pure value
+    Left DBSerializationFailure -> do
+      liftIO $ LBS8.hPutStrLn stderr (Aeson.encode $ object ["level" .= ("warn" :: Text), "error" .= ("resync_busy" :: Text)])
+      throwError err503
+        { errBody = Aeson.encode (object ["error" .= ("resync_busy" :: Text), "message" .= ("Snapshot start conflicted with concurrent writes; retry shortly" :: Text)])
+        , errHeaders = [("Content-Type", "application/json"), ("Retry-After", "1")] }
+    Left other -> handleDBErrors (throwIO other)
 
 renderSnapshotToken :: ChangeStream.SnapshotToken -> Text
 renderSnapshotToken (ChangeStream.SnapshotToken value) = value

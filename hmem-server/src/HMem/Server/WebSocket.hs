@@ -55,6 +55,8 @@ import Data.List (find, nub)
 import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Set (Set)
+import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TE
@@ -82,9 +84,9 @@ import HMem.Server.Event (ChangeEvent(..), EntityType(..))
 import HMem.Server.BotIdentity (requestBotIdentity)
 import HMem.Server.WebSocketTransport
   ( NativeTransport, NativeConnection, DeliveryTurn, DeliveryResult(..), DeliveryFailure(..), DeliveryCleanupFailure(..)
-  , abortNativeConnection, nativeConnectionClosing, currentNativeConnection, newNativeTransport, runNativePlain, withNativeTransportSettings
+  , abortNativeConnection, nativeConnectionClosing, currentNativeConnection, newNativeTransportWithLeases, runNativePlain, withNativeTransportSettings
   , reservePhysicalConnection, installControlledWriter, withDeliveryTurn, deliveryShouldYield, sendOwnedClose
-  , beginNativeShutdown, awaitNativeDrain, nativeGauges, nativeTelemetry )
+  , beginNativeShutdown, awaitNativeDrain, nativeAdmissionOpen, nativeGauges, nativeTelemetry )
 import HMem.Server.WebSocketTelemetry
   ( WebSocketTelemetry, TelemetryRecord(..), TicketKind(..), UpgradeOutcome(..), ConnectionOutcome(..)
   , ReplayPhase(..), ReplayOutcome(..), WebSocketTelemetrySnapshot(..)
@@ -92,6 +94,8 @@ import HMem.Server.WebSocketTelemetry
 import System.Log.FastLogger (FastLogger)
 import Network.HTTP.Types (hContentType, status400)
 import HMem.Types (WebSocketTicketResponse(..))
+import HMem.DB.Pool (PoolMetrics(..), getPoolMetricsFor)
+import HMem.Server.WebSocketDelivery (defaultDeliveryLeases)
 
 -- | Server-wide WebSocket state: a map of connection IDs to live
 -- WebSocket connections, protected by a TVar for concurrent access.
@@ -100,7 +104,7 @@ data WSState = WSState
   , tickets     :: !(TVar (Map Text WebSocketTicket))
   , canonicalTickets :: !(TVar (Map Text CanonicalWebSocketTicket))
   , canonicalConnections :: !(TVar (Map UUID CanonicalClient))
-  , activityTickets :: !(TVar (Map Text ActivityTicket))
+  , activityTickets :: !(TVar ActivityTickets)
   , activityConnections :: !(TVar (Map UUID ActivityClient))
   , nativeTransport :: !NativeTransport
   , telemetry :: !WebSocketTelemetry
@@ -177,6 +181,24 @@ data ActivityTicket = ActivityTicket
   , activityDeliveryExpiresAt :: !UTCTime
   }
 
+-- Pending activity tickets by identifier, with an expiry index so issue and
+-- consume cost O(log n) and only expired tickets are visited when pruning.
+data ActivityTickets = ActivityTickets
+  { pendingActivity :: !(Map Text ActivityTicket)
+  , activityExpiry :: !(Set (UTCTime, Text))
+  }
+
+emptyActivityTickets :: ActivityTickets
+emptyActivityTickets = ActivityTickets Map.empty Set.empty
+
+-- Remove expired tickets; Nothing when none has expired (no write needed).
+pruneActivityTickets :: UTCTime -> ActivityTickets -> Maybe ActivityTickets
+pruneActivityTickets now pending = case Set.lookupMin pending.activityExpiry of
+  Just (expiresAt, _) | expiresAt <= now ->
+    let (expired, live) = Set.spanAntitone (\(at, _) -> at <= now) pending.activityExpiry
+    in Just (ActivityTickets (foldr (Map.delete . snd) pending.pendingActivity (Set.toList expired)) live)
+  _ -> Nothing
+
 -- Nothing reserves a bounded slot during the WebSocket handshake. The slot is
 -- never a delivery target until its connection has been registered.
 data ActivityClient = ActivityClient
@@ -197,14 +219,21 @@ newWSState = newWSStateUsing Nothing
 -- change-stream dispatcher use the given pool. Pre-admission authorization
 -- stays on the main pool. The caller destroys this pool only after the
 -- dispatcher has stopped and the WebSocket drain was clean.
+--
+-- Delivery has one lease per delivery-pool connection except one reserved
+-- for the dispatcher, and at least four, so healthy turns never wait for a
+-- delivery connection while fewer than every lease is held by stuck work.
 newWSStateWithDeliveryPool :: Pool Hasql.Connection -> IO WSState
 newWSStateWithDeliveryPool = newWSStateUsing . Just
 
 newWSStateUsing :: Maybe (Pool Hasql.Connection) -> IO WSState
 newWSStateUsing delivery = do
-  transport <- newNativeTransport
+  leases <- case delivery of
+    Nothing -> pure defaultDeliveryLeases
+    Just deliveryPool -> (\metrics -> max defaultDeliveryLeases (metrics.maxConnections - 1)) <$> getPoolMetricsFor deliveryPool
+  transport <- newNativeTransportWithLeases leases
   WSState <$> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty
-    <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> newTVarIO Map.empty <*> pure transport
+    <*> newTVarIO Map.empty <*> newTVarIO emptyActivityTickets <*> newTVarIO Map.empty <*> pure transport
     <*> nativeTelemetry transport <*> pure delivery
 
 -- | The separate delivery pool, if this state has one.
@@ -504,42 +533,51 @@ consumeCanonicalTicket st ticketId = do
 createActivityTicket :: WSState -> Principal -> IO (Maybe WebSocketTicketResponse)
 createActivityTicket st = createActivityTicketWithTtl st 300
 
+-- | Activity tickets and clients are not capped (2026-11-17 user decision);
+-- expired tickets are pruned through their expiry index. Issuance fails only
+-- once WebSocket admission has closed for shutdown.
 createActivityTicketWithTtl :: WSState -> NominalDiffTime -> Principal -> IO (Maybe WebSocketTicketResponse)
 createActivityTicketWithTtl st requestedTtl principal = do
   now <- getCurrentTime
   ticketId <- UUID.toText <$> UUIDv4.nextRandom
+  open <- nativeAdmissionOpen st.nativeTransport
   let deliveryExpires = addUTCTime (max 0 (min 300 requestedTtl)) now
       expires = min deliveryExpires (addUTCTime ticketTtlSeconds now)
   STM.atomically $ do
-    pending <- Map.filter ((> now) . (.activityTicketExpiresAt)) <$> STM.readTVar st.activityTickets
-    live <- STM.readTVar st.activityConnections
-    let sameAudience other = audienceFor other == audienceFor principal
-        full entries own = Map.size entries >= 128 || length (filter own (Map.elems entries)) >= 8
-    if full pending (sameAudience . (.activityTicketPrincipal)) || full live (sameAudience . (.activityPrincipal))
-      then STM.writeTVar st.activityTickets pending >> pure Nothing
+    stored <- STM.readTVar st.activityTickets
+    let pending = fromMaybe stored (pruneActivityTickets now stored)
+    if not open
+      then mapM_ (STM.writeTVar st.activityTickets) (pruneActivityTickets now stored) >> pure Nothing
       else do
-        STM.writeTVar st.activityTickets (Map.insert ticketId (ActivityTicket principal expires deliveryExpires) pending)
+        STM.writeTVar st.activityTickets (ActivityTickets
+          (Map.insert ticketId (ActivityTicket principal expires deliveryExpires) pending.pendingActivity)
+          (Set.insert (expires, ticketId) pending.activityExpiry))
         pure (Just WebSocketTicketResponse {ticket=ticketId,expiresAt=expires})
 
+-- | One use: an unexpired ticket is removed and returned. Writes only when a
+-- ticket is consumed or expired tickets are pruned.
 consumeActivityTicket :: WSState -> Text -> IO (Maybe ActivityTicket)
 consumeActivityTicket st identifier = do
   now <- getCurrentTime
   STM.atomically $ do
-    tickets' <- Map.filter ((> now) . (.activityTicketExpiresAt)) <$> STM.readTVar st.activityTickets
-    STM.writeTVar st.activityTickets (Map.delete identifier tickets')
-    pure (Map.lookup identifier tickets')
+    stored <- STM.readTVar st.activityTickets
+    let pruned = pruneActivityTickets now stored
+        pending = fromMaybe stored pruned
+    case Map.lookup identifier pending.pendingActivity of
+      Just ticket -> do
+        STM.writeTVar st.activityTickets (ActivityTickets (Map.delete identifier pending.pendingActivity)
+          (Set.delete (ticket.activityTicketExpiresAt, identifier) pending.activityExpiry))
+        pure (Just ticket)
+      Nothing -> mapM_ (STM.writeTVar st.activityTickets) pruned >> pure Nothing
 
-reserveActivityClient :: WSState -> NativeConnection -> ActivityTicket -> IO (Maybe (UUID, ActivityClient))
+reserveActivityClient :: WSState -> NativeConnection -> ActivityTicket -> IO (UUID, ActivityClient)
 reserveActivityClient st native ticket = do
   identifier <- UUIDv4.nextRandom
   lock <- newMVar ()
   retired <- newTVarIO False
   let client=ActivityClient Nothing native ticket.activityTicketPrincipal ticket.activityDeliveryExpiresAt lock retired
-  STM.atomically $ do
-    clients <- STM.readTVar st.activityConnections
-    if Map.size clients >= 128 || length (filter ((== audienceFor ticket.activityTicketPrincipal) . audienceFor . (.activityPrincipal)) (Map.elems clients)) >= 8
-      then pure Nothing
-      else STM.writeTVar st.activityConnections (Map.insert identifier client clients) >> pure (Just (identifier,client))
+  STM.atomically $ STM.modifyTVar' st.activityConnections (Map.insert identifier client)
+  pure (identifier,client)
 
 removeActivityClient :: WSState -> UUID -> IO ()
 removeActivityClient st identifier = STM.atomically $ modifyTVar' st.activityConnections (Map.delete identifier)
@@ -680,10 +718,10 @@ wsApp authCfg pool st started pending = do
     rejectUnavailable = rejectWith UpgradeRejectedUnavailable $ WS.rejectRequestWith pending WS.defaultRejectRequest
       { WS.rejectCode=503, WS.rejectMessage="Service Unavailable", WS.rejectHeaders=[("Retry-After","1")] }
 
-    withPhysical principal use = currentNativeConnection st.nativeTransport >>= \case
+    withPhysical use = currentNativeConnection st.nativeTransport >>= \case
       Nothing -> rejectUnavailable
       Just native -> do
-        admitted <- reservePhysicalConnection native (physicalAudience principal)
+        admitted <- reservePhysicalConnection native
         if admitted then use native else rejectUnavailable
 
     accept principal subscription receivesGlobalGroupEvents receivesWorkspaceAdminEvents = do
@@ -691,7 +729,7 @@ wsApp authCfg pool st started pending = do
         (Just actor, SubscribeWorkspace workspace) -> scopeAuthorized pool actor (WorkspaceScope workspace)
         _ -> pure True
       if not allowed then rejectUnauthorized else
-        withPhysical principal $ \native -> do
+        withPhysical $ \native -> do
           conn <- installControlledWriter native <$> acceptPending
           connId <- addConnection st native conn principal subscription receivesGlobalGroupEvents receivesWorkspaceAdminEvents
           WS.withPingThread conn 30 (pure ()) $
@@ -704,7 +742,7 @@ wsApp authCfg pool st started pending = do
     acceptCanonical canonicalTicket = do
       allowed <- scopeAuthorized pool canonicalTicket.canonicalPrincipal canonicalTicket.canonicalScope
       if not allowed then rejectUnauthorized else
-       withPhysical (Just canonicalTicket.canonicalPrincipal) $ \native -> do
+       withPhysical $ \native -> do
         conn <- installControlledWriter native <$> acceptPending
         bracket
           (addCanonicalConnection st native conn canonicalTicket.canonicalPrincipal canonicalTicket.canonicalScope
@@ -728,18 +766,16 @@ wsApp authCfg pool st started pending = do
     acceptActivity activityTicket = do
       allowed <- activityPrincipalValid pool activityTicket.activityTicketPrincipal
       if not allowed then rejectUnauthorized else
-       withPhysical (Just activityTicket.activityTicketPrincipal) $ \native -> do
-        reserved <- reserveActivityClient st native activityTicket
-        case reserved of
-          Nothing -> rejectUnavailable
-          Just (identifier,reservation) -> flip finally
+       withPhysical $ \native -> do
+        (identifier,reservation) <- reserveActivityClient st native activityTicket
+        flip finally
             (withMVar reservation.activitySendLock $ \_ -> retireActivityClient reservation >> removeActivityClient st identifier) $ do
             conn <- installControlledWriter native <$> acceptPending
             let client=reservation {activityConnection=Just conn}
             -- Independent expiry output wakes native reads through the close
-            -- handshake. Keep the physical slot until the owning application
-            -- actually finishes; an expired non-acknowledging peer cannot free
-            -- capacity for another physical connection.
+            -- handshake. Keep the physical admission until the owning
+            -- application actually finishes, including for an expired
+            -- non-acknowledging peer.
             withAsync (expireActivity conn client) $ \_ -> do
               withLiveActivityClient client $ \_ -> do
                 STM.atomically $ modifyTVar' st.activityConnections (Map.insert identifier client)
@@ -824,13 +860,6 @@ audienceFor principal = case principal.authority of
   PrincipalGrantUser userId -> AuthenticatedAudience (UUID.toText userId) userId
   PrincipalSyntheticLocalSuperadmin -> TrustedAudience ("local:" <> principal.actorId)
   PrincipalNoAuthority -> TrustedAudience "invalid"
-
-physicalAudience :: Maybe Principal -> Text
-physicalAudience Nothing = "local:anonymous"
-physicalAudience (Just principal) = case principal.authority of
-  PrincipalGrantUser user -> "user:" <> UUID.toText user
-  PrincipalSyntheticLocalSuperadmin -> "local:" <> principal.actorId
-  PrincipalNoAuthority -> "invalid"
 
 terminalFrame :: ChangeStreamError -> Text
 terminalFrame ResyncUnauthorized = "access_revoked"

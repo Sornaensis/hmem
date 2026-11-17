@@ -301,7 +301,7 @@ instance ToSchema SessionWire.PrefixProofRequest where
   declareNamedSchema proxy = do
     NamedSchema name schema <- genericDeclareNamedSchema opts proxy
     pure $ NamedSchema name (schema & additionalProperties ?~ AdditionalPropertiesAllowed False
-      & description ?~ "Submit an asynchronous immutable-prefix proof. Exact retries bind operation UUID, authenticated audience, workspace/session, append-boundary offset/revision and SHA-256. Missing/evicted/restarted operations require a new UUID and source revalidation. Both submission and result reads require current edit permission; POST retains cookie CSRF and pre-decode body authorization. Two workers/four live jobs/sixteen retained operations; terminal cache lasts at most five minutes. Deploy server support before dependent MCP."
+      & description ?~ "Submit an asynchronous immutable-prefix proof. Exact retries bind operation UUID, authenticated audience, workspace/session, append-boundary offset/revision and SHA-256. Missing/evicted/restarted operations require a new UUID and source revalidation. Both submission and result reads require current edit permission; POST retains cookie CSRF and pre-decode body authorization. Every valid submission is accepted; CPU-sized workers take fair turns; live jobs and terminal results last five minutes; live work is never evicted, and beyond 65,536 retained terminal results the earliest-expiring are evicted. Deploy server support before dependent MCP."
       & properties . at "sha256" ?~ Inline (mempty & type_ ?~ OpenApiString & pattern ?~ "^[0-9a-f]{64}$"))
 instance ToSchema SessionWire.PrefixProofResponse where declareNamedSchema = genericDeclareNamedSchema opts
 
@@ -902,7 +902,7 @@ navigationTaskSummarySchema taskSummary = mempty
 
 changeStreamResyncSchema :: Schema
 changeStreamResyncSchema = mempty
-  & description ?~ "Exactly one resync form: a start uses a client-generated, high-entropy start_idempotency_key of at least 32 characters; a continuation uses page_token. Page size is immutable after the start."
+  & description ?~ "Exactly one resync form: a start uses a client-generated, high-entropy start_idempotency_key of at least 32 characters; a continuation uses page_token. Page size is immutable after the start. A start that still conflicts with concurrent writes after bounded retries returns 503 resync_busy with Retry-After: 1."
   & oneOf ?~ [Inline resyncStartSchema, Inline resyncContinuationSchema]
 
 changeStreamSharedProperties = InsOrdMap.fromList
@@ -1253,11 +1253,11 @@ taskEvidenceArchivePath = mempty
   & get ?~ (mempty
       & tags .~ InsOrdSet.singleton "Agent Sessions"
       & summary ?~ "Download this task’s saved sessions as a compressed ZIP"
-      & description ?~ "Includes associated terminated sessions. Original ZIP64 entries are the default. Explicit representation=available-v1 permits labeled sanitized entries and adds per-entry generation, representation and content SHA-256 receipts to both ZIP headers, with X-HMem-Evidence-Zip:representations-v2. Two concurrent exports per application. A 15-minute deadline, disconnect, authority withdrawal or receipt failure aborts the transfer without a ZIP footer."
+      & description ?~ "Includes associated terminated sessions. Original ZIP64 entries are the default. Explicit representation=available-v1 permits labeled sanitized entries and adds per-entry generation, representation and content SHA-256 receipts to both ZIP headers, with X-HMem-Evidence-Zip:representations-v2. Concurrent exports are not capped; each stream is bounded and has a 15-minute deadline. That deadline, disconnect, authority withdrawal or receipt failure aborts the transfer without a ZIP footer."
       & responses .~ Responses Nothing (InsOrdMap.fromList
           [(200,Inline (mempty & description .~ "Binary compressed ZIP attachment." & content .~ InsOrdMap.singleton "application/zip" (mempty & schema ?~ Inline (mempty & type_ ?~ OpenApiString & format ?~ "binary"))))
           ,(401,Inline (mempty & description .~ "Authentication required."))
           ,(403,Inline (mempty & description .~ (sessionEvidenceForbidden<>" A bot ZIP export also requires the requested task to be done or cancelled.")))
           ,(404,Inline (mempty & description .~ "Active workspace or visible same-workspace task not found."))
           ,(409,Inline (mempty & description .~ "A required complete original is unavailable."))
-          ,(503,Inline (mempty & description .~ "Both export admissions are occupied; retry after one second."))]))
+          ,(503,Inline (mempty & description .~ "Complete task evidence is unavailable."))]))

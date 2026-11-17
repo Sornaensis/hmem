@@ -313,13 +313,13 @@ runNormalMode opts = do
       poolSz  = fromMaybe cfg.pool.size opts.optPool
       deliverySz = fromMaybe cfg.pool.deliverySize opts.optDeliveryPool
 
-  pool <- Pool.createPool connStr poolSz cfg.pool.idleTimeout cfg.pool.statementTimeoutMs
+  pool <- Pool.createPoolWithCheckoutTimeout connStr poolSz cfg.pool.idleTimeout cfg.pool.statementTimeoutMs cfg.pool.checkoutTimeoutMs
   tracker <- newAccessTracker pool 5  -- flush access counts every 5 seconds
   pgvec <- Pool.checkPgvector pool
 
   -- WebSocket state. Change-stream delivery has its own single-stripe pool,
   -- so a catch-up blocked in PostgreSQL cannot starve other delivery.
-  deliveryPool <- Pool.createDeliveryPool connStr deliverySz cfg.pool.idleTimeout cfg.pool.statementTimeoutMs
+  deliveryPool <- Pool.createDeliveryPoolWithCheckoutTimeout connStr deliverySz cfg.pool.idleTimeout cfg.pool.statementTimeoutMs cfg.pool.checkoutTimeoutMs
   wsState <- newWSStateWithDeliveryPool deliveryPool
   streamWorker <- startChangeStreamWorker pool cfg.changeStream wsState
 

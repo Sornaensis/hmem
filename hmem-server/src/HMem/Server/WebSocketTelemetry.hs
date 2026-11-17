@@ -141,6 +141,7 @@ data DeliveryGauges = DeliveryGauges
   { physicalAdmitted :: !Int
   , physicalRetained :: !Int
   , leasesInUse :: !Int
+  , leaseCapacity :: !Int
   , leasesQuarantined :: !Int
   , leaseWaiters :: !Int
   , oldestQuarantineMs :: !(Maybe Double)
@@ -318,7 +319,7 @@ renderRecord at record = Aeson.object $
 
 gaugeFields :: DeliveryGauges -> [Pair]
 gaugeFields gauges =
-  [ "admitted" .= gauges.physicalAdmitted, "leases" .= gauges.leasesInUse
+  [ "admitted" .= gauges.physicalAdmitted, "leases" .= gauges.leasesInUse, "lease_capacity" .= gauges.leaseCapacity
   , "lease_waiters" .= gauges.leaseWaiters, "quarantined" .= gauges.leasesQuarantined ]
 
 warning :: TelemetryRecord -> Bool

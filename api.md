@@ -86,10 +86,16 @@ Responses bind `workspace_id`, `session_id`, opaque authority-bearing `audience`
 original authenticated principal/authority, independent of effective bot metadata.
 Every submission and lookup reauthorizes edit access. An identical full-target
 retry coalesces; reusing an operation UUID for a different target returns 409.
-The service owns two workers, four live jobs, sixteen total entries and bounded
-1 MiB hash windows. Capacity returns 503; oldest terminal entries may be evicted
-at admission. Live deadlines and terminal retention are each at most five minutes.
-Missing, evicted or restarted operations return 404: clients must revalidate their
+The service accepts every valid submission and hashes in bounded 1 MiB windows
+with workers sized to the CPU (half the capabilities, at least two), taking
+fair turns. A job holds its source reader, including any archive decoder, for
+one turn only, so open readers never exceed the worker count. Live deadlines and
+terminal retention are each five minutes. Live work is never evicted; beyond
+65,536 retained terminal results (roughly 64 MiB) the earliest-expiring results
+are evicted and behave as unknown. Authenticated session writers can therefore
+queue unlimited work; the mitigations are authorization, the live deadline,
+small constant memory per job and optional `rate_limit`.
+Missing, expired or restarted operations return 404: clients must revalidate their
 stable local source and submit a new UUID, never infer success. A verified proof
 alone does not authorize an append at a stale canonical cursor.
 
@@ -113,8 +119,8 @@ bytes, and verifies immutable size/SHA-256 receipts. ZIP64 entries use actual ra
 DEFLATE (method 8), CRC32 and sanitized label/full-UUID names. The response is a
 `Cache-Control: no-store` attachment, not a JSON range response. Server memory is
 bounded by a 50-row page, one 64 KiB source range, compressor state and a temporary
-central-index sidecar. Two exports may run concurrently, each with a 15-minute
-deadline; excess requests return 503 with `Retry-After: 1`. Cancellation/failure
+central-index sidecar. Concurrent exports are not capped; each stream keeps
+those per-stream bounds and a 15-minute deadline. Cancellation/failure
 cleans owned temporary storage. A failure after headers aborts the transfer without
 a valid completed ZIP; consumers must not publish partial responses. Session
 contents and internal exception details are never included in errors.
@@ -290,11 +296,10 @@ ticket before the server closes the socket; it does not revoke user access.
 Close notification has a bounded one-second cleanup budget; the delivery deadline
 continues to reject hints during cleanup.
 The expiry worker belongs to the connection and is joined on exit. An expired
-peer that does not acknowledge Close retains its counted physical slot until the
-handler finishes; logical expiry never creates capacity for another socket.
-Pending tickets and live/reserved connections each have caps of 128 globally and
-8 per principal audience. Overflow returns 503 with
-`Retry-After: 1`. Disabled users are retired, and workspace hints recheck read
+peer that does not acknowledge Close keeps its physical admission until the
+handler finishes. Pending tickets and live connections are not capped; ticket
+issuance returns 503 with `Retry-After: 1` only after shutdown has closed
+WebSocket admission. Disabled users are retired, and workspace hints recheck read
 permission immediately before each serialized send. There are no transcript
 records, snapshots, replay tokens or cursor checkpoints on this channel.
 Global workspace lifecycle records may omit `workspace_id`; only a canonical
@@ -696,17 +701,23 @@ FTS-only mode retains content `ts_rank` ordering with those ties. Subjects and
 every supplied provenance filter apply before component ranking. Query state
 is pinned, while content changes are read from the current database snapshot.
 
-Contexts last five minutes without sliding expiry, with at most 64 per server
-and eight per resolved principal/effective-actor audience. Pending preparation
-uses a slot too. Each use reauthorizes the active repository workspace and
+Contexts last five minutes without sliding expiry. They are not capped per
+audience; beyond 8,192 retained contexts per server (under 32 KiB each, so
+about 256 MiB), creating one evicts the context that expires earliest, which
+then behaves as expired. At the bound one reader's creations can therefore
+force other readers, including other audiences, to restart; an evicted
+reservation whose preparation is still in flight also returns 409
+`discovery_restart_required`. An authenticated reader can hold memory up to
+that bound within five minutes; the mitigations are authentication, the bound
+and optional `rate_limit`. Each use
+reauthorizes the active repository workspace and
 checks its owner. Contexts retain filters and one private prepared vector or
 FTS reason, never a result catalog. Provider changes do not change a completed
 context's mode. To change filters, create a new context with optional
 `replace_context_token`; retirement is atomic with admission. Continuations
 cannot supply filters or replace another context. Expired, retired or foreign
 tokens return nondisclosing 409 `discovery_restart_required`; loss of vector
-storage also requires restart instead of silently changing mode. Capacity
-returns 429 `discovery_capacity`; retry the current query. Missing grants still
+storage also requires restart instead of silently changing mode. Missing grants still
 return normal authorization errors. Cookie requests require the usual CSRF.
 
 Live clients create a UUID `search_session` for each independent search view
@@ -736,7 +747,12 @@ purge requires admin access. Workspace deletion has no MCP tool.
 
 HTTP 401 means the credential needs attention; 403 means permission or CSRF is
 missing. A 503 `capability_unavailable` on vector operations means pgvector is
-not ready. Check [authentication](auth.md) or [embedding readiness](embeddings.md)
+not ready. Requests are not capped or queued by the application; they wait in
+arrival order for a database connection. A 503 `database_unavailable` with
+`Retry-After: 5` means no connection was free within the checkout safety
+timeout (default 60 seconds); retry after that delay. A change-stream snapshot
+start that still conflicts with concurrent writes after its bounded retries
+returns 503 `resync_busy` with `Retry-After: 1`. Check [authentication](auth.md) or [embedding readiness](embeddings.md)
 for recovery. For validation and lifecycle errors, use the response message and
 hint; avoid blindly retrying the same rejected request.
 

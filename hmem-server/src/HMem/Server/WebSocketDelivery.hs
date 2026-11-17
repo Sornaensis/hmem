@@ -7,8 +7,12 @@ module HMem.Server.WebSocketDelivery
   , DeliveryCleanupFailure(..)
   , newDeliveryHub
   , newDeliveryHubWith
+  , newDeliveryHubLeases
+  , newDeliveryHubWithLeases
+  , defaultDeliveryLeases
   , deliveryTelemetry
   , deliveryGauges
+  , deliveryAdmissionOpen
   , newDeliveryOwner
   , reservePhysicalConnection
   , finishDeliveryOwner
@@ -57,13 +61,14 @@ data HubState = HubState
   , turns :: !(Map.Map Unique ActiveTurn)
   , participants :: !(Map.Map ThreadId Participant)
   , telemetry :: !WebSocketTelemetry
+  -- Shared delivery leases: turns, including retained and quarantined ones.
+  , leaseCapacity :: !Int
   }
 
 -- An admitted owner keeps its seat until its outer worker has finished and
 -- every retained turn and its native abort have actually completed.
 data Admission = Admission
-  { admittedAudience :: !Text
-  , admittedOwner :: !DeliveryOwner
+  { admittedOwner :: !DeliveryOwner
   , finishedWorker :: !(Maybe (STM ()))
   }
 
@@ -131,15 +136,32 @@ data DeliveryCleanupFailure = DeliveryCleanupFailure
 
 instance Exception DeliveryCleanupFailure
 
+-- | Leases when delivery shares the main pool, and the minimum otherwise.
+defaultDeliveryLeases :: Int
+defaultDeliveryLeases = 4
+
 newDeliveryHub :: IO DeliveryHub
-newDeliveryHub = Telemetry.newWebSocketTelemetry >>= newDeliveryHubWith
+newDeliveryHub = newDeliveryHubLeases defaultDeliveryLeases
 
 newDeliveryHubWith :: WebSocketTelemetry -> IO DeliveryHub
-newDeliveryHubWith telemetry =
-  DeliveryHub <$> newTVarIO (HubState False False Map.empty Map.empty Map.empty telemetry)
+newDeliveryHubWith = newDeliveryHubWithLeases defaultDeliveryLeases
+
+-- | A hub with the given number of shared delivery leases (at least one).
+newDeliveryHubLeases :: Int -> IO DeliveryHub
+newDeliveryHubLeases leases = Telemetry.newWebSocketTelemetry >>= newDeliveryHubWithLeases leases
+
+newDeliveryHubWithLeases :: Int -> WebSocketTelemetry -> IO DeliveryHub
+newDeliveryHubWithLeases leases telemetry =
+  DeliveryHub <$> newTVarIO (HubState False False Map.empty Map.empty Map.empty telemetry (max 1 leases))
 
 deliveryTelemetry :: DeliveryHub -> IO WebSocketTelemetry
 deliveryTelemetry (DeliveryHub state) = (.telemetry) <$> readTVarIO state
+
+-- | Whether physical admission is still open (not shut down or poisoned):
+-- one TVar read, without computing gauges or reclaiming retained work.
+deliveryAdmissionOpen :: DeliveryHub -> IO Bool
+deliveryAdmissionOpen (DeliveryHub state) =
+  (\current -> not (current.admissionClosed || current.poisoned)) <$> readTVarIO state
 
 -- | Observe occupancy without reclaiming retained work.
 deliveryGauges :: DeliveryHub -> IO DeliveryGauges
@@ -153,6 +175,7 @@ deliveryGauges (DeliveryHub state) = do
     { physicalAdmitted = Map.size current.physical
     , physicalRetained = Map.size (Map.filter (isJust . (.finishedWorker)) current.physical)
     , leasesInUse = Map.size current.turns
+    , leaseCapacity = current.leaseCapacity
     , leasesQuarantined = length quarantined
     , leaseWaiters = waiting
     , oldestQuarantineMs = if null since then Nothing
@@ -165,18 +188,20 @@ newDeliveryOwner :: DeliveryHub -> IO () -> IO DeliveryOwner
 newDeliveryOwner hub abort =
   DeliveryOwner hub <$> newUnique <*> newTVarIO False <*> pure abort <*> newTVarIO AbortIdle
 
-reservePhysicalConnection :: DeliveryOwner -> Text -> IO Bool
-reservePhysicalConnection owner audience = atomically $ do
+-- | Physical admissions are not capped (2026-11-17 user decision): each
+-- socket's memory is its constant per-connection state, and producers block
+-- rather than queue frames. Only a closing, closed, poisoned or duplicate
+-- owner is refused.
+reservePhysicalConnection :: DeliveryOwner -> IO Bool
+reservePhysicalConnection owner = atomically $ do
   let DeliveryHub state = owner.hub
   current <- readHub state
   closing <- readTVar owner.closing
   let admitted = current.physical
-      audienceCount = Map.size (Map.filter ((== audience) . (.admittedAudience)) admitted)
-  if closing || current.admissionClosed || current.poisoned
-      || Map.member owner.ownerKey admitted || Map.size admitted >= 128 || audienceCount >= 32
+  if closing || current.admissionClosed || current.poisoned || Map.member owner.ownerKey admitted
     then pure False
     else do
-      writeTVar state current { physical = Map.insert owner.ownerKey (Admission audience owner Nothing) admitted }
+      writeTVar state current { physical = Map.insert owner.ownerKey (Admission owner Nothing) admitted }
       pure True
 
 -- The outer transport worker calls this only after its application children
@@ -447,7 +472,7 @@ admitTurn owner key parent = do
     then pure False
     else do
       -- Retained turns keep their leases until reclaimed.
-      check (Map.size current.turns < 4)
+      check (Map.size current.turns < current.leaseCapacity)
       writeTVar state current
         { turns = Map.insert key (ActiveTurn owner.ownerKey Nothing Nothing Nothing False Nothing) current.turns
         , participants = Map.insert parent TurnParent current.participants

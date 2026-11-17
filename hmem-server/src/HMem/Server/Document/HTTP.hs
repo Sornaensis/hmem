@@ -153,6 +153,7 @@ documentMiddleware pool resolve app request respond=case documentRoute request o
         | Just(DBCheckViolation code)<-fromException failure -> documentError code
         | Just(DBForeignKeyViolation _)<-fromException failure -> jsonError status404 "document_not_found"
         | Just DBStatementTimeout<-fromException failure -> jsonError status504 "document_database_timeout"
+        | Just DBPoolCheckoutTimeout<-fromException failure -> Wai.mapResponseHeaders(<>[("Retry-After","5")])(jsonError status503 "database_unavailable")
         | Just(Gzip.CodecFailure _)<-fromException failure -> jsonError status503 "document_unavailable"
         | otherwise -> jsonError status503 "document_unavailable"
 

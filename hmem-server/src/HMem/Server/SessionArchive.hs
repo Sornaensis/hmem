@@ -2,8 +2,7 @@
 module HMem.Server.SessionArchive (newArchiveMiddleware, newArchiveMiddlewareWithResolver, streamArchive, archiveEntryName) where
 
 import Codec.Compression.Zlib.Internal qualified as Z
-import Control.Concurrent.STM
-import Control.Exception (bracket, finally, mask, throwIO)
+import Control.Exception (bracket, finally, throwIO)
 import Control.Monad (forM_, unless, when)
 import Crypto.Hash (Context, Digest, SHA256, hashInit, hashUpdate, hashFinalize)
 import Data.Bits (xor, shiftR, (.&.))
@@ -37,13 +36,13 @@ import HMem.DB.SessionArchive.Reader qualified as Reader
 import HMem.Server.API (authorizeTaskEvidenceRead,authorizeTaskEvidenceExport,requireBotSessionEvidence)
 import HMem.Server.Exception (trySynchronous)
 
--- There is one gate per application, held through network backpressure and cleanup.
+-- Exports are not capped (2026-11-17 user decision). Each keeps its own
+-- sequential decoder, authorization rechecks, bounded buffers and deadline.
 newArchiveMiddleware :: Pool Hasql.Connection -> IO Wai.Middleware
 newArchiveMiddleware pool = newArchiveMiddlewareWithResolver pool Nothing
 
 newArchiveMiddlewareWithResolver :: Pool Hasql.Connection -> Maybe (Wai.Request -> IO (Maybe Principal)) -> IO Wai.Middleware
-newArchiveMiddlewareWithResolver pool resolve = do
-  active <- newTVarIO (0 :: Int)
+newArchiveMiddlewareWithResolver pool resolve =
   pure $ \app request respond -> case Wai.pathInfo request of
     ["api","v1","workspaces",workspaceText,"tasks",taskText,"evidence.zip"]
       | Wai.requestMethod request == methodGet
@@ -59,15 +58,10 @@ newArchiveMiddlewareWithResolver pool resolve = do
                 case available of
                   Left _ -> respond $ archiveError status503 "archive_unavailable" "Complete task evidence is unavailable"
                   Right False -> respond $ archiveError status409 "original_evidence_unavailable" "Complete original evidence is unavailable"
-                  Right True -> streamResponse active mixed request workspace task taskText respond
+                  Right True -> streamResponse mixed request workspace task taskText respond
     _ -> app request respond
   where
-    streamResponse active mixed request workspace task taskText respond = mask $ \restore -> do
-              admitted <- atomically $ do
-                count <- readTVar active
-                if count >= 2 then pure False else writeTVar active (count+1) >> pure True
-              if not admitted then respond $ Wai.responseLBS status503 [(hContentType,"application/json"),("Retry-After","1")] "{\"error\":\"archive_busy\",\"message\":\"Evidence exports are busy. Retry shortly.\"}"
-              else do
+    streamResponse mixed request workspace task taskText respond = do
                 context <- currentRequestContext
                 let check = do
                       when mixed $ forM_ resolve $ \freshPrincipal -> do
@@ -82,8 +76,7 @@ newArchiveMiddlewareWithResolver pool resolve = do
                     suffix = if mixed then "-representations.zip" else "-evidence.zip"
                     headers = [(hContentType,"application/zip"),("Content-Disposition","attachment; filename=task-"<>TE.encodeUtf8 taskText<>suffix),("Cache-Control","no-store"),("X-Content-Type-Options","nosniff")]
                       <> [("X-HMem-Evidence-Zip","representations-v2") | mixed]
-                restore (respond (Wai.responseStream status200 headers body)) `finally`
-                  atomically (modifyTVar' active (subtract 1))
+                respond (Wai.responseStream status200 headers body)
     failed = throwIO (userError "Task evidence archive failed")
     representation request = case [value | (key,value) <- Wai.queryString request, key=="representation"] of
       [] -> Just False

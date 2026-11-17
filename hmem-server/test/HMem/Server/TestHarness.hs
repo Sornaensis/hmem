@@ -17,6 +17,7 @@ module HMem.Server.TestHarness
   , withDeployedSandboxAppEnv
   , withDeployedSandboxAppContext
   , withDeployedSandboxAppPools
+  , withDeployedSandboxAppPoolsTimeouts
   , withDeployedSandboxAppConfig
   , withDeployedSandboxAppLogged
   , withDeployedSandboxCrossOriginAppContext
@@ -277,9 +278,17 @@ withDeployedSandboxAppLogged requestLogger mkCfg action = withClearedAmbientSand
 -- pool. Pools are destroyed after the action, so it must stop any dispatcher
 -- and drain its listener first.
 withDeployedSandboxAppPools :: Int -> Maybe Int -> (DeployedSandboxApp -> IO a) -> IO a
-withDeployedSandboxAppPools mainSize deliverySize action = withClearedAmbientSandboxProfileEnv $
+withDeployedSandboxAppPools mainSize deliverySize =
+  withDeployedSandboxAppPoolsTimeouts mainSize deliverySize 30000 DBPool.defaultCheckoutTimeoutMs
+
+-- | 'withDeployedSandboxAppPools' with main-pool statement and checkout timeouts in
+-- milliseconds. The process-wide main-pool timeout is reset afterwards.
+withDeployedSandboxAppPoolsTimeouts :: Int -> Maybe Int -> Int -> Int -> (DeployedSandboxApp -> IO a) -> IO a
+withDeployedSandboxAppPoolsTimeouts mainSize deliverySize statementTimeoutMs checkoutTimeoutMs action = withClearedAmbientSandboxProfileEnv $
   withTestEnv $ \baseEnv ->
-    bracket (DBPool.createPool baseEnv.testDb.testDbConnStr mainSize 5.0 30000) destroyAllResources $ \mainPool ->
+    bracket (DBPool.createPoolWithCheckoutTimeout baseEnv.testDb.testDbConnStr mainSize 5.0 statementTimeoutMs checkoutTimeoutMs)
+      (\mainPool -> destroyAllResources mainPool
+        >> DBPool.createPool baseEnv.testDb.testDbConnStr 1 5.0 30000 >>= destroyAllResources) $ \mainPool ->
       withDelivery baseEnv deliverySize $ \delivery -> do
         let env = baseEnv { pool = mainPool }
             cfg = mkDeployedSandboxConfig env

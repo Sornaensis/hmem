@@ -9,12 +9,13 @@ import Data.ByteString (ByteString)
 import Control.Concurrent (newEmptyMVar, putMVar, takeMVar, threadDelay, tryPutMVar)
 import Control.Concurrent.Async (async, concurrently, link, wait, withAsync)
 import Control.Exception (SomeException, bracket, bracket_, finally, try)
-import Control.Monad (void, forM, forM_, replicateM)
+import Control.Monad (void, forM, forM_, replicateM, when)
+import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash (Digest, SHA256, hash)
 import Data.Either (isLeft, isRight)
 import Data.Functor.Contravariant (contramap)
 import Data.Int (Int32, Int64)
-import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Pool (destroyAllResources)
 import Data.List (find, sort)
 import Data.Text qualified as T
@@ -63,6 +64,39 @@ spec = beforeAll setupTestPool $ describe "Change-stream state machine" $ do
     listRetentionScopes env.pool (Just (last first)) `shouldReturn` drop 4 scopes <> take 1 scopes
     listRetentionScopes env.pool (Just GlobalScope) `shouldReturn` take 4 scopes
     listRetentionScopes env.pool (Just (scopes !! 5)) `shouldReturn` [GlobalScope] <> take 3 scopes
+
+  it "retries snapshot starts through deadlocks and serialization failures and rethrows only after bounded exhaustion" $ \_ -> withTestEnv $ \env -> do
+    workspace <- createTestWorkspace env "resync-retry"
+    attempts <- newIORef (0 :: Int)
+    let scope = WorkspaceScope workspace.id
+        audience = TrustedAudience "resync-retry"
+        -- Fail the first `failures` materializations with the given SQLSTATE,
+        -- as a concurrent writer's conflict would, then succeed.
+        conflicting code failures = do
+          attempt <- liftIO (atomicModifyIORef' attempts (\count -> (count+1,count+1)))
+          when (attempt <= failures) $
+            Session.sql ("DO $$ BEGIN RAISE EXCEPTION 'injected conflict' USING ERRCODE = '" <> code <> "'; END $$")
+          pure []
+        begin attemptLimit key code failures = do
+          writeIORef attempts 0
+          result <- try @DBException (beginResyncWithStartKeyProfileAndAttempts attemptLimit env.pool 60 scope audience key 1 FullV1 (conflicting code failures))
+          tries <- readIORef attempts
+          pure (result, tries)
+    -- Two deadlocks and two serialization failures are retried to success.
+    (deadlocked,deadlockTries) <- begin resyncStartAttempts "resync-retry-deadlock-0000000001" "40P01" 2
+    deadlocked `shouldSatisfy` either (const False) isRight
+    deadlockTries `shouldBe` 3
+    (serialized,serializedTries) <- begin resyncStartAttempts "resync-retry-serialize-000000001" "40001" 2
+    serialized `shouldSatisfy` either (const False) isRight
+    serializedTries `shouldBe` 3
+    -- A single-attempt seam reproduces exhaustion deterministically.
+    (single,singleTries) <- begin 1 "resync-retry-exhausted-000000001" "40001" 100
+    single `shouldSatisfy` either (== DBSerializationFailure) (const False)
+    singleTries `shouldBe` 1
+    -- Persistent deadlocks exhaust the bounded default and are rethrown typed.
+    (persistent,persistentTries) <- begin resyncStartAttempts "resync-retry-persistent-00000001" "40P01" 100
+    persistent `shouldSatisfy` either (== DBSerializationFailure) (const False)
+    persistentTries `shouldBe` resyncStartAttempts
 
   it "plans replay reads as ordered scope, workspace and cursor index ranges under generic and custom plans" $ \_ -> withTestEnv $ \env -> do
     workspace <- createTestWorkspace env "replay-plan-shape"

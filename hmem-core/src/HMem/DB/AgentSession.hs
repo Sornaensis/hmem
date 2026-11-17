@@ -8,7 +8,7 @@ module HMem.DB.AgentSession
   , listIdleSessionCandidatesAt, sealIdleSessionWithClock
   , validateSessionPrefixBoundary, readSessionPrefixWindow
   , SessionReader, newSessionReader, readSessionReader, closeSessionReader
-  , ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..), newReaderCache, closeReaderCache, readSessionRangeWithCache
+  , ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..), ReaderCacheClosed(..), newReaderCache, closeReaderCache, readSessionRangeWithCache
   , ArchiveReadFailure(..)
   , readSessionEvidenceRange, readSessionEvidenceRangeWithCache
   , sessionEvidenceTasksTerminal, taskEvidenceExportAllowed
@@ -43,7 +43,7 @@ import HMem.AgentSession.Occurrence qualified as Occurrence
 import HMem.DB.SessionOccurrence qualified as OccurrenceDB
 import HMem.DB.Pool (runSession, runTransaction)
 import HMem.DB.RequestContext (EffectiveActor(..), actorTypeToText, currentEffectiveActor)
-import HMem.DB.SessionArchive.Reader (ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..), ArchiveReadFailure(..), newReaderCache, closeReaderCache)
+import HMem.DB.SessionArchive.Reader (ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..), ReaderCacheClosed(..), ArchiveReadFailure(..), newReaderCache, closeReaderCache)
 import HMem.DB.SessionArchive.Reader qualified as Archive
 import HMem.DB.SessionArchive qualified
 

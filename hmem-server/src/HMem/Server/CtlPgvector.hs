@@ -390,11 +390,12 @@ withConfiguredPool
   -> IO (Either PgvectorError a)
 withConfiguredPool cfg action = do
   result <- trySynchronous $ bracket
-    (Pool.createPool
+    (Pool.createPoolWithCheckoutTimeout
       (connectionString cfg.database)
-      cfg.pool.size
+      (min cfg.pool.size 4)  -- hmem-ctl work is sequential
       cfg.pool.idleTimeout
-      cfg.pool.statementTimeoutMs)
+      cfg.pool.statementTimeoutMs
+      cfg.pool.checkoutTimeoutMs)
     destroyAllResources
     action
   pure $ case result of

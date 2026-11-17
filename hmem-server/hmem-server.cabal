@@ -84,6 +84,7 @@ data-files:
     migrations/V061__mp4_document_previews.sql
     migrations/V062__sanitized_session_archives.sql
     migrations/V063__sanitized_archive_reclamation.sql
+    migrations/V064__audit_log_legacy_workspace_index.sql
 
 library
   exposed-modules:
@@ -199,6 +200,7 @@ library
     , text
     , time
     , uuid
+    , vector
     , wai
     , wai-cors
     , wai-extra
@@ -275,6 +277,7 @@ executable build-frontend
     , text
     , time
     , uuid
+    , vector
     , wai
     , wai-cors
     , wai-extra
@@ -434,6 +437,7 @@ executable hmem-server
     , text
     , time
     , uuid
+    , vector
     , wai
     , wai-cors
     , wai-extra
@@ -513,6 +517,7 @@ executable hmem-test-harness
     , text
     , time
     , uuid
+    , vector
     , wai
     , wai-cors
     , wai-extra
@@ -573,6 +578,7 @@ test-suite hmem-server-test
       HMem.Server.ObservationDiscoverySpec
       HMem.Server.OidcCallbackSpec
       HMem.Server.PgvectorEmbeddingWorkflowSpec
+      HMem.Server.PoolAvailabilitySpec
       HMem.Server.RequestLatencyMeasurementSpec
       HMem.Server.SessionArchiveReaderSpec
       HMem.Server.SessionPrefixSpec
@@ -646,6 +652,7 @@ test-suite hmem-server-test
     , time
     , tls
     , uuid
+    , vector
     , wai
     , wai-cors
     , wai-extra

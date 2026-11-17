@@ -1,9 +1,11 @@
 module HMem.DB.RequestTimingSpec (spec) where
 
 import Control.Concurrent (getNumCapabilities, threadDelay)
-import Control.Concurrent.Async (asyncOn, concurrently_, wait, withAsync)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.Async (async, asyncOn, concurrently_, wait, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar, takeMVar)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Control.Exception (ErrorCall(..), bracket, throwIO, try)
+import GHC.Clock (getMonotonicTimeNSec)
 import Control.Monad (void)
 import Data.Maybe (isNothing)
 import Data.Pool (destroyAllResources)
@@ -12,7 +14,7 @@ import Data.Word (Word64)
 import Hasql.Session qualified as Session
 import Test.Hspec
 
-import HMem.DB.Pool (PoolMetrics(..), createDeliveryPool, createPool, destroyDeliveryPool, getPoolCheckoutMetricsFor, getPoolMetrics, getPoolMetricsFor, withConn)
+import HMem.DB.Pool (DBException(..), PoolMetrics(..), createDeliveryPool, createDeliveryPoolWithCheckoutTimeout, createPool, destroyDeliveryPool, getPoolCheckoutMetricsFor, getPoolMetrics, getPoolMetricsFor, withConn)
 import System.Timeout (timeout)
 import HMem.DB.RequestTiming
 import HMem.DB.Search (searchAll)
@@ -52,29 +54,79 @@ spec = around withTestEnv $ describe "request pool timing" $ do
       length endMetrics.waitBuckets `shouldBe` length checkoutWaitBoundsNs + 1
       endMetrics.capacityWaits `shouldBe` startMetrics.capacityWaits
 
-  it "counts a wait for a full stripe while another stripe is idle as a capacity wait" $ \env -> do
+  it "serves a same-capability checkout from an idle connection while another is held" $ \env -> do
     caps <- getNumCapabilities
-    -- With an even capability count resource-pool selects a two-stripe
-    -- pool's stripe by capability, so pinned threads choose their stripe.
-    if caps < 2 || odd caps then pendingWith "requires an even number of capabilities" else
+    -- A pool striped by capability would make the second checkout wait for
+    -- the held connection of its own stripe while the other stripe is idle.
+    if caps < 2 then pendingWith "requires at least two capabilities" else
       bracket (createPool env.testDb.testDbConnStr 2 30 30000) destroyAllResources $ \pool -> do
-        let on capability action = asyncOn capability action >>= wait
-        on 0 (withConn pool select1)
-        on 1 (withConn pool select1)
+        warmed <- newEmptyMVar
+        let warm capability = asyncOn capability (withConn pool $ \conn -> select1 conn >> readMVar warmed)
+        warmers <- mapM warm [0, 1]
+        waitUntil ((>= 2) . (.activeConnections) <$> getPoolMetricsFor pool)
+        putMVar warmed ()
+        mapM_ wait warmers
         startMetrics <- getPoolCheckoutMetrics
         holding <- newEmptyMVar
         release <- newEmptyMVar
         holder <- asyncOn 0 (withConn pool $ \conn -> select1 conn >> putMVar holding () >> takeMVar release)
         takeMVar holding
-        timing <- on 2 $ withRequestTimer $ \timer ->
-          withAsync (threadDelay 60000 >> putMVar release ()) $ \_ -> do
-            withConn pool select1
-            readRequestTimer timer
+        second <- timeout 2000000 $
+          asyncOn 0 (withRequestTimer $ \timer -> withConn pool select1 >> readRequestTimer timer) >>= wait
+        putMVar release ()
         wait holder
         endMetrics <- getPoolCheckoutMetrics
-        timing.dbWaitNs `shouldSatisfy` (>= ms 30)
+        fmap (.dbCheckouts) second `shouldBe` Just 1
+        fmap (.dbWaitNs) second `shouldSatisfy` maybe False (< ms 100)
         endMetrics.connects `shouldBe` startMetrics.connects
-        endMetrics.capacityWaits - startMetrics.capacityWaits `shouldBe` 1
+        endMetrics.capacityWaits `shouldBe` startMetrics.capacityWaits
+
+  it "never opens more connections at once than its configured size" $ \env -> do
+    caps <- getNumCapabilities
+    -- One more connection than capabilities: a pool with a stripe per
+    -- capability would round each stripe's share up to two.
+    let size = caps + 1
+    if caps < 2 || caps > 64 then pendingWith "requires 2..64 capabilities" else
+      bracket (createPool env.testDb.testDbConnStr size 30 30000) destroyAllResources $ \pool -> do
+        held <- newIORef (0 :: Int)
+        peak <- newIORef (0 :: Int)
+        release <- newEmptyMVar
+        let hold conn = do
+              select1 conn
+              now <- atomicModifyIORef' held (\n -> (n + 1, n + 1))
+              atomicModifyIORef' peak (\p -> (max p now, ()))
+              readMVar release
+              atomicModifyIORef' held (\n -> (n - 1, ()))
+            pinned = concatMap (\capability -> [capability, capability]) [0 .. caps - 1]
+        holders <- mapM (\capability -> asyncOn capability (withConn pool hold)) pinned
+        waitUntil ((>= size) <$> readIORef held)
+        -- Give any connection beyond the bound time to open.
+        threadDelay 300000
+        observed <- readIORef peak
+        putMVar release ()
+        mapM_ wait holders
+        observed `shouldBe` size
+        (.maxConnections) <$> getPoolMetricsFor pool `shouldReturn` size
+
+  it "abandons a checkout at the checkout timeout without leaking the queue or a connection" $ \env ->
+    bracket (createDeliveryPoolWithCheckoutTimeout env.testDb.testDbConnStr 1 30 30000 1000) destroyDeliveryPool $ \pool -> do
+      holding <- newEmptyMVar
+      release <- newEmptyMVar
+      holder <- async (withConn pool $ \conn -> select1 conn >> putMVar holding () >> takeMVar release)
+      takeMVar holding
+      started <- getMonotonicTimeNSec
+      waited <- try @DBException (withConn pool select1)
+      finished <- getMonotonicTimeNSec
+      waited `shouldBe` Left DBPoolCheckoutTimeout
+      (finished - started) `shouldSatisfy` (>= ms 1000)
+      (finished - started) `shouldSatisfy` (< ms 2000)
+      putMVar release ()
+      wait holder
+      getPoolMetricsFor pool `shouldReturn` PoolMetrics { activeConnections = 0, maxConnections = 1, pendingCheckouts = 0 }
+      (.checkoutTimeouts) <$> getPoolCheckoutMetricsFor pool `shouldReturn` 1
+      -- The connection was returned: the next checkout succeeds at once.
+      timeout 500000 (withConn pool select1) `shouldReturn` Just ()
+      getPoolMetricsFor pool `shouldReturn` PoolMetrics 0 1 0
 
   it "separates new-connection time from the wait of the request that created it" $ \env ->
     bracket (createPool env.testDb.testDbConnStr 1 30 30000) destroyAllResources $ \pool -> do
@@ -165,6 +217,9 @@ spec = around withTestEnv $ describe "request pool timing" $ do
     isNothing <$> currentRequestTimer `shouldReturn` True
   where
     select1 conn = Session.run (Session.sql "SELECT 1") conn >>= either (fail . show) pure
+    waitUntil condition = do
+      let loop = condition >>= \done -> if done then pure () else threadDelay 5000 >> loop
+      timeout 10000000 loop `shouldReturn` Just ()
     ms :: Word64 -> Word64
     ms = (* 1000000)
     bucket :: Int -> PoolCheckoutMetrics -> Word64

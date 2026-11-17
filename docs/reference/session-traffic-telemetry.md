@@ -21,7 +21,7 @@ route and outcome. HTTP responses are unchanged.
 | `heartbeat` | `accepted` |
 | `proof_submit`, `proof_lookup` | `pending`, `verified`, `mismatch`, `failed` |
 | `proof_lookup` | `verification_unknown` with a `reason` |
-| all | `session_missing`, `unauthorized`, `invalid`, `conflict`, `terminated`, `evidence_unavailable`, `busy`, `unavailable`, `error` |
+| all | `session_missing`, `unauthorized`, `invalid`, `conflict`, `terminated`, `evidence_unavailable`, `unavailable`, `error` |
 
 Rejections are classified from their fixed status and error code. `error`
 counts unexpected failures; the request log records them as well.
@@ -35,7 +35,7 @@ most recently removed operations so the counter and log can say why:
 | Reason | Meaning |
 | --- | --- |
 | `expired` | The terminal result reached its five-minute lifetime. |
-| `evicted` | A later admission evicted the terminal result oldest-first. |
+| `evicted` | More than 65,536 terminal results were retained, so the earliest-expiring result was evicted. Live work is never evicted. |
 | `target_mismatch` | The operation is bound to another workspace, session or audience. |
 | `unknown_since_start` | This process never retained the operation and started less than ten minutes ago, the maximum operation lifetime. A restart or a different server process produces this reason. |
 | `unknown_operation` | This process never retained the operation, or its record left the ring, and it has run longer than an operation lifetime. |

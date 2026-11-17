@@ -21,6 +21,8 @@ module HMem.DB.Observation
   , similarObservations
   , discoveryVectorAvailability
   , discoverObservations
+  , discoverObservationsUsing
+  , discoveryStatement
   ) where
 
 import Control.Exception (throwIO)
@@ -598,7 +600,14 @@ compatibleVectorStatement = Statement.Statement
 -- There is no semantic top-K catalog: exact cosine >= .5 qualifies all rows in
 -- the pinned space. Transport pagination happens after union/deduplication.
 discoverObservations :: Pool Hasql.Connection -> ObservationDiscoveryFilter -> ObservationDiscoveryRequest -> Maybe ([Double], Text) -> IO ObservationDiscoveryPage
-discoverObservations pool rawFilter request semantic = do
+discoverObservations = discoverObservationsUsing discoveryStatement
+
+-- | 'discoverObservations' with the statement chosen by retrieval mode; a test
+-- seam for comparing statement revisions.
+discoverObservationsUsing
+  :: (Bool -> Statement.Statement (Text, Maybe Text, Maybe Text) ObservationDiscoveryPage)
+  -> Pool Hasql.Connection -> ObservationDiscoveryFilter -> ObservationDiscoveryRequest -> Maybe ([Double], Text) -> IO ObservationDiscoveryPage
+discoverObservationsUsing statement pool rawFilter request semantic = do
   validateOrThrow $ validateObservationDiscoveryRequest request
     { contextToken = Nothing, replaceContextToken = Nothing, searchSession = Nothing, generation = Nothing, filters = Just rawFilter }
   let f = normalizeObservationDiscoveryFilter rawFilter
@@ -616,7 +625,7 @@ discoverObservations pool rawFilter request semantic = do
       requirePgvector pool
   result <- runSession pool $ Session.statement
     (TE.decodeUtf8 (LBS.toStrict (Aeson.encode payload)), vecText . fst <$> semantic, snd <$> semantic)
-    (discoveryStatement (isJustSemantic semantic))
+    (statement (isJustSemantic semantic))
   validateOrThrow ["Observation count exceeds the supported exact integer range" |
     result.counts.totalCount > 9007199254740991 || result.counts.matchCount > 9007199254740991]
   pure (result :: ObservationDiscoveryPage) { items = map (attachProvenanceMatch f.gitSha f.currentGitSha f.historyGitSha) result.items }
@@ -627,43 +636,47 @@ discoveryStatement hybrid = Statement.Statement (BS8.pack (unlines sql)) encoder
   where
     -- Both variants bind only ordinary text parameters. The FTS variant never
     -- mentions vector types or the optional embedding column, even in dead SQL.
+    -- Ranks, membership and terminals are computed by key: subject filters
+    -- are indexed semi-joins on observation_subjects, both component ranks are
+    -- window functions over one pass of the eligible rows, and no join pairs
+    -- two CTE scans.
     sql =
       [ "WITH args AS (SELECT $1::jsonb AS p, $2::text AS vector_text, $3::text AS space),"
-      , "matching_subjects AS MATERIALIZED ("
-      , " SELECT s.observation_id AS id,s.subject_kind::text AS subject_kind,s.subject FROM observation_subjects s"
-      , " JOIN observations o ON o.id=s.observation_id CROSS JOIN args a"
-      , " WHERE o.workspace_id=(a.p->>'workspace_id')::uuid"
-      , " AND (a.p->'filters'->>'subject_kind' IS NULL OR s.subject_kind::text=a.p->'filters'->>'subject_kind')"
-      , " AND (a.p->'filters'->>'subject' IS NULL OR s.subject=a.p->'filters'->>'subject')"
-      , " AND (a.p->'filters'->>'subject_query' IS NULL OR position(a.p->'filters'->>'subject_query' IN s.subject)>0)"
-      , "), eligible AS MATERIALIZED ("
+      , "eligible AS MATERIALIZED ("
       , " SELECT o.*,a.p->'filters'->>'content_query' AS body_query,"
       , " to_tsvector('simple',o.content) @@ plainto_tsquery('simple',a.p->'filters'->>'content_query') AS fts_match,"
       , " ts_rank(to_tsvector('simple',o.content),plainto_tsquery('simple',a.p->'filters'->>'content_query')) AS fts_score"
-      , " FROM observations o CROSS JOIN args a WHERE o.id IN (SELECT id FROM matching_subjects)"
+      , " FROM observations o CROSS JOIN args a WHERE o.workspace_id=(a.p->>'workspace_id')::uuid"
+      , " AND EXISTS (SELECT 1 FROM observation_subjects s WHERE s.observation_id=o.id AND " <> subjectFilterSql "s" <> ")"
       , " AND (a.p->'filters'->>'git_sha' IS NULL OR o.git_sha=a.p->'filters'->>'git_sha')"
       , " AND (a.p->'filters'->>'current_git_sha' IS NULL OR o.current_provenance->>'reviewed_git_sha'=a.p->'filters'->>'current_git_sha')"
       , " AND (a.p->'filters'->>'history_git_sha' IS NULL OR EXISTS (SELECT 1 FROM observation_revision_events e WHERE e.observation_id=o.id AND e.reviewed_git_sha=a.p->'filters'->>'history_git_sha'))"
-      , "), fts_ranked AS (SELECT id,row_number() OVER (ORDER BY fts_score DESC,updated_at DESC,id DESC) AS rank FROM eligible WHERE fts_match),"
-      ] <> semanticSql <>
-      [ "membership AS MATERIALIZED ("
-      , " SELECT e.id,e.updated_at," <> scoreSql <> " AS rank FROM eligible e"
-      , " LEFT JOIN fts_ranked f ON f.id=e.id LEFT JOIN semantic_ranked s ON s.id=e.id"
-      , " WHERE e.body_query IS NULL OR f.id IS NOT NULL OR s.id IS NOT NULL"
-      , "), terminals AS MATERIALIZED (SELECT ms.* FROM matching_subjects ms JOIN membership m ON m.id=ms.id),"
+      , "), scored AS (SELECT e.id,e.updated_at,e.body_query,e.fts_score,COALESCE(e.fts_match,false) AS fts_hit," <> similaritySql <> " AS similarity FROM eligible e CROSS JOIN args a),"
+      , "ranked AS (SELECT id,updated_at,body_query,fts_score,"
+      , " CASE WHEN fts_hit THEN row_number() OVER (PARTITION BY fts_hit ORDER BY fts_score DESC,updated_at DESC,id DESC) END AS fts_rank,"
+      , " CASE WHEN similarity>=0.5 THEN row_number() OVER (PARTITION BY COALESCE(similarity>=0.5,false) ORDER BY similarity DESC,updated_at DESC,id DESC) END AS semantic_rank"
+      , " FROM scored),"
+      , "membership AS MATERIALIZED ("
+      , " SELECT id,updated_at," <> scoreSql <> " AS rank FROM ranked"
+      , " WHERE body_query IS NULL OR fts_rank IS NOT NULL OR semantic_rank IS NOT NULL"
+      , "), terminals AS MATERIALIZED (SELECT s.observation_id AS id,s.subject_kind::text AS subject_kind,s.subject FROM membership m"
+      , " JOIN observation_subjects s ON s.observation_id=m.id CROSS JOIN args a WHERE " <> subjectFilterSql "s" <> "),"
       , "list_page AS MATERIALIZED (SELECT m.* FROM membership m CROSS JOIN args a"
-      , " WHERE a.p->>'view'='list' AND ((a.p->>'terminal') IS NULL OR EXISTS (SELECT 1 FROM terminals t WHERE t.id=m.id AND t.subject=a.p->'terminal'->>'subject' AND t.subject_kind=a.p->'terminal'->>'subject_kind'))"
+      , " WHERE a.p->>'view'='list' AND ((a.p->>'terminal') IS NULL OR EXISTS (SELECT 1 FROM observation_subjects t WHERE t.observation_id=m.id"
+      , " AND t.subject=a.p->'terminal'->>'subject' AND t.subject_kind::text=a.p->'terminal'->>'subject_kind' AND " <> subjectFilterSql "t" <> "))"
       , " ORDER BY m.rank DESC,m.updated_at DESC,m.id DESC LIMIT ((SELECT (p->>'limit')::int FROM args)+1) OFFSET (SELECT (p->>'offset')::int FROM args)),"
       , "descendants AS (SELECT t.*,CASE WHEN a.p->>'prefix'='' THEN split_part(t.subject,'/',1) ELSE a.p->>'prefix'||'/'||split_part(substr(t.subject,length(a.p->>'prefix')+2),'/',1) END AS path"
       , " FROM terminals t CROSS JOIN args a WHERE a.p->>'view'='tree' AND (a.p->>'prefix'='' OR left(t.subject,length(a.p->>'prefix')+1)=a.p->>'prefix'||'/')),"
       , "nodes AS (SELECT path,COUNT(DISTINCT id) AS observation_count,bool_or(subject<>path) AS has_children FROM descendants GROUP BY path),"
       , "tree_page AS MATERIALIZED (SELECT * FROM nodes ORDER BY path COLLATE \"C\" LIMIT (SELECT (p->>'limit')::int FROM args) OFFSET (SELECT (p->>'offset')::int FROM args)),"
+      , "terminal_counts AS MATERIALIZED (SELECT subject_kind,subject,COUNT(DISTINCT id) AS n FROM terminals"
+      , " WHERE subject=ANY(ARRAY(SELECT path FROM tree_page)) GROUP BY subject_kind,subject),"
       , "counts AS (SELECT (SELECT COUNT(*) FROM observations o CROSS JOIN args a WHERE o.workspace_id=(a.p->>'workspace_id')::uuid) AS total_count,(SELECT COUNT(*) FROM membership) AS match_count),"
       , "tree_result AS (SELECT jsonb_build_object('total_count',c.total_count,'match_count',c.match_count,"
       , " 'has_more',(SELECT COUNT(*) FROM nodes)>(a.p->>'offset')::bigint+(a.p->>'limit')::bigint,"
       , " 'items',COALESCE((SELECT jsonb_agg(jsonb_build_object('path',p.path,'segment',CASE WHEN a.p->>'prefix'='' THEN p.path ELSE substr(p.path,length(a.p->>'prefix')+2) END,"
       , " 'observation_count',p.observation_count,'has_children',p.has_children,'terminals',COALESCE((SELECT jsonb_agg(jsonb_build_object('subject_kind',ts.subject_kind,'subject',ts.subject,'observation_count',ts.n) ORDER BY ts.subject_kind COLLATE \"C\")"
-      , " FROM (SELECT subject_kind,subject,COUNT(DISTINCT id) AS n FROM terminals WHERE subject=p.path GROUP BY subject_kind,subject) ts),'[]'::jsonb)) ORDER BY p.path COLLATE \"C\") FROM tree_page p),'[]'::jsonb)) AS value FROM args a CROSS JOIN counts c)"
+      , " FROM terminal_counts ts WHERE ts.subject=p.path),'[]'::jsonb)) ORDER BY p.path COLLATE \"C\") FROM tree_page p),'[]'::jsonb)) AS value FROM args a CROSS JOIN counts c)"
       , "SELECT jsonb_build_object('counts',jsonb_build_object('workspace_id',a.p->>'workspace_id','total_count',c.total_count,'match_count',c.match_count),"
       , " 'has_more',(SELECT COUNT(*) FROM list_page)>(a.p->>'limit')::int,"
       , " 'tree',CASE WHEN a.p->>'view'='tree' THEN (SELECT value FROM tree_result) ELSE NULL END,"
@@ -672,14 +685,16 @@ discoveryStatement hybrid = Statement.Statement (BS8.pack (unlines sql)) encoder
       , " 'subjects',(SELECT jsonb_agg(jsonb_build_object('subject_kind',s.subject_kind::text,'subject',s.subject) ORDER BY s.ordinal) FROM observation_subjects s WHERE s.observation_id=o.id)) AS value"
       , " FROM list_page lp JOIN observations o ON o.id=lp.id ORDER BY lp.rank DESC,lp.updated_at DESC,lp.id DESC LIMIT (SELECT (p->>'limit')::int FROM args)) row_data),'[]'::jsonb)) FROM args a CROSS JOIN counts c"
       ]
-    semanticSql
-      | hybrid =
-          [ "distances AS MATERIALIZED (SELECT e.id,e.updated_at,1-(e.embedding <=> a.vector_text::vector) AS similarity FROM eligible e CROSS JOIN args a WHERE e.embedding IS NOT NULL AND e.embedding_space_fingerprint=a.space),"
-          , "semantic_ranked AS (SELECT id,row_number() OVER (ORDER BY similarity DESC,updated_at DESC,id DESC) AS rank FROM distances WHERE similarity>=0.5)," ]
-      | otherwise = ["semantic_ranked AS (SELECT NULL::uuid AS id,NULL::bigint AS rank WHERE false),"]
+    -- The subject filters of one observation_subjects row; args are in scope as a.
+    subjectFilterSql alias = "(a.p->'filters'->>'subject_kind' IS NULL OR " <> alias <> ".subject_kind::text=a.p->'filters'->>'subject_kind')"
+      <> " AND (a.p->'filters'->>'subject' IS NULL OR " <> alias <> ".subject=a.p->'filters'->>'subject')"
+      <> " AND (a.p->'filters'->>'subject_query' IS NULL OR position(a.p->'filters'->>'subject_query' IN " <> alias <> ".subject)>0)"
+    similaritySql
+      | hybrid = "CASE WHEN e.embedding IS NOT NULL AND e.embedding_space_fingerprint=a.space THEN 1-(e.embedding <=> a.vector_text::vector) END"
+      | otherwise = "NULL::float8"
     scoreSql
-      | hybrid = "CASE WHEN e.body_query IS NULL THEN 0::float8 ELSE COALESCE(1.0::float8/(60+f.rank),0)+COALESCE(1.0::float8/(60+s.rank),0) END"
-      | otherwise = "COALESCE(e.fts_score,0)::float8"
+      | hybrid = "CASE WHEN body_query IS NULL THEN 0::float8 ELSE COALESCE(1.0::float8/(60+fts_rank),0)+COALESCE(1.0::float8/(60+semantic_rank),0) END"
+      | otherwise = "COALESCE(fts_score,0)::float8"
     encoder = contramap (\(a,_,_) -> a) (Enc.param (Enc.nonNullable Enc.text))
       <> contramap (\(_,b,_) -> b) (Enc.param (Enc.nullable Enc.text))
       <> contramap (\(_,_,c) -> c) (Enc.param (Enc.nullable Enc.text))

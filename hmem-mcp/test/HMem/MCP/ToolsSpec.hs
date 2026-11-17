@@ -485,8 +485,9 @@ spec = do
     it "advertises raw filters, context/session lifecycle and presentation without provider inputs" $ do
       all (`elem` schemaProperties "observation_discovery") ["workspace_id", "filters", "context_token", "replace_context_token", "search_session", "generation", "view", "prefix", "terminal", "limit", "offset"] `shouldBe` True
       schemaProperties "observation_discovery" `shouldNotContain` ["embedding", "provider", "endpoint"]
-      forM_ ["server-owned", "five minutes", "discovery_restart_required", "discovery_capacity"] $ \phrase ->
+      forM_ ["server-owned", "five minutes", "discovery_restart_required"] $ \phrase ->
         toolDescription "observation_discovery" `shouldSatisfy` maybe False (T.isInfixOf phrase)
+      toolDescription "observation_discovery" `shouldSatisfy` maybe False (not . T.isInfixOf "discovery_capacity")
 
     it "forwards one authorized creation and executes a workspace-pinned continuation without creation fields" $ do
       requests <- newTVarIO []

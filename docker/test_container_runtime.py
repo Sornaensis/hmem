@@ -481,6 +481,42 @@ main
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class PoolEntrypointTest(unittest.TestCase):
+    setUpClass = LocalHumanSecretTest.__dict__["setUpClass"]
+    run_shell = LocalHumanSecretTest.run_shell
+
+    def render(self, overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory(prefix="hmem-pool-") as private:
+            config = Path(private, "config.yaml").as_posix()
+            # validate_common_config also checks packaged assets; run its pool part.
+            return self.run_shell("entrypoint.sh", overrides,
+                                  f"apply_defaults; validate_pool_config; CONFIG_FILE='{config}'; "
+                                  f"chown_runtime_paths() {{ :; }}; generate_config; cat '{config}'")
+
+    def test_defaults_render_the_pool_and_checkout_timeout(self) -> None:
+        result = self.render({})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("pool:\n  size: 64\n  delivery_size: 10\n  idle_timeout: 60\n"
+                      "  statement_timeout_ms: 30000\n  checkout_timeout_ms: 60000\n", result.stdout)
+        self.assertNotIn("HMEM_POOL", result.stderr)
+        self.assertNotIn("http_admission", result.stdout)
+
+    def test_checkout_timeout_is_validated_and_warns_below_the_statement_timeout(self) -> None:
+        result = self.render({"HMEM_POOL_CHECKOUT_TIMEOUT_MS": "20000"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("  checkout_timeout_ms: 20000\n", result.stdout)
+        self.assertIn("HMEM_POOL_CHECKOUT_TIMEOUT_MS 20000 is below HMEM_POOL_STATEMENT_TIMEOUT_MS 30000", result.stderr)
+        for value, message in [("999", "must be >= 1000"), ("600001", "must be <= 600000"), ("soon", "must be an integer")]:
+            with self.subTest(value=value):
+                failed = self.render({"HMEM_POOL_CHECKOUT_TIMEOUT_MS": value})
+                self.assertNotEqual(failed.returncode, 0)
+                self.assertIn(f"HMEM_POOL_CHECKOUT_TIMEOUT_MS {message}", failed.stderr)
+
+    def test_http_admission_is_not_configurable(self) -> None:
+        source = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
+        self.assertNotIn("HMEM_HTTP_ADMISSION", source)
+
+
 class BuiltImageTest(unittest.TestCase):
     def setUp(self) -> None:
         if not IMAGE:

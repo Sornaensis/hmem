@@ -242,8 +242,9 @@ The committed runner now reports what that copy added. The idle, contention
 and stuck catch-up phases each carry health deltas: `checkout` (main pool, as
 before), `delivery_checkout`, `pools` (active and maximum connections of both
 pools at the phase start and end) and `http_admission` (counter deltas and end
-gauges). Fields for a pool or admission object the image does not report are
-null. The stuck-phase deltas come from health GETs before the lock holder
+gauges). `http_admission` is optional legacy: current servers have no HTTP
+admission, so it is null. Fields for a pool or admission object the image does
+not report are null. The stuck-phase deltas come from health GETs before the lock holder
 starts and just after the post-release lock-waiter sample, outside the hold.
 Statement classes match the full normalized statement text; earlier receipts
 matched a 160-character prefix and missed statements marked later, so their

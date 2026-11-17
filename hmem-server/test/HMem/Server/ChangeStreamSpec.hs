@@ -4,7 +4,7 @@ module HMem.Server.ChangeStreamSpec (spec) where
 
 import Control.Concurrent (Chan, MVar, getNumCapabilities, myThreadId, newChan, newEmptyMVar, putMVar, readChan, readMVar, takeMVar, threadDelay, throwTo, tryPutMVar, tryTakeMVar, writeChan)
 import Control.Concurrent.Async (Async, AsyncCancelled(..), async, asyncOn, asyncWithUnmask, asyncThreadId, cancel, wait, waitCatch, withAsync)
-import Control.Exception (AsyncException(..), IOException, MaskingState(..), SomeAsyncException, SomeException, bracket, catch, finally, fromException, getMaskingState, mask, throwIO, toException, try)
+import Control.Exception (AsyncException(..), IOException, MaskingState(..), SomeAsyncException, SomeException, bracket, bracket_, catch, finally, fromException, getMaskingState, mask, throwIO, toException, try)
 import Control.Monad (forM, forM_, replicateM_, replicateM, forever, void, when)
 import Data.Aeson (FromJSON, Value(..), decode, encode, object, toJSON, (.=))
 import Data.Aeson.Key qualified as Key
@@ -67,12 +67,14 @@ import HMem.DB.Workspace qualified as WorkspaceDB
 import HMem.DB.RequestContext (ActorType(..), Principal(..), PrincipalAuthority(..), withRequestContext, emptyRequestContext)
 import HMem.DB.TestHarness (TestDb(..), TestEnv(..), createTestWorkspace)
 import HMem.DB.WorkspaceGroup qualified as WorkspaceGroup
-import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, mkDeployedSandboxConfig, withDeployedSandboxAppContext, withDeployedSandboxAppLogged, withDeployedSandboxAppPools, withLocalSandboxAppContext)
+import HMem.Server.TestHarness (DeployedSandboxApp(..), LocalSandboxApp(..), createDeployedSandboxUser, issueDeployedSandboxPAT, mkDeployedSandboxConfig, withDeployedSandboxAppContext, withDeployedSandboxAppLogged, withDeployedSandboxAppPools, withDeployedSandboxAppPoolsTimeouts, withLocalSandboxAppContext)
 import HMem.Server.Logging (jsonRequestLogger)
+import HMem.Server.API (handleDBErrors, resyncDBErrors)
+import Servant.Server (ServerError(..), runHandler)
 import HMem.Server.AuthTokens (IssuedAccessToken(..))
 import HMem.Server.ChangeStream (ChangeStreamWorker, ChangeStreamMaintenance(..), startChangeStreamWorker, startChangeStreamWorkerWithStartupHook, stopChangeStreamWorker, readChangeStreamMaintenance, retentionScopeTurn, retentionDue, ChangeStreamDispatchEvent(..), startChangeStreamWorkerWithObserver)
 import HMem.Server.Snapshot (materializeSnapshot, materializeSnapshotWithProfile)
-import HMem.Server.WebSocket (WSState, deliveryPoolFor, newWSState, withNativeWebSocketSettings, awaitWebSocketDrain, connectionCount, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections, attachWebSocketTelemetryLog, readWebSocketTelemetry)
+import HMem.Server.WebSocket (WSState, deliveryPoolFor, newWSState, withNativeWebSocketSettings, awaitWebSocketDrain, connectionCount, createCanonicalTicket, createCanonicalTicketWithExpiry, createCanonicalTicketWithTtl, createActivityTicketWithTtl, dispatchCanonicalOutbox, canonicalReplayPending, handleCanonicalDispatchFailure, reauthorizeCanonicalConnections, attachWebSocketTelemetryLog, readWebSocketTelemetry, beginWebSocketShutdown)
 import HMem.Server.WebSocketTelemetry (DeliveryGauges(..), OutcomeStats(..), WebSocketTelemetrySnapshot(..))
 import HMem.Server.WebSocketDelivery (DeliveryCleanupFailure(..), DeliveryFailure(..))
 import HMem.Server.WebSocketTransport (newNativeTransport, runPlainSocket, runPlainSocketWith, withNativeTransportSettings)
@@ -626,17 +628,20 @@ spec = describe "canonical change-stream loopback" $ do
                 forM_ ownersEnded (declaredPhase "cancelled native owner ended" . takeMVar)
                 readIORef commits `shouldReturn` 0
 
-  it "bounds activity ticket retention globally and prunes expired capabilities" $ do
+  it "issues uncapped activity tickets, prunes expired capabilities and refuses only after shutdown" $ do
     state <- newWSState
     first <- grantPrincipal <$> UUIDV4.nextRandom
     others <- replicateM 15 (grantPrincipal <$> UUIDV4.nextRandom)
-    overflow <- grantPrincipal <$> UUIDV4.nextRandom
+    beyond <- grantPrincipal <$> UUIDV4.nextRandom
+    -- A ninth ticket for each principal and a 129th ticket overall are issued.
     forM_ (first:others) $ \principal ->
-      replicateM_ 8 (createActivityTicketWithTtl state 60 principal >>= (`shouldSatisfy` isJust))
-    createActivityTicketWithTtl state 60 overflow >>= (`shouldSatisfy` (not . isJust))
+      replicateM_ 9 (createActivityTicketWithTtl state 60 principal >>= (`shouldSatisfy` isJust))
+    createActivityTicketWithTtl state 60 beyond >>= (`shouldSatisfy` isJust)
     expiring <- newWSState
     replicateM_ 8 (createActivityTicketWithTtl expiring 0 first >>= (`shouldSatisfy` isJust))
     createActivityTicketWithTtl expiring 60 first >>= (`shouldSatisfy` isJust)
+    beginWebSocketShutdown state
+    createActivityTicketWithTtl state 60 first >>= (`shouldSatisfy` (not . isJust))
 
   it "serves bounded activity-only Home sockets without granting canonical Global access" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -699,10 +704,8 @@ spec = describe "canonical change-stream loopback" $ do
         _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id (Auth.UpsertWorkspaceMembership boundedUser Auth.WorkspaceRoleRead) Nothing
         boundedToken <- issueDeployedSandboxPAT ctx.deployedEnv boundedUser "Bounded Home"
         let boundedIssue=apiRequest ctx.deployedApplication methodPost endpoint (authHeaders boundedToken.rawToken) ""
-        pending <- replicateM 8 (boundedIssue >>= decodedTicket)
-        overflow <- boundedIssue
-        responseStatus overflow `shouldBe` HTTP.status503
-        lookup "Retry-After" (WaiTest.simpleHeaders overflow) `shouldBe` Just "1"
+        -- Pending tickets are uncapped: a ninth for one principal is issued.
+        pending <- replicateM 9 (boundedIssue >>= decodedTicket)
         forM_ pending $ \entry -> WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket="<>showTicket entry.ticket) $ \conn -> do
           (WS.receiveData conn >>= decodeFrame) `shouldReturn` ready
           WS.sendClose conn ("capacity ticket consumed" :: Text)
@@ -730,11 +733,12 @@ spec = describe "canonical change-stream loopback" $ do
           awaitFrame peerReady `shouldReturn` ready
           threadDelay 300000
           let live 0=do
-                denied <- boundedIssue
-                responseStatus denied `shouldBe` HTTP.status503
-                lookup "Retry-After" (WaiTest.simpleHeaders denied) `shouldBe` Just "1"
-                -- The expired, unacknowledged physical peer still owns one of
-                -- eight slots. A later real mutation must not enqueue a hint.
+                -- Live activity clients are uncapped: with the expired,
+                -- unacknowledged peer and eight live clients, a further
+                -- ticket is still issued. A later real mutation must not
+                -- enqueue a hint for the expired peer.
+                further <- boundedIssue
+                responseStatus further `shouldBe` status200
                 marker <- Project.createProject ctx.deployedEnv.pool (CreateProject workspace.id Nothing "After activity expiry" Nothing Nothing Nothing)
                 record <- latestOutbox ctx scope
                 dispatchCanonicalOutbox ctx.deployedEnv.pool ctx.deployedWSState [record]
@@ -747,7 +751,7 @@ spec = describe "canonical change-stream loopback" $ do
                 withActivityFrames port entry.ticket $ \frames -> do
                   readFrame frames `shouldReturn` ready
                   live (count-1)
-          live (7::Int)
+          live (8::Int)
 
   it "pushes Global workspace delete and restore only to readable activity observers" $
     withDeployedSandboxAppContext $ \ctx -> do
@@ -1314,6 +1318,79 @@ spec = describe "canonical change-stream loopback" $ do
   it "keeps healthy scopes delivering through the real dispatcher beside a catch-up blocked on a one-connection ordinary pool" $
     blockedCatchUpBesideHealthyScope (Just 5) 3 >>= \retired -> retired `shouldBe` 1
 
+  it "isolates three catch-ups blocked in three scopes beside healthy peers with nine delivery leases" $
+    blockedCatchUpsBesideHealthyScope (Just 10) 3 3 >>= \retired -> retired `shouldBe` 3
+
+  it "answers a resync start blocked on its scope lock past the statement timeout with 504 timeout, not a generic 500" $
+    withDeployedSandboxAppPoolsTimeouts 2 Nothing 1000 60000 $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "resync-scope-contention"
+      userId <- createDeployedSandboxUser ctx.deployedEnv False False
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+        (Auth.UpsertWorkspaceMembership userId Auth.WorkspaceRoleRead) Nothing
+      accessToken <- issueDeployedSandboxPAT ctx.deployedEnv userId "resync contention client"
+      holding <- newEmptyMVar
+      release <- newEmptyMVar
+      -- A concurrent writer's transaction holds the workspace scope lock.
+      let holdScopeLock conn = do
+            locked <- Session.run (Session.sql ("BEGIN; SELECT hmem_change_stream_lock('workspace', '"
+              <> Text.encodeUtf8 (UUID.toText workspace.id) <> "')")) conn
+            either (fail . show) pure locked
+            putMVar holding ()
+            takeMVar release
+            void (Session.run (Session.sql "ROLLBACK") conn)
+      withAsync (DBPool.withConn ctx.deployedEnv.pool holdScopeLock) $ \holder -> do
+        takeMVar holding
+        response <- apiRequest ctx.deployedApplication methodPost "/api/v1/change-stream/resync" (authHeaders accessToken.rawToken)
+          (encode (object
+            [ "scope" .= object ["scope" .= ("workspace" :: Text), "workspace_id" .= workspace.id]
+            , "snapshot_profile" .= ("workspace_shell_v1" :: Text)
+            , "page_size" .= (100 :: Int)
+            , "start_idempotency_key" .= ("resync-scope-contention-key-000001" :: Text) ]))
+        putMVar release ()
+        wait holder
+        HTTP.statusCode (responseStatus response) `shouldBe` 504
+        body <- decodeResponse response :: IO Value
+        jsonField "error" body `shouldBe` Just (String "timeout")
+
+  it "maps handler database errors itself, without the failure middleware: 504 timeout and 503 resync_busy" $ do
+    let status failure = failure.errHTTPCode
+        errorCode failure = decode failure.errBody >>= jsonField "error"
+    timedOut <- runHandler (handleDBErrors (throwIO DBPool.DBStatementTimeout :: IO ()))
+    either (\failure -> (status failure, errorCode failure)) (const (0, Nothing)) timedOut `shouldBe` (504, Just (String "timeout"))
+    forM_ [DBPool.DBSerializationFailure] $ \conflict -> do
+      busy <- runHandler (resyncDBErrors (throwIO conflict :: IO ()))
+      either (\failure -> (status failure, errorCode failure, lookup "Retry-After" failure.errHeaders)) (const (0, Nothing, Nothing)) busy
+        `shouldBe` (503, Just (String "resync_busy"), Just "1")
+    resyncTimeout <- runHandler (resyncDBErrors (throwIO DBPool.DBStatementTimeout :: IO ()))
+    either status (const 0) resyncTimeout `shouldBe` 504
+
+  it "answers resync starts that keep deadlocking with concurrent writers with 503 resync_busy, then serves the retry" $
+    withDeployedSandboxAppContext $ \ctx -> do
+      workspace <- createTestWorkspace ctx.deployedEnv "resync-deadlock"
+      userId <- createDeployedSandboxUser ctx.deployedEnv False False
+      _ <- Auth.upsertWorkspaceMembership ctx.deployedEnv.pool workspace.id
+        (Auth.UpsertWorkspaceMembership userId Auth.WorkspaceRoleRead) Nothing
+      accessToken <- issueDeployedSandboxPAT ctx.deployedEnv userId "resync deadlock client"
+      let workspaceText = Text.encodeUtf8 (UUID.toText workspace.id)
+          start key = apiRequest ctx.deployedApplication methodPost "/api/v1/change-stream/resync" (authHeaders accessToken.rawToken)
+            (encode (object
+              [ "scope" .= object ["scope" .= ("workspace" :: Text), "workspace_id" .= workspace.id]
+              , "snapshot_profile" .= ("workspace_shell_v1" :: Text)
+              , "page_size" .= (100 :: Int)
+              , "start_idempotency_key" .= (key :: Text) ]))
+      -- Every snapshot insert for this workspace deadlocks, as a losing
+      -- transaction against concurrent writers does, exhausting the retries.
+      bracket_
+        (runSession ctx.deployedEnv.pool $ Session.sql ("CREATE FUNCTION resync_deadlock_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.workspace_id = '" <> workspaceText <> "' THEN RAISE EXCEPTION 'injected deadlock' USING ERRCODE = '40P01'; END IF; RETURN NEW; END; $$; CREATE TRIGGER resync_deadlock_fixture BEFORE INSERT ON change_stream_snapshot_sessions FOR EACH ROW EXECUTE FUNCTION resync_deadlock_fixture()"))
+        (runSession ctx.deployedEnv.pool $ Session.sql "DROP TRIGGER resync_deadlock_fixture ON change_stream_snapshot_sessions; DROP FUNCTION resync_deadlock_fixture()") $ do
+          busy <- start "resync-deadlock-start-key-0000001"
+          HTTP.statusCode (responseStatus busy) `shouldBe` 503
+          lookup "Retry-After" (WaiTest.simpleHeaders busy) `shouldBe` Just "1"
+          body <- decodeResponse busy :: IO Value
+          jsonField "error" body `shouldBe` Just (String "resync_busy")
+      retried <- start "resync-deadlock-start-key-0000001"
+      responseStatus retried `shouldBe` status200
+
   it "reports the main pool unchanged and a separate delivery pool in health" $ do
     withDeployedSandboxAppPools 2 (Just 5) $ \ctx -> do
       health <- apiRequest ctx.deployedApplication methodGet "/api/v1/health" [] "" >>= decodeResponse :: IO Value
@@ -1321,8 +1398,8 @@ spec = describe "canonical change-stream loopback" $ do
           checkoutKeys name = case jsonField name health >>= jsonField "checkout" of
             Just (Object fields) -> sort (KeyMap.keys fields)
             _ -> []
-      poolKeys "pool" `shouldBe` Just ["active_connections", "checkout", "max_connections"]
-      poolKeys "delivery_pool" `shouldBe` Just ["active_connections", "checkout", "max_connections"]
+      poolKeys "pool" `shouldBe` Just ["active_connections", "checkout", "max_connections", "pending_checkouts"]
+      poolKeys "delivery_pool" `shouldBe` Just ["active_connections", "checkout", "max_connections", "pending_checkouts"]
       checkoutKeys "delivery_pool" `shouldBe` checkoutKeys "pool"
       (jsonField "pool" health >>= jsonField "max_connections") `shouldBe` Just (toJSON (2 :: Int))
       (jsonField "delivery_pool" health >>= jsonField "max_connections") `shouldBe` Just (toJSON (5 :: Int))
@@ -1382,18 +1459,29 @@ spec = describe "canonical change-stream loopback" $ do
     withDeployedSandboxAppContext $ \ctx ->
       assertBlockedNativeWrite withTlsWebSocketApplication runTlsPeer ctx
 
-  it "rejects the thirty-third physical connection before upgrade" $
-    withLocalSandboxAppContext $ \ctx ->
+  it "accepts the thirty-third and the 129th physical connection of one audience" $
+    withLocalSandboxAppContext $ \ctx -> do
       withWebSocketApplication ctx.localWSState ctx.localApplication $ \port ->
-        withHeldLegacyPeers port 32 $ do
-          headers <- upgradeResponseHeaders port
-          headers `shouldSatisfy` BS.isInfixOf "503 Service Unavailable"
-          headers `shouldSatisfy` BS.isInfixOf "Retry-After: 1"
-          headers `shouldSatisfy` (not . BS.isInfixOf "Sec-WebSocket-Accept")
-          snapshot <- awaitTelemetry ctx.localWSState "unavailable rejection telemetry" $ \current ->
-            outcomeCount current ("websocket_upgrade", "none", "rejected_unavailable") == 1
-          outcomeCount snapshot ("websocket_upgrade", "none", "accepted") `shouldBe` 32
-          snapshot.delivery.physicalAdmitted `shouldBe` 32
+        withHeldLegacyPeers port 129 $ do
+          snapshot <- awaitTelemetry ctx.localWSState "uncapped physical admission telemetry" $ \current ->
+            outcomeCount current ("websocket_upgrade", "none", "accepted") == 129
+          outcomeCount snapshot ("websocket_upgrade", "none", "rejected_unavailable") `shouldBe` 0
+          snapshot.delivery.physicalAdmitted `shouldBe` 129
+      drained <- awaitTelemetry ctx.localWSState "physical admissions released" $ \current ->
+        current.delivery.physicalAdmitted == 0
+      drained.delivery.physicalAdmitted `shouldBe` 0
+
+  it "rejects an upgrade before it with 503 and Retry-After: 1 once admission closed for shutdown" $
+    withLocalSandboxAppContext $ \ctx ->
+      withWebSocketApplication ctx.localWSState ctx.localApplication $ \port -> do
+        beginWebSocketShutdown ctx.localWSState
+        headers <- upgradeResponseHeaders port
+        headers `shouldSatisfy` BS.isInfixOf "503 Service Unavailable"
+        headers `shouldSatisfy` BS.isInfixOf "Retry-After: 1"
+        headers `shouldSatisfy` (not . BS.isInfixOf "Sec-WebSocket-Accept")
+        snapshot <- awaitTelemetry ctx.localWSState "unavailable rejection telemetry" $ \current ->
+          outcomeCount current ("websocket_upgrade", "none", "rejected_unavailable") == 1
+        outcomeCount snapshot ("websocket_upgrade", "none", "accepted") `shouldBe` 0
 
   it "keeps a successful Close physically admitted until its peer acknowledges" $
     withLocalSandboxAppContext $ \ctx -> do
@@ -1530,7 +1618,7 @@ spec = describe "canonical change-stream loopback" $ do
         , (Just "websocket_connection", Just "closed") ]
       forM_ telemetry $ \entry -> KeyMap.keys entry `shouldSatisfy` all (`elem`
         [ "timestamp", "level", "event", "ticket_kind", "phase", "outcome", "handshake_ms", "lifetime_ms"
-        , "replay_ms", "admitted", "leases", "lease_waiters", "quarantined" ])
+        , "replay_ms", "admitted", "leases", "lease_capacity", "lease_waiters", "quarantined" ])
       rawTelemetry <- BS.concat <$> readIORef telemetryLines
       forM_ [accepted.ticket, unsupported.ticket, "unknown-telemetry-ticket", UUID.toText subscriber, UUID.toText workspace.id] $ \secret ->
         BS.isInfixOf (Text.encodeUtf8 secret) rawTelemetry `shouldBe` False
@@ -2287,23 +2375,30 @@ spec = describe "canonical change-stream loopback" $ do
 -- main pool has one connection; the delivery pool has the given size, or is
 -- shared with the main pool. Returns the number of deadline retirements.
 blockedCatchUpBesideHealthyScope :: Maybe Int -> Int -> IO Int
-blockedCatchUpBesideHealthyScope deliverySize healthyCount =
+blockedCatchUpBesideHealthyScope deliverySize = blockedCatchUpsBesideHealthyScope deliverySize 1
+
+-- As above, with one blocked catch-up in each of the given number of scopes.
+blockedCatchUpsBesideHealthyScope :: Maybe Int -> Int -> Int -> IO Int
+blockedCatchUpsBesideHealthyScope deliverySize blockedCount healthyCount =
   withDeployedSandboxAppPools 1 deliverySize $ \ctx -> do
-    blockedWorkspace <- createTestWorkspace ctx.deployedEnv "blocked-catch-up-scope"
+    blockedWorkspaces <- forM [1 .. blockedCount] $ \index ->
+      createTestWorkspace ctx.deployedEnv ("blocked-catch-up-scope-" <> T.pack (show index))
     healthyWorkspace <- createTestWorkspace ctx.deployedEnv "healthy-delivery-scope"
     let principal name = Principal
           { actorType = ActorUser, actorId = name, actorLabel = name, authority = PrincipalSyntheticLocalSuperadmin }
         ticketFor name scope = canonicalTicketFor ctx (principal name) scope (TrustedAudience ("local:" <> name))
         st = ctx.deployedWSState
         connectionString = ctx.deployedEnv.testDb.testDbConnStr
-        lockSql = "BEGIN; SELECT * FROM hmem_change_stream_lock('workspace', '"
-          <> Text.encodeUtf8 (UUID.toText blockedWorkspace.id) <> "')"
+        lockSql = "BEGIN;" <> mconcat
+          [ " SELECT * FROM hmem_change_stream_lock('workspace', '" <> Text.encodeUtf8 (UUID.toText workspace.id) <> "');"
+          | workspace <- blockedWorkspaces ]
     healthyTickets <- forM [1 .. healthyCount] $ \index ->
       ticketFor ("healthy-peer-" <> T.pack (show index)) (WorkspaceScope healthyWorkspace.id)
-    blocked <- ticketFor "blocked-peer" (WorkspaceScope blockedWorkspace.id)
+    blockedTickets <- forM (zip [1 :: Int ..] blockedWorkspaces) $ \(index, workspace) ->
+      ticketFor ("blocked-peer-" <> T.pack (show index)) (WorkspaceScope workspace.id)
     entered <- newEmptyMVar
     release <- newEmptyMVar
-    disconnected <- newEmptyMVar
+    disconnects <- replicateM blockedCount newEmptyMVar
     let holdScope holderPool = DBPool.withConn holderPool $ \connection ->
           (do
             Session.run (Session.sql lockSql) connection >>= either (fail . show) pure
@@ -2311,10 +2406,12 @@ blockedCatchUpBesideHealthyScope deliverySize healthyCount =
             putMVar entered holderPid
             readMVar release)
           `finally` void (Session.run (Session.sql "ROLLBACK") connection)
-        blockedPeer port =
+        blockedPeer port (blocked, disconnected) =
           WS.runClient "127.0.0.1" port ("/api/v1/ws?ticket=" <> showTicket blocked.ticket) $ \conn -> do
             result <- try @WS.ConnectionException (forever (void (WS.receiveData conn :: IO Text)))
             putMVar disconnected (either (const True) (const False) result)
+        withAll [] use = use []
+        withAll (action:rest) use = withAsync action $ \worker -> withAll rest (use . (worker :))
         changeIds :: Chan Text -> Int -> IO [Text]
         changeIds _ 0 = pure []
         changeIds frames remaining = do
@@ -2335,7 +2432,7 @@ blockedCatchUpBesideHealthyScope deliverySize healthyCount =
         let lockWaiters holderPid = runSession observerPool (Session.statement holderPid replayLockWaitersStatement)
             awaitLockWaiter holderPid = do
               waiting <- lockWaiters holderPid
-              when (waiting /= 1) (threadDelay 20000 >> awaitLockWaiter holderPid)
+              when (waiting /= fromIntegral blockedCount) (threadDelay 20000 >> awaitLockWaiter holderPid)
         writes <- withWebSocketApplication st ctx.deployedApplication $ \port ->
           withDispatcherFixture ctx "blocked catch-up dispatcher" $ \_ -> do
             let connect [] use = use []
@@ -2347,8 +2444,8 @@ blockedCatchUpBesideHealthyScope deliverySize healthyCount =
                   `shouldReturn` Just "checkpoint"
               withAsync (holdScope holderPool) $ \holder -> do
                holderPid <- declaredPhase "scope lock acquisition" (takeMVar entered)
-               withAsync (blockedPeer port) $ \peer -> do
-                declaredPhase "catch-up waits on the held scope lock" (awaitLockWaiter holderPid)
+               withAll (map (blockedPeer port) (zip blockedTickets disconnects)) $ \blockedPeers -> do
+                declaredPhase "catch-ups wait on the held scope locks" (awaitLockWaiter holderPid)
                 -- The blocked catch-up holds a delivery connection, not the
                 -- main pool's only connection.
                 timeout 1000000 (runSession ctx.deployedEnv.pool (Session.sql "SELECT 1"))
@@ -2359,18 +2456,19 @@ blockedCatchUpBesideHealthyScope deliverySize healthyCount =
                 let expected = map (UUID.toText . (.id)) projects
                 forM_ peers $ \frames ->
                   declaredPhase "healthy peer receives every write in order" (changeIds frames 10) `shouldReturn` expected
-                declaredPhase "blocked peer retired" (takeMVar disconnected) `shouldReturn` True
-                declaredPhase "blocked peer closed" (wait peer)
+                forM_ disconnects $ \disconnected ->
+                  declaredPhase "blocked peer retired" (takeMVar disconnected) `shouldReturn` True
+                forM_ blockedPeers (declaredPhase "blocked peer closed" . wait)
                 -- Every healthy peer is still registered after all writes.
                 readWebSocketTelemetry st >>= \current -> current.canonicalClients `shouldBe` healthyCount
                 -- Release only after the cleanup join exhausted its budget.
                 void $ awaitTelemetry st "unfinished catch-up cleanup" $ \current ->
-                  outcomeCount current ("websocket_cleanup", "", "unfinished") == 1
-                lockWaiters holderPid `shouldReturn` 1
+                  outcomeCount current ("websocket_cleanup", "", "unfinished") == blockedCount
+                lockWaiters holderPid `shouldReturn` fromIntegral blockedCount
                 putMVar release ()
                 declaredPhase "scope lock release" (wait holder)
                 void $ awaitTelemetry st "retained catch-up reclaimed" $ \current ->
-                  outcomeCount current ("websocket_reclaim", "", "reclaimed") == 1
+                  outcomeCount current ("websocket_reclaim", "", "reclaimed") == blockedCount
                 pure (length expected)
         writes `shouldBe` 10
         snapshot <- readWebSocketTelemetry st
@@ -2378,8 +2476,10 @@ blockedCatchUpBesideHealthyScope deliverySize healthyCount =
           [ ("websocket_cleanup", "", "unfinished"), ("websocket_reclaim", "", "reclaimed")
           , ("websocket_replay", "live", "retired"), ("websocket_replay", "initial", "retired")
           , ("websocket_turn", "", "retired_write_timeout") ]
-          `shouldBe` [1, 1, 0, 1, 0]
+          `shouldBe` [blockedCount, blockedCount, 0, blockedCount, 0]
         (snapshot.delivery.leasesQuarantined, snapshot.delivery.physicalAdmitted) `shouldBe` (0, 0)
+        -- One lease per delivery connection except the dispatcher's, at least four.
+        snapshot.delivery.leaseCapacity `shouldBe` maybe 4 (\size -> max 4 (size - 1)) deliverySize
         active <- DBPool.getPoolMetricsFor (deliveryPoolFor ctx.deployedEnv.pool st)
         active.activeConnections `shouldBe` 0
         pure (outcomeCount snapshot ("websocket_turn", "", "retired_deadline")))

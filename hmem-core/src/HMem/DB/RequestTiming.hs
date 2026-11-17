@@ -27,6 +27,7 @@ module HMem.DB.RequestTiming
   , connectCountOn
   , recordCheckoutOn
   , recordHoldOn
+  , recordCheckoutTimeoutOn
     -- * Process-wide checkout counters
   , PoolCheckoutMetrics(..)
   , getPoolCheckoutMetrics
@@ -126,6 +127,7 @@ data PoolCheckoutMetrics = PoolCheckoutMetrics
   , connectTotalNs        :: !Word64
   , holdTotalNs           :: !Word64
   , waitBuckets           :: ![Word64] -- ^ One count per 'checkoutWaitBoundsNs' entry, then the overflow.
+  , checkoutTimeouts      :: !Word64   -- ^ Checkouts abandoned at the pool checkout timeout.
   } deriving stock (Show, Eq)
 
 -- | Inclusive upper bounds: 0.1, 0.5, 1, 5, 10, 50, 100, 500 and 1000 ms.
@@ -136,13 +138,14 @@ checkoutWaitBoundsNs =
 -- | A capacity wait queued at least this long (1 ms), excluding connection
 -- time, although checked-out and waiting checkouts together were fewer than
 -- the configured maximum when it was requested, and no connection was
--- established meanwhile. resource-pool stripes cannot lend connections to each
--- other, so this is a lower bound on waits for a full stripe.
+-- established meanwhile. Pools have a single FIFO stripe, so such a wait
+-- shows only hand-over delay; a pool divided into stripes would also count
+-- waits behind a full stripe while another had idle connections.
 capacityWaitThresholdNs :: Word64
 capacityWaitThresholdNs = 1000000
 
 emptyMetrics :: PoolCheckoutMetrics
-emptyMetrics = PoolCheckoutMetrics 0 0 0 0 0 0 0 0 (0 <$ (0 : checkoutWaitBoundsNs))
+emptyMetrics = PoolCheckoutMetrics 0 0 0 0 0 0 0 0 (0 <$ (0 : checkoutWaitBoundsNs)) 0
 
 -- | One set of cumulative checkout counters.
 newtype CheckoutCounters = CheckoutCounters (IORef PoolCheckoutMetrics)
@@ -210,6 +213,11 @@ recordHoldOn :: CheckoutCounters -> Maybe RequestTimer -> Word64 -> IO ()
 recordHoldOn (CheckoutCounters ref) timer holdNs = do
   atomicModifyIORef' ref $ \m -> (m { holdTotalNs = m.holdTotalNs + holdNs }, ())
   addTiming timer $ \t -> t { dbHoldNs = t.dbHoldNs + holdNs }
+
+-- | Record a checkout that gave up waiting at the pool checkout timeout.
+recordCheckoutTimeoutOn :: CheckoutCounters -> IO ()
+recordCheckoutTimeoutOn (CheckoutCounters ref) =
+  atomicModifyIORef' ref $ \m -> (m { checkoutTimeouts = m.checkoutTimeouts + 1 }, ())
 
 -- Strict in the whole spine so repeated updates cannot accumulate thunks.
 bump :: Word64 -> [Word64] -> [Word64] -> [Word64]

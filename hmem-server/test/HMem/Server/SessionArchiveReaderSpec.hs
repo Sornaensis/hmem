@@ -2,8 +2,10 @@ module HMem.Server.SessionArchiveReaderSpec (spec) where
 
 import Codec.Compression.Zlib.Raw qualified as Z
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket,bracket_)
-import Control.Monad (foldM, forM_)
+import Control.Exception (bracket,bracket_,finally)
+import Control.Monad (foldM, forM_, replicateM)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.Time (getCurrentTime)
 import Data.Aeson (FromJSON, encode, eitherDecode)
 import Data.Bits (shiftL, (.|.))
 import Data.ByteString qualified as BS
@@ -34,7 +36,8 @@ import HMem.DB.TestHarness (TestEnv(..), TestDb(..), createTestWorkspace)
 import HMem.Server.AccessTracker (newAccessTracker)
 import HMem.Server.App (mkAppWithPrefixProofs)
 import HMem.Server.Archive.Worker (runArchiveLease)
-import HMem.Server.SessionPrefix (newPrefixRegistry,closePrefixRegistry)
+import HMem.Server.SessionPrefix (newPrefixRegistry,closePrefixRegistry,newPrefixRegistryWithReaders,sessionPrefixReader
+  ,PrefixReader(..),PrefixOptions(..),PrefixTarget(..),submitPrefixProof,lookupPrefixProof)
 import HMem.Server.TestHarness
 import HMem.SessionArchive.Codec qualified as Codec
 import HMem.Types qualified as Types
@@ -78,6 +81,30 @@ spec = describe "Source-absent archive compatibility HTTP" $ do
         submitted.operationId `shouldBe` operation
         result <- timeout 10000000 $ await app (proofPath<>"/"<>uuid operation)
         fmap (.state) result `shouldBe` Just "verified"
+      -- Twenty concurrent archive-backed whole-prefix proofs on three workers:
+      -- each turn opens and releases its reader and archive decoder, so at
+      -- most three are open at once and every proof completes exactly.
+      counters <- newIORef (0 :: Int, 0 :: Int)
+      let counted proofTarget = do
+            source <- sessionPrefixReader env.pool proofTarget
+            atomicModifyIORef' counters (\(open,peak) -> ((open+1,max peak (open+1)),()))
+            pure source { closePrefixReader = source.closePrefixReader `finally` atomicModifyIORef' counters (\(open,peak) -> ((open-1,peak),())) }
+          proofOptions = PrefixOptions getCurrentTime
+            (\t -> DB.validateSessionPrefixBoundary env.pool t.workspace t.session t.request.expectedOffset t.request.expectedRevision)
+            (\_ _ -> fail "the reader seam serves every window")
+      bracket (newPrefixRegistryWithReaders 3 counted proofOptions) closePrefixRegistry $ \archiveRegistry -> do
+        targets <- replicateM 20 $ do
+          operation <- UUID.nextRandom
+          pure (PrefixTarget workspace.id identifier "user:archive-fixture" (Wire.PrefixProofRequest operation uploaded.committedBytes uploaded.revision (Core.sessionSha256 raw)))
+        forM_ targets $ \proof -> submitPrefixProof archiveRegistry proof >>= either (fail . show) (const (pure ()))
+        forM_ targets $ \proof -> do
+          let poll = lookupPrefixProof archiveRegistry proof.workspace proof.session proof.audience proof.request.operationId >>= \case
+                Just value | value.state /= "pending" -> pure value.state
+                _ -> threadDelay 1000 >> poll
+          timeout 60000000 poll `shouldReturn` Just "verified"
+        (open,peak) <- readIORef counters
+        open `shouldBe` 0
+        peak `shouldSatisfy` (\value -> value >= 1 && value <= 3)
       replay <- request app methodPost (target<>"/append")
         (encode (Wire.AppendSessionRequest 0 0 (Wire.encodeSessionBytes first) False)) >>= decoded @Wire.AppendSessionResponse
       (replay.replayed,replay.session) `shouldBe` (True,sealed)

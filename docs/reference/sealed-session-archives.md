@@ -308,8 +308,9 @@ boundaries. A proof hashes only its requested prefix and never reads beyond
 that append boundary.
 
 Prefix workers and ZIP exports own sequential decoder state across their fair
-turns instead of recreating it for each 64 KiB window. Preserve the existing
-two prefix workers and two ZIP admissions. For ordinary paginated evidence
+turns instead of recreating it for each 64 KiB window. ZIP exports and prefix
+submissions are not capped; prefix workers number half the CPU capabilities,
+at least two. For ordinary paginated evidence
 reads, use an application-owned cache of four verified-byte entries keyed by
 resolved authenticated principal/account and credential or authentication-session
 context, workspace, session and immutable generation. An audience is that
@@ -324,9 +325,10 @@ Repeated tiny pages within those verified chunks use the cached bytes. Crossing
 the retained chunk boundary performs another bounded checkpoint fill. Prefix
 and ZIP processing retain their explicitly owned sequential decoder contexts.
 Recheck current authorization before lookup or reuse. No cached state owns a
-transaction or pool connection between requests. Evict only idle entries;
-admission failure returns retryable 503 with `Retry-After: 1`. Offset mismatch,
-expiry, eviction or process restart uses the fixed-gap checkpoint fallback.
+transaction or pool connection between requests. Evict only idle entries.
+When the key's entry or every entry is busy, the request uses an uncached
+transient checkpoint fill closed before returning; it is never refused. Offset
+mismatch, expiry, eviction or process restart uses the same fixed-gap fallback.
 Measure both cache-hit paging and this bounded fallback; the standalone probe
 only proves decoder reuse as a primitive.
 

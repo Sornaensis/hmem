@@ -1,6 +1,6 @@
 module HMem.Server.SessionPrefixSpec (spec) where
 
-import Control.Concurrent (threadDelay, newEmptyMVar, readMVar, putMVar, takeMVar, tryPutMVar)
+import Control.Concurrent (getNumCapabilities, threadDelay, newEmptyMVar, readMVar, putMVar, takeMVar, tryPutMVar)
 import Control.Exception (SomeException, bracket, finally, throwIO, try, uninterruptibleMask_)
 import Control.Concurrent.Async (withAsync, wait, poll)
 import Control.Monad (forM, forM_, replicateM, void, when)
@@ -67,12 +67,13 @@ spec = describe "PrefixProof service" $ do
       prefixRegistryCounts registry `shouldReturn` (0,4)
       modifyIORef' clock (addUTCTime 301)
       prefixRegistryCounts registry `shouldReturn` (0,0)
+      -- Four unfinished owners no longer refuse a fifth submission.
       fresh <- targetFor BS.empty
-      timeout 1000000 (submitPrefixProof registry fresh) `shouldReturn` Just (Left PrefixBusy)
-      pure targets
+      timeout 1000000 (submitPrefixProof registry fresh) >>= (`shouldSatisfy` maybe False isRight)
+      pure (fresh:targets)
     sort . nub <$> readIORef cleaned `shouldReturn` sort (map (.request.operationId) targets)
 
-  it "reserves requeue capacity for active readers while expired queued owners await cleanup" $ do
+  it "requeues active readers and accepts new work while expired queued owners await cleanup" $ do
     clock <- getCurrentTime >>= newIORef
     let bytes=BS.replicate (2*1048576) 97
     old <- replicateM 2 (targetFor bytes)
@@ -100,12 +101,11 @@ spec = describe "PrefixProof service" $ do
       prefixRegistryCounts registry `shouldReturn` (2,4)
       putMVar requeueGate ()
       replicateM 2 (timeout 1000000 (takeMVar newEntered)) `shouldReturn` [Just (),Just ()]
-      forM_ fresh $ \target -> timeout 1000000 (submitPrefixProof registry target) `shouldReturn` Just (Left PrefixBusy)
+      forM_ fresh $ \target -> timeout 1000000 (submitPrefixProof registry target) >>= (`shouldSatisfy` maybe False isRight)
       putMVar newGate ()
       forM_ newer $ \target -> await registry target >>= (\value -> value.state `shouldBe` "verified")
       forM_ old $ \target -> await registry target >>= (\value -> value.state `shouldBe` "failed")
-      submitPrefixProof registry (head fresh) >>= (`shouldSatisfy` isRight)
-      await registry (head fresh) >>= (\value -> value.state `shouldBe` "verified")
+      forM_ fresh $ \target -> await registry target >>= (\value -> value.state `shouldBe` "verified")
 
   it "joins every worker finalizer before reporting an earlier worker failure" $ do
     secondEntered <- newEmptyMVar; blocked <- newEmptyMVar; finalizerEntered <- newEmptyMVar; release <- newEmptyMVar
@@ -125,7 +125,7 @@ spec = describe "PrefixProof service" $ do
       outcome <- wait closing
       outcome `shouldSatisfy` either (const True) (const False)
 
-  it "binds all targets and fairly finishes four jobs with only two workers" $ do
+  it "accepts the fifth and the fiftieth concurrent submission and fairly finishes them with two workers" $ do
     gate <- newEmptyMVar
     steps <- newIORef []; active <- newIORef (0 :: Int,0 :: Int)
     let bytes = BS.replicate (3*1048576) 97
@@ -136,24 +136,23 @@ spec = describe "PrefixProof service" $ do
             readMVar gate
             pure (BS.take 1048576 (BS.drop (fromIntegral offset) bytes))
     bracket (newPrefixRegistryWith (PrefixOptions getCurrentTime (const (pure True)) readWindow)) closePrefixRegistry $ \registry -> do
-      targets <- replicateM 4 (targetFor bytes)
+      targets <- replicateM 50 (targetFor bytes)
       forM_ targets $ \target -> submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
-      prefixRegistryCounts registry `shouldReturn` (4,4)
-      fifth <- targetFor bytes
-      submitPrefixProof registry fifth `shouldReturn` Left PrefixBusy
+      prefixRegistryCounts registry `shouldReturn` (50,50)
       let first = head targets
       submitPrefixProof registry first >>= (`shouldSatisfy` isRight)
       submitPrefixProof registry (first { request = first.request { Wire.sha256 = sessionSha256 "different" } }) `shouldReturn` Left PrefixConflict
       lookupPrefixProof registry first.workspace first.session "foreign-audience" first.request.operationId `shouldReturn` Nothing
       putMVar gate ()
       forM_ targets $ \target -> await registry target >>= (\value -> value.state `shouldBe` "verified")
-      prefixRegistryCounts registry `shouldReturn` (0,4)
+      prefixRegistryCounts registry `shouldReturn` (0,50)
       observed <- readIORef steps
-      length (nub (take 4 observed)) `shouldBe` 4
+      -- Fair turns: every job takes its first window before any takes a third.
+      length (nub (take 50 observed)) `shouldBe` 50
       (_,peak) <- readIORef active
       peak `shouldSatisfy` (<=2)
 
-  it "evicts oldest terminal entries on admission before the five-minute maximum" $ do
+  it "retains seventeen terminal results until their five-minute expiry without count eviction" $ do
     clock <- getCurrentTime >>= newIORef
     let options = PrefixOptions (readIORef clock) (const (pure True)) (\_ _ -> pure BS.empty)
     bracket (newPrefixRegistryWith options) closePrefixRegistry $ \registry -> do
@@ -163,12 +162,16 @@ spec = describe "PrefixProof service" $ do
         _ <- await registry target
         modifyIORef' clock (addUTCTime 0.001)
         pure target
-      prefixRegistryCounts registry `shouldReturn` (0,16)
+      prefixRegistryCounts registry `shouldReturn` (0,17)
       let oldest = head targets; latest = last targets
-      lookupPrefixProof registry oldest.workspace oldest.session oldest.audience oldest.request.operationId `shouldReturn` Nothing
+      forM_ [oldest, latest] $ \target ->
+        lookupPrefixProof registry target.workspace target.session target.audience target.request.operationId >>= (`shouldSatisfy` maybe False ((== "verified") . (.state)))
+      modifyIORef' clock (addUTCTime 299.98)
       lookupPrefixProof registry latest.workspace latest.session latest.audience latest.request.operationId >>= (`shouldSatisfy` maybe False ((== "verified") . (.state)))
-      modifyIORef' clock (addUTCTime 300)
-      lookupPrefixProof registry latest.workspace latest.session latest.audience latest.request.operationId `shouldReturn` Nothing
+      modifyIORef' clock (addUTCTime 0.02)
+      forM_ [oldest, latest] $ \target ->
+        lookupPrefixProof registry target.workspace target.session target.audience target.request.operationId `shouldReturn` Nothing
+      prefixRegistryCounts registry `shouldReturn` (0,0)
     bracket (newPrefixRegistryWith options) closePrefixRegistry $ \registry -> prefixRegistryCounts registry `shouldReturn` (0,0)
 
   it "classifies each unknown operation internally while every lookup stays unknown" $ do
@@ -194,12 +197,14 @@ spec = describe "PrefixProof service" $ do
         submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
         _ <- await registry target
         pure target
-      classify registry first `shouldReturn` Left MissEvicted
+      -- Terminal results are not evicted by count.
+      classify registry first >>= (`shouldSatisfy` either (const False) ((== "verified") . (.state)))
       classify registry foreignTarget `shouldReturn` Left MissTargetMismatch
-      unknown registry first
       let survivor = last later
       classify registry survivor >>= (`shouldSatisfy` either (const False) ((== "verified") . (.state)))
       modifyIORef' clock (addUTCTime 300)
+      classify registry first `shouldReturn` Left MissExpired
+      unknown registry first
       classify registry survivor `shouldReturn` Left MissExpired
       unknown registry survivor
       modifyIORef' clock (addUTCTime 300)
@@ -212,7 +217,7 @@ spec = describe "PrefixProof service" $ do
       classify registry survivor `shouldReturn` Left MissUnknownSinceStart
       classify registry foreignTarget `shouldReturn` Left MissUnknownSinceStart
 
-  it "admits more than sixteen sweeps from four followers without evicting their live work" $ do
+  it "admits more than sixteen sweeps from four followers and retains every result" $ do
     let bytes = BS.replicate (3*1048576) 97
     initialGate <- newEmptyMVar
     gateRef <- newIORef initialGate
@@ -229,14 +234,106 @@ spec = describe "PrefixProof service" $ do
           operation <- UUID.nextRandom
           pure target {request = target.request {Wire.operationId = operation}}
         forM_ targets $ \target -> submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
-        prefixRegistryCounts registry `shouldReturn` (4,min 16 (roundIndex*4))
+        prefixRegistryCounts registry `shouldReturn` (4,roundIndex*4)
         forM_ targets $ \target -> lookupPrefixProof registry target.workspace target.session target.audience target.request.operationId >>= (`shouldSatisfy` maybe False ((== "pending") . (.state)))
         putMVar gate ()
         forM_ targets $ \target -> await registry target >>= (\value -> value.state `shouldBe` "verified")
         pure targets
-      prefixRegistryCounts registry `shouldReturn` (0,16)
-      let evicted = head (head rounds)
-      lookupPrefixProof registry evicted.workspace evicted.session evicted.audience evicted.request.operationId `shouldReturn` Nothing
+      prefixRegistryCounts registry `shouldReturn` (0,20)
+      let earliest = head (head rounds)
+      lookupPrefixProof registry earliest.workspace earliest.session earliest.audience earliest.request.operationId
+        >>= (`shouldSatisfy` maybe False ((== "verified") . (.state)))
+
+  it "opens per-turn readers for twenty concurrent multi-window proofs without exceeding the worker count" $ do
+    gate <- newEmptyMVar
+    counters <- newIORef (0 :: Int, 0 :: Int, 0 :: Int)
+    let bytes = BS.replicate (3*1048576+17) 98
+        open _ = do
+          atomicModifyIORef' counters (\(count,peak,opened) -> ((count+1,max peak (count+1),opened+1),()))
+          pure PrefixReader
+            { readPrefixWindow = \offset limit -> readMVar gate >> pure (BS.take limit (BS.drop (fromIntegral offset) bytes))
+            , closePrefixReader = atomicModifyIORef' counters (\(count,peak,opened) -> ((count-1,peak,opened),())) }
+        options = PrefixOptions getCurrentTime (const (pure True)) (\_ _ -> error "the reader seam serves every window")
+    bracket (newPrefixRegistryWithReaders 3 open options) closePrefixRegistry $ \registry -> do
+      targets <- replicateM 20 (targetFor bytes)
+      forM_ targets $ \target -> submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
+      putMVar gate ()
+      forM_ targets $ \target -> await registry target >>= (\value -> value.state `shouldBe` "verified")
+      (count,peak,opened) <- readIORef counters
+      count `shouldBe` 0
+      peak `shouldSatisfy` (<= 3)
+      -- Each of the four windows reopened its reader after yielding a turn.
+      opened `shouldBe` 20*4
+
+  it "evicts only the earliest-expiring terminal results above the ceiling and never live work" $ do
+    clock <- getCurrentTime >>= newIORef
+    gate <- newEmptyMVar
+    blocked <- targetFor (BS.replicate 1024 99)
+    let readWindow target _
+          | target == blocked = readMVar gate >> pure (BS.replicate 1024 99)
+          | otherwise = pure BS.empty
+        options = PrefixOptions (readIORef clock) (const (pure True)) readWindow
+        classify registry target = lookupPrefixProofClassified registry target.workspace target.session target.audience target.request.operationId
+    bracket (newPrefixRegistryWithTerminalLimit 3 options) closePrefixRegistry $ \registry -> do
+      submitPrefixProof registry blocked >>= (`shouldSatisfy` isRight)
+      done <- forM [1..5 :: Int] $ \_ -> do
+        modifyIORef' clock (addUTCTime 0.001)
+        target <- targetFor BS.empty
+        submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
+        _ <- await registry target
+        pure target
+      prefixRegistryCounts registry `shouldReturn` (1,4)
+      forM_ (take 2 done) $ \target -> classify registry target `shouldReturn` Left MissEvicted
+      forM_ (drop 2 done) $ \target -> classify registry target >>= (`shouldSatisfy` either (const False) ((== "verified") . (.state)))
+      classify registry blocked >>= (`shouldSatisfy` either (const False) ((== "pending") . (.state)))
+      putMVar gate ()
+      _ <- await registry blocked
+      -- The newly terminal result now displaces the earliest retained one.
+      classify registry (done !! 2) `shouldReturn` Left MissEvicted
+      classify registry blocked >>= (`shouldSatisfy` either (const False) ((== "verified") . (.state)))
+      prefixRegistryCounts registry `shouldReturn` (0,3)
+
+  it "keeps submit and lookup cost bounded with ten thousand retained results" $ do
+    let options = PrefixOptions getCurrentTime (const (pure True)) (\_ _ -> pure BS.empty)
+        settle registry expected = do
+          let loop = prefixRegistryCounts registry >>= \counts -> if counts == (0,expected) then pure () else threadDelay 1000 >> loop
+          timeout 20000000 loop `shouldReturn` Just ()
+        batch registry count = do
+          targets <- replicateM count (targetFor BS.empty)
+          started <- getCurrentTime
+          forM_ targets $ \target -> submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
+          forM_ targets $ \target -> lookupPrefixProof registry target.workspace target.session target.audience target.request.operationId
+            >>= (`shouldSatisfy` maybe False (const True))
+          ended <- getCurrentTime
+          pure (realToFrac (diffUTCTime ended started) :: Double)
+    bracket (newPrefixRegistryWith options) closePrefixRegistry $ \registry -> do
+      early <- batch registry 2000
+      settle registry 2000
+      _ <- batch registry 6000
+      settle registry 8000
+      late <- batch registry 2000
+      settle registry 10000
+      -- Indexed pruning: cost per operation does not grow with the ~10k
+      -- retained results, unlike a full scan of every entry per call.
+      late `shouldSatisfy` (<= 3*early + 0.25)
+
+  it "sizes production workers to the CPU and joins every worker on shutdown" $ do
+    capabilities <- getNumCapabilities
+    prefixWorkerCount `shouldReturn` max 2 (capabilities `div` 2)
+    gate <- newEmptyMVar
+    active <- newIORef (0 :: Int, 0 :: Int)
+    let bytes = BS.replicate 1024 97
+        readWindow _ _ = bracket
+          (atomicModifyIORef' active (\(count,peak) -> ((count+1,max peak (count+1)),())))
+          (\_ -> atomicModifyIORef' active (\(count,peak) -> ((count-1,peak),()))) $ \_ -> readMVar gate >> pure bytes
+    registry <- newPrefixRegistryWithWorkers 6 (PrefixOptions getCurrentTime (const (pure True)) readWindow)
+    (do
+      targets <- replicateM 6 (targetFor bytes)
+      forM_ targets $ \target -> submitPrefixProof registry target >>= (`shouldSatisfy` isRight)
+      let busy = readIORef active >>= \(count,_) -> if count == 6 then pure () else threadDelay 1000 >> busy
+      timeout 2000000 busy `shouldReturn` Just ()) `finally` putMVar gate ()
+    closePrefixRegistry registry
+    fst <$> readIORef active `shouldReturn` 0
 
   it "publishes deadline failure and joins an interrupted in-flight window" $ do
     clock <- getCurrentTime >>= newIORef

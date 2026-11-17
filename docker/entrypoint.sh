@@ -121,10 +121,11 @@ apply_defaults() {
   default_env HMEM_DB_NAME "hmem"
   default_env HMEM_DB_USER "hmem"
   default_env HMEM_DB_SSLMODE "disable"
-  default_env HMEM_POOL_SIZE "15"
+  default_env HMEM_POOL_SIZE "64"
   default_env HMEM_POOL_DELIVERY_SIZE "10"
   default_env HMEM_POOL_IDLE_TIMEOUT "60"
   default_env HMEM_POOL_STATEMENT_TIMEOUT_MS "30000"
+  default_env HMEM_POOL_CHECKOUT_TIMEOUT_MS "60000"
   default_env HMEM_LOG_LEVEL "info"
   default_env HMEM_LOG_MAX_SIZE_MB "10"
   default_env HMEM_LOG_BACKUP_COUNT "5"
@@ -333,15 +334,25 @@ validate_csv_scalars_no_newline() {
   esac
 }
 
+# The checkout timeout is a safety net against a hung database; below the
+# statement timeout it can expire while a healthy statement holds a connection.
+validate_pool_config() {
+  HMEM_POOL_SIZE=$(int_env HMEM_POOL_SIZE 1 1000); export HMEM_POOL_SIZE
+  HMEM_POOL_DELIVERY_SIZE=$(int_env HMEM_POOL_DELIVERY_SIZE 5 1000); export HMEM_POOL_DELIVERY_SIZE
+  HMEM_POOL_IDLE_TIMEOUT=$(decimal_env HMEM_POOL_IDLE_TIMEOUT 1 3600); export HMEM_POOL_IDLE_TIMEOUT
+  HMEM_POOL_STATEMENT_TIMEOUT_MS=$(int_env HMEM_POOL_STATEMENT_TIMEOUT_MS 1000 300000); export HMEM_POOL_STATEMENT_TIMEOUT_MS
+  HMEM_POOL_CHECKOUT_TIMEOUT_MS=$(int_env HMEM_POOL_CHECKOUT_TIMEOUT_MS 1000 600000); export HMEM_POOL_CHECKOUT_TIMEOUT_MS
+  if [ "$HMEM_POOL_CHECKOUT_TIMEOUT_MS" -lt "$HMEM_POOL_STATEMENT_TIMEOUT_MS" ]; then
+    warn "HMEM_POOL_CHECKOUT_TIMEOUT_MS $HMEM_POOL_CHECKOUT_TIMEOUT_MS is below HMEM_POOL_STATEMENT_TIMEOUT_MS $HMEM_POOL_STATEMENT_TIMEOUT_MS"
+  fi
+}
+
 validate_common_config() {
   vc_mode=${1:-server}
 
   HMEM_SERVER_PORT=$(int_env HMEM_SERVER_PORT 1 65535); export HMEM_SERVER_PORT
   HMEM_DB_PORT=$(int_env HMEM_DB_PORT 1 65535); export HMEM_DB_PORT
-  HMEM_POOL_SIZE=$(int_env HMEM_POOL_SIZE 1 1000); export HMEM_POOL_SIZE
-  HMEM_POOL_DELIVERY_SIZE=$(int_env HMEM_POOL_DELIVERY_SIZE 5 1000); export HMEM_POOL_DELIVERY_SIZE
-  HMEM_POOL_IDLE_TIMEOUT=$(decimal_env HMEM_POOL_IDLE_TIMEOUT 1 3600); export HMEM_POOL_IDLE_TIMEOUT
-  HMEM_POOL_STATEMENT_TIMEOUT_MS=$(int_env HMEM_POOL_STATEMENT_TIMEOUT_MS 1000 300000); export HMEM_POOL_STATEMENT_TIMEOUT_MS
+  validate_pool_config
   HMEM_LOG_MAX_SIZE_MB=$(int_env HMEM_LOG_MAX_SIZE_MB 1 10000); export HMEM_LOG_MAX_SIZE_MB
   HMEM_LOG_BACKUP_COUNT=$(int_env HMEM_LOG_BACKUP_COUNT 0 100); export HMEM_LOG_BACKUP_COUNT
   if [ $(((HMEM_LOG_BACKUP_COUNT + 1) * HMEM_LOG_MAX_SIZE_MB)) -gt 96 ]; then
@@ -639,6 +650,7 @@ generate_config() {
     printf '  delivery_size: %s\n' "$HMEM_POOL_DELIVERY_SIZE"
     printf '  idle_timeout: %s\n' "$HMEM_POOL_IDLE_TIMEOUT"
     printf '  statement_timeout_ms: %s\n' "$HMEM_POOL_STATEMENT_TIMEOUT_MS"
+    printf '  checkout_timeout_ms: %s\n' "$HMEM_POOL_CHECKOUT_TIMEOUT_MS"
 
     printf 'logging:\n'
     printf '  level: %s\n' "$(yaml_quote "$HMEM_LOG_LEVEL")"

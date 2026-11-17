@@ -23,7 +23,7 @@ data ArchivesOperation = ArchivesStatus | ArchivesConfigure M.MaintenanceAction 
 runArchivesOperation :: ArchivesOperation -> IO Value
 runArchivesOperation operation=do
   cfg<-loadConfig
-  bracket (P.createPool (connectionString cfg.database) 2 cfg.pool.idleTimeout cfg.pool.statementTimeoutMs)
+  bracket (P.createPoolWithCheckoutTimeout (connectionString cfg.database) 2 cfg.pool.idleTimeout cfg.pool.statementTimeoutMs cfg.pool.checkoutTimeoutMs)
     destroyAllResources (\pool -> runArchivesOperationWithPool pool operation)
 
 -- A bootstrap superuser is useful for migration, but cannot establish the

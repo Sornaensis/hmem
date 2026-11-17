@@ -868,3 +868,7 @@ complete original occurrence projection in the first-delete transaction.
 Committed positive deletion progress marks the original unavailable and
 protects the verified occurrence and progress from ordinary mutation. Exact
 reclamation retains its existing controls and capability grant.
+
+V064 adds a partial `audit_log (entity_type, changed_at)` index over legacy rows
+without `workspace_id`, so timeline inventory reads them without scanning the
+whole audit log. It changes no data.

@@ -1,6 +1,9 @@
 module HMem.DB.Pool
   ( createPool
+  , createPoolWithCheckoutTimeout
   , createDeliveryPool
+  , createDeliveryPoolWithCheckoutTimeout
+  , defaultCheckoutTimeoutMs
   , destroyDeliveryPool
   , withConn
   , runSession
@@ -16,17 +19,16 @@ module HMem.DB.Pool
   , runSessionWithRollbackForTest
   ) where
 
-import Control.Exception (Exception, SomeAsyncException, SomeException, bracket_, finally, fromException, mask, throwIO, try)
+import Control.Exception (Exception, SomeAsyncException, SomeException, bracket_, finally, fromException, mask, onException, throwIO, try)
 import Control.Monad (void, when)
 import Data.ByteString (ByteString)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
-import Data.Pool (Pool, destroyAllResources, newPool, defaultPoolConfig, setNumStripes, withResource)
+import Data.Pool (Pool, destroyAllResources, destroyResource, newPool, defaultPoolConfig, putResource, setNumStripes, takeResource)
 import Data.Pool.Internal qualified as PoolInternal
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTimeNSec)
-import GHC.Conc (getNumCapabilities)
 import Hasql.Connection qualified as Hasql
 import Hasql.Connection.Setting qualified as Setting
 import Hasql.Connection.Setting.Connection qualified as ConnSetting
@@ -36,11 +38,12 @@ import Hasql.Session qualified as Session
 import Hasql.Statement qualified as Statement
 import System.IO (hPutStrLn, stderr)
 import System.IO.Unsafe (unsafePerformIO)
+import System.Timeout (timeout)
 
 import HMem.DB.RequestContext (EffectiveActor(..), RequestContext(..), actorTypeToText, changeCauseToText, currentRequestContext, resolveEffectiveActor)
 import HMem.DB.RequestTiming
   ( CheckoutCounters, PoolCheckoutMetrics, RequestTimer, connectCountOn, currentRequestTimer, mainCheckoutCounters, newCheckoutCounters
-  , readCheckoutCounters, recordCheckoutOn, recordConnectOn, recordHoldOn, timerConnectNs )
+  , readCheckoutCounters, recordCheckoutOn, recordCheckoutTimeoutOn, recordConnectOn, recordHoldOn, timerConnectNs )
 import Data.Aeson (encode)
 import Data.ByteString.Lazy qualified as LBS
 import Data.Text.Encoding qualified as TE
@@ -53,6 +56,7 @@ import Data.Text.Encoding qualified as TE
 data PoolMetrics = PoolMetrics
   { activeConnections :: !Int
   , maxConnections    :: !Int
+  , pendingCheckouts  :: !Int  -- ^ Checkouts waiting for a connection.
   } deriving (Show, Eq)
 
 -- | Gauges and checkout counters for one set of pools. Pools from
@@ -63,6 +67,8 @@ data PoolHandle = PoolHandle
   { handleActive     :: !(IORef Int)  -- ^ Connections currently checked out.
   , handlePending    :: !(IORef Int)  -- ^ Checkouts waiting for a connection.
   , handleMax        :: !(IORef Int)  -- ^ Configured maximum connections.
+  , handleCheckoutTimeoutMs :: !(IORef Int) -- ^ Longest checkout wait before 'DBPoolCheckoutTimeout'.
+  , handleLastWarnNs :: !(IORef Word64) -- ^ When the utilisation warning was last printed.
   , handleCounters   :: !CheckoutCounters
   , handleAttributed :: !Bool         -- ^ Whether checkouts count toward request timers.
   , handleLabel      :: !String
@@ -83,8 +89,23 @@ pendingCheckoutsRef = unsafePerformIO (newIORef 0)
 maxConnectionsRef :: IORef Int
 maxConnectionsRef = unsafePerformIO (newIORef 0)
 
+-- | Main-pool checkout timeout (set in 'createPoolWithCheckoutTimeout').
+{-# NOINLINE checkoutTimeoutMsRef #-}
+checkoutTimeoutMsRef :: IORef Int
+checkoutTimeoutMsRef = unsafePerformIO (newIORef defaultCheckoutTimeoutMs)
+
+{-# NOINLINE mainLastWarnRef #-}
+mainLastWarnRef :: IORef Word64
+mainLastWarnRef = unsafePerformIO (newIORef 0)
+
 mainHandle :: PoolHandle
-mainHandle = PoolHandle activeConnectionsRef pendingCheckoutsRef maxConnectionsRef mainCheckoutCounters True "pool"
+mainHandle = PoolHandle activeConnectionsRef pendingCheckoutsRef maxConnectionsRef checkoutTimeoutMsRef mainLastWarnRef
+  mainCheckoutCounters True "pool"
+
+-- | Default pool checkout timeout: 60 seconds. It is a safety net against a
+-- hung database, not load shedding, and should exceed the statement timeout.
+defaultCheckoutTimeoutMs :: Int
+defaultCheckoutTimeoutMs = 60000
 
 -- | Delivery pools keyed by their pool identity (resource-pool's reaper
 -- reference). Unregistered pools use 'mainHandle'.
@@ -115,7 +136,7 @@ getPoolCheckoutMetricsFor :: Pool a -> IO PoolCheckoutMetrics
 getPoolCheckoutMetricsFor pool = handleFor pool >>= readCheckoutCounters . (.handleCounters)
 
 readHandleMetrics :: PoolHandle -> IO PoolMetrics
-readHandleMetrics handle = PoolMetrics <$> readIORef handle.handleActive <*> readIORef handle.handleMax
+readHandleMetrics handle = PoolMetrics <$> readIORef handle.handleActive <*> readIORef handle.handleMax <*> readIORef handle.handlePending
 
 ------------------------------------------------------------------------
 -- Test transaction mode
@@ -149,7 +170,8 @@ data DBException
   | DBTaskDependencyCycle Text
   | DBLifecycleViolation Text Text (Maybe Text) (Maybe Text)
   | DBStatementTimeout
-  | DBSerializationFailure
+  | DBPoolCheckoutTimeout  -- ^ No pool connection became free within the checkout timeout.
+  | DBSerializationFailure  -- ^ SQLSTATE 40001 or deadlock 40P01; the transaction was rolled back.
   | DBResyncUnauthorized
   | DBCapabilityUnavailable Text
   | DBOtherError Text
@@ -174,7 +196,8 @@ classifyError sessErr = classifyCmd cmdErr
       | sqlstate == "23514" = DBCheckViolation (decode msg)
       | sqlstate == "HD301" = DBTaskDependencyCycle (decode msg)
        | sqlstate == "57014" = DBStatementTimeout
-       | sqlstate == "40001" = DBSerializationFailure
+       -- A deadlock also rolls the transaction back and is retryable.
+       | sqlstate == "40001" || sqlstate == "40P01" = DBSerializationFailure
        | sqlstate == "HM501" = DBResyncUnauthorized
       | otherwise           = DBOtherError (decode msg)
     classifyCmd other = DBOtherError (T.pack (show other))
@@ -202,25 +225,34 @@ classifyError sessErr = classifyCmd cmdErr
 ------------------------------------------------------------------------
 
 -- | Create a connection pool to PostgreSQL using Hasql.
+--
+-- The pool has one stripe, so any idle connection serves any thread and
+-- waiting checkouts are served in FIFO order. A stripe per capability would
+-- make a checkout wait behind its own stripe's busy connection while others
+-- sat idle, and would round each stripe's share up, opening more connections
+-- than configured. The process opens at most the configured maximum here.
 createPool
   :: Text            -- ^ Connection string, e.g. @"host=localhost dbname=hmem"@
   -> Int             -- ^ Maximum number of connections
   -> Double          -- ^ Idle timeout in seconds
   -> Int             -- ^ Statement timeout in milliseconds
   -> IO (Pool Hasql.Connection)
-createPool connStr maxConns idleTimeout stmtTimeoutMs = do
+createPool connStr maxConns idleTimeout stmtTimeoutMs =
+  createPoolWithCheckoutTimeout connStr maxConns idleTimeout stmtTimeoutMs defaultCheckoutTimeoutMs
+
+-- | 'createPool' with an explicit checkout timeout in milliseconds.
+createPoolWithCheckoutTimeout :: Text -> Int -> Double -> Int -> Int -> IO (Pool Hasql.Connection)
+createPoolWithCheckoutTimeout connStr maxConns idleTimeout stmtTimeoutMs checkoutTimeoutMs = do
   atomicModifyIORef' maxConnectionsRef $ \_ -> (maxConns, ())
-  caps <- getNumCapabilities
-  let stripes = max 1 (min maxConns caps)
-  newPool $ setNumStripes (Just stripes) $ defaultPoolConfig
+  atomicModifyIORef' checkoutTimeoutMsRef $ \_ -> (checkoutTimeoutMs, ())
+  newPool $ setNumStripes (Just 1) $ defaultPoolConfig
     (acquireConnection mainHandle connStr stmtTimeoutMs)
     Hasql.release
     idleTimeout
     maxConns
 
--- | Create a single-stripe pool for change-stream delivery. Any idle
--- connection serves any thread, so one connection pinned by a blocked
--- catch-up cannot starve delivery hashed to its stripe. Its gauges and
+-- | Create a single-stripe pool for change-stream delivery, separate from the
+-- main pool so delivery never competes with HTTP checkouts. Its gauges and
 -- checkout counters are separate from the main pools ('getPoolMetricsFor',
 -- 'getPoolCheckoutMetricsFor') and its checkouts and connections are never
 -- attributed to request timers. Release it with 'destroyDeliveryPool'.
@@ -230,9 +262,14 @@ createDeliveryPool
   -> Double          -- ^ Idle timeout in seconds
   -> Int             -- ^ Statement timeout in milliseconds
   -> IO (Pool Hasql.Connection)
-createDeliveryPool connStr maxConns idleTimeout stmtTimeoutMs = do
-  handle <- PoolHandle <$> newIORef 0 <*> newIORef 0 <*> newIORef maxConns <*> newCheckoutCounters
-    <*> pure False <*> pure "delivery pool"
+createDeliveryPool connStr maxConns idleTimeout stmtTimeoutMs =
+  createDeliveryPoolWithCheckoutTimeout connStr maxConns idleTimeout stmtTimeoutMs defaultCheckoutTimeoutMs
+
+-- | 'createDeliveryPool' with an explicit checkout timeout in milliseconds.
+createDeliveryPoolWithCheckoutTimeout :: Text -> Int -> Double -> Int -> Int -> IO (Pool Hasql.Connection)
+createDeliveryPoolWithCheckoutTimeout connStr maxConns idleTimeout stmtTimeoutMs checkoutTimeoutMs = do
+  handle <- PoolHandle <$> newIORef 0 <*> newIORef 0 <*> newIORef maxConns <*> newIORef checkoutTimeoutMs
+    <*> newIORef 0 <*> newCheckoutCounters <*> pure False <*> pure "delivery pool"
   pool <- newPool $ setNumStripes (Just 1) $ defaultPoolConfig
     (acquireConnection handle connStr stmtTimeoutMs)
     Hasql.release
@@ -282,15 +319,22 @@ handleTimer handle
 -- Checkout wait (request to hand-over) and hold (hand-over to return) are
 -- recorded in the pool's handle (process-wide for main pools) and, for main
 -- pools, the calling thread's request timer.
+--
+-- A checkout that waits longer than the pool's checkout timeout leaves the
+-- FIFO queue and throws 'DBPoolCheckoutTimeout'. resource-pool passes a
+-- connection released to a waiter that is giving up on to the next waiter,
+-- so no connection is leaked.
 withConn :: Pool Hasql.Connection -> (Hasql.Connection -> IO a) -> IO a
 withConn pool action = do
   handle <- handleFor pool
   timer <- handleTimer handle
   maxAtRequest <- readIORef handle.handleMax
+  timeoutMs <- readIORef handle.handleCheckoutTimeoutMs
   connectsBefore <- connectCountOn handle.handleCounters
   connectNsBefore <- timerConnectNs timer
   -- Earlier waiters, including one being handed a released connection, count
-  -- as demand so that only a full stripe makes a capacity wait.
+  -- as demand so that only a wait below the configured maximum is a capacity
+  -- wait.
   queued <- newIORef True
   let leaveQueue = do
         waiting <- atomicModifyIORef' queued (\q -> (False, q))
@@ -299,13 +343,25 @@ withConn pool action = do
     pendingAtRequest <- atomicModifyIORef' handle.handlePending (\n -> (n + 1, n))
     activeAtRequest <- readIORef handle.handleActive
     requested <- getMonotonicTimeNSec
-    flip finally leaveQueue $ restore $ withResource pool $ \conn -> do
-      acquired <- getMonotonicTimeNSec
-      connectsAfter <- connectCountOn handle.handleCounters
-      connectNsAfter <- timerConnectNs timer
-      recordCheckoutOn handle.handleCounters timer (elapsedNs requested acquired) (connectNsAfter - connectNsBefore)
-        (activeAtRequest + pendingAtRequest < maxAtRequest && connectsAfter == connectsBefore)
-      checkedOut handle timer leaveQueue acquired conn
+    flip finally leaveQueue $ do
+      -- Still masked: the timeout can interrupt only the blocking wait, never
+      -- the hand-over of a connection.
+      taken <- timeout (max 1 timeoutMs * 1000) (takeResource pool)
+      case taken of
+        Nothing -> do
+          recordCheckoutTimeoutOn handle.handleCounters
+          throwIO DBPoolCheckoutTimeout
+        Just (conn, localPool) -> do
+          result <- restore (do
+              acquired <- getMonotonicTimeNSec
+              connectsAfter <- connectCountOn handle.handleCounters
+              connectNsAfter <- timerConnectNs timer
+              recordCheckoutOn handle.handleCounters timer (elapsedNs requested acquired) (connectNsAfter - connectNsBefore)
+                (activeAtRequest + pendingAtRequest < maxAtRequest && connectsAfter == connectsBefore)
+              checkedOut handle timer leaveQueue acquired conn)
+            `onException` destroyResource pool localPool conn
+          putResource localPool conn
+          pure result
   where
     -- The checkout becomes active before it stops waiting, so it is always
     -- counted as demand by concurrent requests.
@@ -314,14 +370,22 @@ withConn pool action = do
                       let n' = n + 1 in (n', n')
           leaveQueue
           maxC <- readIORef handle.handleMax
-          when (maxC > 1 && active * 100 >= maxC * 80) $
-            hPutStrLn stderr $ "Warning: " <> handle.handleLabel <> " utilisation at "
-              <> show (active * 100 `div` maxC) <> "% ("
-              <> show active <> "/" <> show maxC <> ")")
+          when (maxC > 1 && active * 100 >= maxC * 80) $ do
+            now <- getMonotonicTimeNSec
+            due <- atomicModifyIORef' handle.handleLastWarnNs $ \lastNs ->
+              if lastNs == 0 || elapsedNs lastNs now >= utilisationWarningIntervalNs then (now, True) else (lastNs, False)
+            when due $
+              hPutStrLn stderr $ "Warning: " <> handle.handleLabel <> " utilisation at "
+                <> show (active * 100 `div` maxC) <> "% ("
+                <> show active <> "/" <> show maxC <> ")")
       (do atomicModifyIORef' handle.handleActive $ \n -> (max 0 (n - 1), ())
           released <- getMonotonicTimeNSec
           recordHoldOn handle.handleCounters timer (elapsedNs acquired released))
       (action conn)
+
+-- | At most one utilisation warning per pool every ten seconds.
+utilisationWarningIntervalNs :: Word64
+utilisationWarningIntervalNs = 10000000000
 
 elapsedNs :: Word64 -> Word64 -> Word64
 elapsedNs start end

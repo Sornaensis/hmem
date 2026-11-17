@@ -95,11 +95,12 @@ runMigrateWithConfig cfg opts = do
   case validated of
     Left err -> pure $ Left err
     Right _ -> do
-      pool <- Pool.createPool
+      pool <- Pool.createPoolWithCheckoutTimeout
         (connectionString cfg.database)
-        cfg.pool.size
+        (min cfg.pool.size 4)  -- hmem-ctl work is sequential
         cfg.pool.idleTimeout
         cfg.pool.statementTimeoutMs
+        cfg.pool.checkoutTimeoutMs
       -- If a migration ledger already exists, fail with the explicit ledger
       -- diagnostic before attempting its first version lookup.  A fresh
       -- database has no ledger yet and is allowed to create one in V001.

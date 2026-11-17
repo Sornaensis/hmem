@@ -58,6 +58,7 @@ dependencies:
   - network
   - process
   - random
+  - vector
   - yaml
 
 ghc-options:

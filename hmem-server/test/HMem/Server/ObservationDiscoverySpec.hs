@@ -4,12 +4,14 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait, cancel)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (throwIO)
+import Control.Monad (forM_)
 import Data.Aeson (toJSON, object, (.=))
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf)
 import Data.Text qualified as T
 import Data.Time (UTCTime(..), addUTCTime, fromGregorian)
 import Data.UUID qualified as UUID
+import Data.Vector.Unboxed qualified as VU
 import Test.Hspec
 
 import HMem.Config (managedTeiSpaceFingerprint)
@@ -58,7 +60,7 @@ spec = describe "Observation discovery query preparation" $ do
   it "retains keyed generation fencing after explicit retirement for lost storage" $ do
     service <- newObservationDiscovery False
     let session = UUID.fromWords 9 10 11 12
-        create generation = createDiscoveryContextInSession service "actor" UUID.nil contextFilters Nothing (Just (session,generation)) (pure (DiscoveryHybrid unitVector managedTeiSpaceFingerprint))
+        create generation = createDiscoveryContextInSession service "actor" UUID.nil contextFilters Nothing (Just (session,generation)) (pure (DiscoveryHybrid (VU.fromList unitVector) managedTeiSpaceFingerprint))
     current <- create 2 >>= expectContext
     retireDiscoveryContext service "actor" UUID.nil current.token
     lookupDiscoveryContext service "actor" UUID.nil current.token `shouldReturn` Left DiscoveryContextUnavailable
@@ -67,7 +69,7 @@ spec = describe "Observation discovery query preparation" $ do
     next <- create 3 >>= expectContext
     lookupDiscoveryContext service "actor" UUID.nil next.token `shouldReturn` Right next
 
-  it "rejects mixed-session replacements without erasing ownership or generation fences at capacity" $ do
+  it "rejects mixed-session replacements without erasing ownership or generation fences beyond eight contexts" $ do
     service <- newObservationDiscovery False
     calls <- newIORef (0 :: Int)
     let sessionA = UUID.fromWords 13 14 15 16
@@ -85,8 +87,9 @@ spec = describe "Observation discovery query preparation" $ do
     createA 1 Nothing `shouldReturn` Left DiscoveryContextUnavailable
     replacement <- createA 3 (Just first.token) >>= expectContext
     lookupDiscoveryContext service "actor" UUID.nil replacement.token `shouldReturn` Right replacement
-    createDiscoveryContextInSession service "actor" UUID.nil contextFilters Nothing (Just (sessionB,1)) forbidden `shouldReturn` Left DiscoveryContextCapacity
-    readIORef calls `shouldReturn` 0
+    -- A ninth context of the audience in another session is created.
+    _ <- createDiscoveryContextInSession service "actor" UUID.nil contextFilters Nothing (Just (sessionB,1)) forbidden >>= expectContext
+    readIORef calls `shouldReturn` 1
 
   it "pins complete filters and retrieval mode across provider changes and rejects foreign context audiences" $ do
     service <- newObservationDiscovery False
@@ -110,19 +113,67 @@ spec = describe "Observation discovery query preparation" $ do
     modifyIORef' now (addUTCTime 1)
     lookupDiscoveryContext service "actor" UUID.nil created.token `shouldReturn` Left DiscoveryContextUnavailable
 
-  it "bounds contexts per audience and globally before running preparation" $ do
+  it "creates a ninth context for one audience and a 65th globally without refusing" $ do
     service <- newObservationDiscovery False
     calls <- newIORef (0 :: Int)
     let prepare = modifyIORef' calls (+ 1) >> pure (DiscoveryFts DiscoveryDisabled)
         create actor = createDiscoveryContext service actor UUID.nil contextFilters Nothing prepare
-    mapM_ (\_ -> create "first" >>= expectContext) [1..8 :: Int]
-    create "first" `shouldReturn` Left DiscoveryContextCapacity
-    readIORef calls `shouldReturn` 8
+    firsts <- mapM (\_ -> create "first" >>= expectContext) [1..9 :: Int]
     mapM_ (\n -> mapM_ (\_ -> create (T.pack (show n)) >>= expectContext) [1..8 :: Int]) [1..7 :: Int]
-    create "ninth" `shouldReturn` Left DiscoveryContextCapacity
-    readIORef calls `shouldReturn` 64
+    _ <- create "sixty-fifth" >>= expectContext
+    readIORef calls `shouldReturn` 66
+    forM_ firsts $ \context -> lookupDiscoveryContext service "first" UUID.nil context.token `shouldReturn` Right context
 
-  it "atomically retires a predecessor and permits replacement at audience capacity" $ do
+  it "evicts the earliest-expiring context beyond the memory backstop instead of refusing" $ do
+    now <- newIORef (UTCTime (fromGregorian 2026 10 20) 0)
+    service <- newObservationDiscoveryWithClockAndBound False (readIORef now) 3
+    let create actor = createDiscoveryContext service actor UUID.nil contextFilters Nothing (pure (DiscoveryFts DiscoveryDisabled))
+    earliest <- create "a" >>= expectContext
+    modifyIORef' now (addUTCTime 1)
+    kept <- mapM (\actor -> create actor >>= expectContext) ["b", "c"]
+    modifyIORef' now (addUTCTime 1)
+    newest <- create "d" >>= expectContext
+    -- The evicted context behaves as expired: restart is required.
+    lookupDiscoveryContext service "a" UUID.nil earliest.token `shouldReturn` Left DiscoveryContextUnavailable
+    forM_ (zip ["b", "c", "d"] (kept <> [newest])) $ \(actor, context) ->
+      lookupDiscoveryContext service actor UUID.nil context.token `shouldReturn` Right context
+    discoveryContextBound `shouldBe` 8192
+
+  it "evicts a pending reservation at the bound so its creator must restart" $ do
+    now <- newIORef (UTCTime (fromGregorian 2026 10 20) 0)
+    service <- newObservationDiscoveryWithClockAndBound False (readIORef now) 2
+    started <- newEmptyMVar
+    release <- newEmptyMVar
+    let prepared = pure (DiscoveryFts DiscoveryDisabled)
+        create actor = createDiscoveryContext service actor UUID.nil contextFilters Nothing prepared
+    withAsync (createDiscoveryContext service "slow" UUID.nil contextFilters Nothing (putMVar started () >> takeMVar release >> prepared)) $ \pending -> do
+      takeMVar started
+      modifyIORef' now (addUTCTime 1)
+      kept <- mapM (\actor -> create actor >>= expectContext) ["b", "c"]
+      discoveryContextCount service `shouldReturn` 2
+      putMVar release ()
+      -- The evicted in-flight reservation returns discovery_restart_required.
+      wait pending `shouldReturn` Left DiscoveryContextUnavailable
+      forM_ (zip ["b", "c"] kept) $ \(actor, context) ->
+        lookupDiscoveryContext service actor UUID.nil context.token `shouldReturn` Right context
+
+  it "expires and evicts through its expiry index across thousands of contexts" $ do
+    now <- newIORef (UTCTime (fromGregorian 2026 10 20) 0)
+    service <- newObservationDiscoveryWithClockAndBound False (readIORef now) 3000
+    let create actor = createDiscoveryContext service actor UUID.nil contextFilters Nothing (pure (DiscoveryFts DiscoveryDisabled))
+    first <- create "first" >>= expectContext
+    modifyIORef' now (addUTCTime 1)
+    -- Distinct creation times make expiry order equal creation order.
+    contexts <- mapM (\index -> modifyIORef' now (addUTCTime 0.001) >> create (T.pack (show index)) >>= expectContext) [1..3999 :: Int]
+    discoveryContextCount service `shouldReturn` 3000
+    lookupDiscoveryContext service "first" UUID.nil first.token `shouldReturn` Left DiscoveryContextUnavailable
+    lookupDiscoveryContext service "999" UUID.nil (contexts !! 998).token `shouldReturn` Left DiscoveryContextUnavailable
+    lookupDiscoveryContext service "1000" UUID.nil (contexts !! 999).token `shouldReturn` Right (contexts !! 999)
+    modifyIORef' now (addUTCTime 300)
+    lookupDiscoveryContext service "3999" UUID.nil (last contexts).token `shouldReturn` Left DiscoveryContextUnavailable
+    discoveryContextCount service `shouldReturn` 0
+
+  it "atomically retires a predecessor and permits its replacement" $ do
     service <- newObservationDiscovery False
     first <- createDiscoveryContext service "actor" UUID.nil contextFilters Nothing (pure (DiscoveryFts DiscoveryDisabled)) >>= expectContext
     mapM_ (\_ -> createDiscoveryContext service "actor" UUID.nil contextFilters Nothing (pure (DiscoveryFts DiscoveryDisabled)) >>= expectContext) [1..7 :: Int]
@@ -130,15 +181,14 @@ spec = describe "Observation discovery query preparation" $ do
     lookupDiscoveryContext service "actor" UUID.nil first.token `shouldReturn` Left DiscoveryContextUnavailable
     lookupDiscoveryContext service "actor" UUID.nil replacement.token `shouldReturn` Right replacement
 
-  it "counts pending preparation against admission and releases cancelled reservations" $ do
+  it "admits contexts beside pending preparation and releases cancelled reservations" $ do
     service <- newObservationDiscovery False
     started <- newEmptyMVar
     blocked <- newEmptyMVar
     let prepare = putMVar started () >> takeMVar blocked >> pure (DiscoveryFts DiscoveryDisabled)
     withAsync (createDiscoveryContext service "actor" UUID.nil contextFilters Nothing prepare) $ \pending -> do
       takeMVar started
-      mapM_ (\_ -> createDiscoveryContext service "actor" UUID.nil contextFilters Nothing (pure (DiscoveryFts DiscoveryDisabled)) >>= expectContext) [1..7 :: Int]
-      createDiscoveryContext service "actor" UUID.nil contextFilters Nothing (pure (DiscoveryFts DiscoveryDisabled)) `shouldReturn` Left DiscoveryContextCapacity
+      mapM_ (\_ -> createDiscoveryContext service "actor" UUID.nil contextFilters Nothing (pure (DiscoveryFts DiscoveryDisabled)) >>= expectContext) [1..8 :: Int]
       cancel pending
     _ <- createDiscoveryContext service "actor" UUID.nil contextFilters Nothing (pure (DiscoveryFts DiscoveryDisabled)) >>= expectContext
     pure ()
@@ -158,7 +208,7 @@ spec = describe "Observation discovery query preparation" $ do
     service <- newObservationDiscovery True
     _ <- publishDiscoveryProvider service goodProvider
       { embed = \request -> modifyIORef' requests (<> [request]) >> pure (Right (EmbeddingBatch [map (* 2) unitVector] managedTeiSpaceFingerprint)) }
-    prepareDiscoveryQuery service readyStorage "body" `shouldReturn` DiscoveryHybrid unitVector managedTeiSpaceFingerprint
+    prepareDiscoveryQuery service readyStorage "body" `shouldReturn` DiscoveryHybrid (VU.fromList unitVector) managedTeiSpaceFingerprint
     readIORef requests `shouldReturn` [EmbeddingRequest [EmbeddingInput EmbeddingQuery (gteQwen2QueryPrefix <> "body")]]
 
   it "does not run provider work without storage and compatible vectors" $ do
@@ -197,7 +247,7 @@ spec = describe "Observation discovery query preparation" $ do
     result <- prepareDiscoveryQuery service readyStorage "secret-endpoint-input-sentinel"
     result `shouldBe` DiscoveryFts DiscoveryProviderUnavailable
     show result `shouldNotSatisfy` isInfixOf "sentinel"
-    show (DiscoveryHybrid unitVector managedTeiSpaceFingerprint) `shouldBe` "DiscoveryHybrid <redacted>"
+    show (DiscoveryHybrid (VU.fromList unitVector) managedTeiSpaceFingerprint) `shouldBe` "DiscoveryHybrid <redacted>"
 
   it "preserves structured provider failure reasons" $ do
     service <- newObservationDiscovery True
@@ -212,7 +262,7 @@ spec = describe "Observation discovery query preparation" $ do
     prepareDiscoveryQuery service readyStorage "query" `shouldReturn` DiscoveryFts DiscoveryTimedOut
     -- Timeout cancellation releases the same caller: the next generation works.
     _ <- publishDiscoveryProvider service goodProvider
-    prepareDiscoveryQuery service readyStorage "query" `shouldReturn` DiscoveryHybrid unitVector managedTeiSpaceFingerprint
+    prepareDiscoveryQuery service readyStorage "query" `shouldReturn` DiscoveryHybrid (VU.fromList unitVector) managedTeiSpaceFingerprint
 
   it "retires an in-flight query and prevents an old withdrawal clearing its replacement" $ do
     service <- newObservationDiscovery True
@@ -227,7 +277,7 @@ spec = describe "Observation discovery query preparation" $ do
       withdraw
       putMVar release ()
       wait query `shouldReturn` DiscoveryFts DiscoveryRetired
-    prepareDiscoveryQuery service readyStorage "new query" `shouldReturn` DiscoveryHybrid unitVector managedTeiSpaceFingerprint
+    prepareDiscoveryQuery service readyStorage "new query" `shouldReturn` DiscoveryHybrid (VU.fromList unitVector) managedTeiSpaceFingerprint
 
   it "probes optional storage safely and admits only workspace-local exact-space vectors" $
     withTestEnv $ \env -> do

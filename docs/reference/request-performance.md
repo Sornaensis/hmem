@@ -38,8 +38,9 @@ by HTTP requests, workers and WebSocket admission checks. `delivery_pool` is
 the change-stream delivery pool, used by delivery turns and the dispatcher;
 it is `null` only when delivery shares the main pool, as in some tests and
 `hmem-server --dev`, which ignores `--delivery-pool-size`. Both
-have the same shape: `active_connections`, `max_connections` and `checkout`,
-which is cumulative since process start:
+have the same shape: `active_connections`, `max_connections`,
+`pending_checkouts` (checkouts waiting now) and `checkout`, which is
+cumulative since process start:
 
 | Field | Meaning |
 | --- | --- |
@@ -48,16 +49,28 @@ which is cumulative since process start:
 | `wait_total_ms`, `wait_max_ms`, `hold_total_ms` | Total and maximum checkout wait, and total hold time. |
 | `wait_buckets` | Checkout waits by inclusive upper bound `le_ms` of 0.1, 0.5, 1, 5, 10, 50, 100, 500 and 1000 ms, then `null` for longer waits. |
 | `capacity_waits` | Checkouts that queued at least 1 ms, excluding connection time, although checked-out and waiting checkouts together were fewer than the configured maximum when they were requested and no connection was opened meanwhile. |
+| `checkout_timeouts` | Checkouts abandoned at the pool checkout timeout. |
 
-`resource-pool` divides the configured connections evenly among stripes, one
-per GHC capability up to the pool size, and a checkout can only use its
-thread's stripe. A capacity wait therefore shows that a stripe was full while
-another had idle capacity. The count is a lower bound: waits behind a full
-stripe while the whole pool is also in demand are not counted. The main pool
-counters are process-wide, so they are only meaningful with one main pool per
-process, as in the server. The delivery pool has a single stripe, so any idle
-connection serves any checkout and it normally records no capacity waits; its
-`unattributed` count equals its `checkouts`.
+Both pools have a single stripe: any idle connection serves any checkout,
+waiting checkouts are served in arrival order, and a pool never opens more
+connections than its configured size. Capacity waits are therefore normally 0;
+a nonzero count shows only hand-over delay. The main pool counters are
+process-wide, so they are only meaningful with one main pool per process, as
+in the server. The delivery pool's `unattributed` count equals its `checkouts`.
+
+## Concurrency
+
+The server does not cap or queue HTTP requests: each connection runs on its
+own Warp thread, and heavy load raises latency instead of refusing requests.
+The only shared bound is the database pools. A checkout waits in arrival order
+until a connection is free or the checkout timeout (`pool.checkout_timeout_ms`,
+default 60 s) expires. That timeout is a safety net against a hung database,
+not load shedding: the waiter leaves the queue, `checkout_timeouts` increases
+and the request gets `503 {"error":"database_unavailable"}` with
+`Retry-After: 5`. A statement timeout gets 504 with a route-family code:
+`timeout` for ordinary API routes, `session_timeout` for agent-session routes
+and `document_database_timeout` for document routes. Each pool prints its
+utilisation warning on stderr at most once every 10 seconds.
 
 ## Isolated baseline
 
@@ -282,9 +295,9 @@ container or a later production sample, before implementation.
 
 | Priority | Candidate | Condition |
 | --- | --- | --- |
-| 1 | Bucket timeline inventory without a whole-table audit scan and per-bucket rescans; accumulate per bucket. | Identical bucket output; matched plan and container rerun at this history size. |
-| 2 | Configure the pool with one stripe, or stripes holding several connections each. | After priority 1. The isolated one-stripe probe was mixed. A container rerun must lower 4- and 16-client tails and capacity waits without an unacceptable light-load median. |
-| 3 | Rank discovery candidates without joins over CTE scans. | Identical discovery results and a matched plan. |
+| 1 | Bucket timeline inventory without a whole-table audit scan and per-bucket rescans; accumulate per bucket. | Identical bucket output; matched plan and container rerun at this history size. Implemented: indexed workspace and legacy audit branches (V064), one `date_trunc` bucket assignment per event and cumulative inventory sums, checked against the previous statement; the container before/after is still required. |
+| 2 | Configure the pool with one stripe, or stripes holding several connections each. | After priority 1. The isolated one-stripe probe was mixed. A container rerun must lower 4- and 16-client tails and capacity waits without an unacceptable light-load median. Now one stripe with a default size of 64; the container rerun is still required. |
+| 3 | Rank discovery candidates without joins over CTE scans. | Identical discovery results and a matched plan. Implemented: indexed subject semi-joins, window ranks in one pass and no joins between CTE scans, checked against the previous statement; the container rerun is still required. |
 | 4 | Make the change-stream replay predicate index-compatible. | Identical replay results; matched plan at production outbox size. |
 | 5 | Fewer transactions per request where semantics allow, including session appends (6 checkouts). | After priority 2, with contention evidence. |
 | 6 | Avoid the generic plan for the timeline events statement only. | Reproduce it on the production PostgreSQL major version first. |

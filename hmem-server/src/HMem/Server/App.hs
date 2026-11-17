@@ -16,7 +16,7 @@ module HMem.Server.App
   ) where
 
 import Control.Applicative ((<|>))
-import Control.Exception (SomeException, try)
+import Control.Exception (SomeException, catch, throwIO, try)
 import Control.Lens ((&), (.~), (^.), preview)
 import Control.Monad (guard)
 import Data.Bits (xor, (.|.))
@@ -59,6 +59,7 @@ import Crypto.Hash (Digest, SHA256, hash)
 import Crypto.Random (getRandomBytes)
 import HMem.Config (AuthConfig(..), AuthMode(..), DeployedAuthConfig(..), LocalAuthConfig(..), LocalBotTokenConfig(..), CorsConfig(..), RateLimitConfig(..), TokenLookupMode(..), authMcpProvenanceToken, authStaticBearerEnabled, authStaticBearerToken)
 import HMem.DB.Auth qualified as Auth
+import HMem.DB.Pool (DBException(..))
 import HMem.DB.AgentSession qualified as AgentSessions
 import HMem.Server.BotIdentity (requestBotIdentity)
 import HMem.DB.RequestContext (ActorType(..), ChangeCause(..), Principal(..), PrincipalAuthority(..), RequestContext(..), currentPrincipal, resolveEffectiveActor, withEffectiveActorContext, withChangeCauseContext, withPrincipalContext, withRequestContext, emptyRequestContext)
@@ -138,6 +139,7 @@ mkAppWithServicesAtAndDocuments suppliedAuthority oidcNow prefixes discovery oid
   oidcLogins <- newIORef Map.empty
   pure $ requestIdMiddleware
        $ logger
+       $ databaseFailureMiddleware
        $ DocumentGrants.documentFramePolicy documentAuthority
        $ DocumentGrants.documentRedemptionMiddleware documentAuthority rateLimit
        $ staticMiddleware mStaticDir
@@ -158,6 +160,23 @@ mkAppWithServicesAtAndDocuments suppliedAuthority oidcNow prefixes discovery oid
         $ openApiMiddleware
         $ normalizeObservationIfMatch
          $ serve (Proxy @HMemAPI) (serverWithSessionReaders (Just readers) prefixes authCfg changeStreamConfig (Just discoveryService) pool tracker wsState pgvec)
+
+-- | A pool checkout timeout or statement timeout that escapes a handler or
+-- middleware before its response starts gets the same JSON status as API
+-- routes (503 database_unavailable with Retry-After: 5, or 504 timeout)
+-- instead of the server's generic 500. Other failures are rethrown.
+databaseFailureMiddleware :: Middleware
+databaseFailureMiddleware app req respond = do
+  started <- newIORef False
+  app req (\response -> writeIORef started True >> respond response) `catch` \failure -> do
+    begun <- readIORef started
+    case failure of
+      DBPoolCheckoutTimeout | not begun -> respond $ Wai.responseLBS status503
+        [(hContentType, "application/json"), ("Retry-After", "5")]
+        (encode (object ["error" .= ("database_unavailable" :: Text), "message" .= ("Database connection unavailable; retry later" :: Text)]))
+      DBStatementTimeout | not begun -> respond $ Wai.responseLBS (mkStatus 504 "Gateway Timeout")
+        [(hContentType, "application/json")] (encode (object ["error" .= ("timeout" :: Text)]))
+      _ -> throwIO failure
 
 -- Authorize before inspecting either declared size or streamed body content.
 -- Read at most 2 MiB before JSON/base64 decoding, including chunked requests.

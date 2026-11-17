@@ -1,6 +1,6 @@
 module HMem.Server.AgentSessionSpec (spec) where
 
-import Control.Concurrent.Async (concurrently, withAsync, cancel, waitCatch)
+import Control.Concurrent.Async (concurrently, mapConcurrently, withAsync, cancel, waitCatch)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent (threadDelay)
 import System.Timeout (timeout)
@@ -399,27 +399,38 @@ spec = describe "Agent session HTTP" $ do
       empty <- makeTask env workspace.id
       Pool.runSession env.pool $ SQL.sql ("UPDATE tasks SET status='done' WHERE id='"<>uuid empty.id<>"'")
       call app methodGet (taskArchive workspace.id empty.id) reader "" >>= (\response -> ok response >> verifyArchive response.simpleBody [])
-  it "holds only two export admissions and releases disconnects before the first stream write" $
+  it "serves a third and then eight concurrent exports byte-identical to sequential exports and releases disconnects" $
     withLocalSandboxAppContext $ \ctx -> do
       let env=ctx.localEnv; app=ctx.localApplication
-      workspace <- createTestWorkspace env "archive-admission"
-      task <- makeTask env workspace.id
+      workspace <- createTestWorkspace env "archive-uncapped-exports"
+      tasks <- mapM (\index -> do
+        task <- makeTask env workspace.id
+        let bytes=TE.encodeUtf8 (T.pack ("{\"n\":" <> show index <> "}\n"))
+        row <- seedEvidence env workspace.id task.id ("Capture " <> T.pack (show index)) bytes
+        pure (task,(row,bytes))) [1..8 :: Int]
+      let export (task,_) = call app methodGet (taskArchive workspace.id task.id) [] ""
+      sequential <- mapM export tasks
+      forM_ (zip tasks sequential) $ \((_,evidence),response) -> ok response >> verifyArchive response.simpleBody [evidence]
       entered <- newEmptyMVar
       hold <- newEmptyMVar
-      let req=request methodGet (taskArchive workspace.id task.id) []
-          blocked=app req (\_ -> putMVar entered () >> takeMVar hold >> pure ResponseReceived)
+      let (heldTask,_)=head tasks
+          blocked=app (request methodGet (taskArchive workspace.id heldTask.id) []) (\_ -> putMVar entered () >> takeMVar hold >> pure ResponseReceived)
       withAsync blocked $ \first -> do
         takeMVar entered
         withAsync blocked $ \second -> do
           takeMVar entered
-          overloaded <- call app methodGet (taskArchive workspace.id task.id) [] ""
-          status status503 overloaded
-          lookup "Retry-After" overloaded.simpleHeaders `shouldBe` Just "1"
+          -- Two exports are held open; a third is served, not refused.
+          third <- export (tasks !! 1)
+          ok third
+          third.simpleBody `shouldBe` (sequential !! 1).simpleBody
+          concurrent <- mapConcurrently export tasks
+          map (.simpleStatus) concurrent `shouldBe` replicate 8 status200
+          map (.simpleBody) concurrent `shouldBe` map (.simpleBody) sequential
           cancel first; cancel second
           _ <- waitCatch first; _ <- waitCatch second
-          recovered <- call app methodGet (taskArchive workspace.id task.id) [] ""
+          recovered <- export (head tasks)
           ok recovered
-          verifyArchive recovered.simpleBody []
+          recovered.simpleBody `shouldBe` (head sequential).simpleBody
 
   it "aborts failed stream callbacks without leaking details, releases admission and removes the index" $
     withLocalSandboxAppContext $ \ctx -> do

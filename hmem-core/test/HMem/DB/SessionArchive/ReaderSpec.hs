@@ -1,6 +1,6 @@
 module HMem.DB.SessionArchive.ReaderSpec (spec) where
 
-import Control.Concurrent.Async (concurrently,withAsync,cancel,waitCatch,wait)
+import Control.Concurrent.Async (concurrently,mapConcurrently,withAsync,cancel,waitCatch,wait)
 import Control.Concurrent.MVar
 import Control.Exception (bracket, bracket_, try, finally)
 import Control.Concurrent (threadDelay)
@@ -149,12 +149,13 @@ spec = around withTestEnv $ describe "Compatible archive reader" $ do
       after <- getRTSStats
       max_live_bytes after `shouldSatisfy` (<= max (max_live_bytes before) (gcdetails_live_bytes (gc before)+134217728))
 
-  it "bounds cache admission to four users and releases cancelled request ownership" $ \env -> bounded $ do
+  it "falls back to an uncached reader when every cache entry or the same key is busy and releases cancelled ownership" $ \env -> bounded $ do
     (_,_,manifest) <- fixture env ["{}\n"]
     entered <- newEmptyMVar
     release <- newEmptyMVar
     bracket newReaderCache closeReaderCache $ \cache -> do
       let hold key=R.withCachedReader cache (ArchiveAudience key) env.pool manifest (\_ -> putMVar entered () >> readMVar release)
+          readAll key=R.withCachedReader cache (ArchiveAudience key) env.pool manifest (\reader -> R.readArchiveRange reader 0 3)
       withAsync (hold "one") $ \first -> do
         takeMVar entered
         withAsync (hold "two") $ \_ -> do
@@ -163,14 +164,47 @@ spec = around withTestEnv $ describe "Compatible archive reader" $ do
             takeMVar entered
             withAsync (hold "four") $ \_ -> do
               takeMVar entered
-              full <- try @ReaderCacheBusy $ R.withCachedReader cache (ArchiveAudience "fifth") env.pool manifest (const (pure ()))
-              full `shouldSatisfy` either (const True) (const False)
+              -- Every entry is busy: a fifth key is served, uncached.
+              readAll "fifth" `shouldReturn` "{}\n"
+              -- The same key is busy: a second user is served, uncached.
+              readAll "one" `shouldReturn` "{}\n"
+              R.readerCacheSize cache `shouldReturn` 4
               closing <- try @ReaderCacheBusy (closeReaderCache cache)
               closing `shouldSatisfy` either (const True) (const False)
               cancel first
               _ <- waitCatch first
-              R.withCachedReader cache (ArchiveAudience "fifth") env.pool manifest (const (pure ()))
+              readAll "fifth" `shouldReturn` "{}\n"
               putMVar release ()
+      R.readerCacheSize cache >>= (`shouldSatisfy` (<= 4))
+    getPoolMetrics >>= (\m -> m.activeConnections `shouldBe` 0)
+
+  it "serves overlapping range reads of five sessions and of one session without refusal" $ \env -> bounded $ do
+    fixtures <- mapM (\index -> do
+      let bytes = B8.pack ("{\"session\":" <> show index <> ",\"pad\":\"" <> replicate 4096 'x' <> "\"}\n")
+      (_,_,manifest) <- fixture env [bytes]
+      pure (manifest,bytes)) [1..5 :: Int]
+    -- Each reader holds its cache use until every peer has read, forcing all
+    -- users to overlap: the fifth key and the second same-key user are busy
+    -- misses served by transient readers.
+    let barrier count = do
+          arrived <- newMVar (0 :: Int); gate <- newEmptyMVar
+          pure $ do
+            reached <- modifyMVar arrived (\seen -> pure (seen+1,seen+1))
+            if reached == count then putMVar gate () else pure ()
+            readMVar gate
+    bracket newReaderCache closeReaderCache $ \cache -> do
+      let readOne overlap key (manifest,bytes) = do
+            got <- R.withCachedReader cache (ArchiveAudience key) env.pool manifest (\reader -> do
+              value <- R.readArchiveRange reader 0 (BS.length bytes)
+              overlap
+              pure value)
+            got `shouldBe` bytes
+      five <- barrier 5
+      _ <- mapConcurrently (readOne five "reader") fixtures
+      R.readerCacheSize cache `shouldReturn` 4
+      two <- barrier 2
+      _ <- mapConcurrently (readOne two "same") [head fixtures, head fixtures]
+      R.readerCacheSize cache `shouldReturn` 4
     getPoolMetrics >>= (\m -> m.activeConnections `shouldBe` 0)
 
   it "keeps cached paging through small original chunks within the matching raw latency budget" $ \env -> bounded $ do

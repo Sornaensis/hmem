@@ -6,8 +6,8 @@ module HMem.DB.SessionArchive.Reader
   , SanitizedManifest(..), verifiedSanitizedManifest, verifiedSanitizedPart, openSanitizedReader
   , withCachedSanitizedReader, originalUnavailableSQL, sanitizedRelation
   , verifiedSanitizedLedger, verifiedSanitizedBlock
-  , verifiedLedger, ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..)
-  , newReaderCache, closeReaderCache, withCachedReader
+  , verifiedLedger, ReaderCache, ArchiveAudience(..), ReaderCacheBusy(..), ReaderCacheClosed(..)
+  , newReaderCache, closeReaderCache, withCachedReader, readerCacheSize
   , ReaderMetrics(..), readerMetrics
   , ArchiveReadFailure(..)
   , archiveReadSession, runArchiveRead
@@ -318,8 +318,12 @@ readArchiveRange reader offset limit = mask $ \restore -> do
     Left failure -> cleanup `finally` putMVar reader.state poisoned >> throwIO failure
 
 newtype ArchiveAudience = ArchiveAudience Text deriving stock (Eq,Ord,Show)
+-- | Only 'closeReaderCache' refuses with this while a request uses a reader.
 data ReaderCacheBusy = ReaderCacheBusy deriving stock (Show)
 instance Exception ReaderCacheBusy
+-- | The cache was closed for shutdown.
+data ReaderCacheClosed = ReaderCacheClosed deriving stock (Show)
+instance Exception ReaderCacheClosed
 type Key = (ArchiveAudience,UUID,UUID,UUID,Bool)
 data Entry = Entry !Key !UTCTime !Bool !ArchiveReader
 data CacheState = CacheState !Bool ![Entry]
@@ -334,7 +338,14 @@ closeReaderCache (ReaderCache lock) = modifyMVar_ lock $ \(CacheState _ entries)
   mapM_ (\(Entry _ _ _ r) -> closeArchiveReader r) entries
   pure (CacheState True [])
 
--- Caller has revalidated authorization. Only idle entries expire/evict.
+-- | Retained entries, busy or idle; at most four.
+readerCacheSize :: ReaderCache -> IO Int
+readerCacheSize (ReaderCache lock) = (\(CacheState _ entries) -> length entries) <$> readMVar lock
+
+-- Caller has revalidated authorization. Only idle entries expire/evict. At
+-- most four entries are retained; when the key's entry is busy or every entry
+-- is busy, the request is served by an uncached transient reader that is
+-- closed before returning, never refused.
 withCachedReader :: ReaderCache -> ArchiveAudience -> Pool H.Connection -> A.ArchiveManifest -> (ArchiveReader -> IO a) -> IO a
 withCachedReader cache audience pool manifest = withCachedArchive cache audience pool manifest Nothing
 
@@ -345,28 +356,39 @@ withCachedArchive :: ReaderCache -> ArchiveAudience -> Pool H.Connection -> A.Ar
 withCachedArchive (ReaderCache lock) audience pool manifest content action = mask $ \restore -> do
   now <- getCurrentTime
   let key=(audience,manifest.workspaceId,manifest.sessionId,manifest.id,maybe False (const True) content)
-  reader <- modifyMVar lock $ \(CacheState closed entries) -> do
-    when closed (throwIO ReaderCacheBusy)
+  cached <- modifyMVar lock $ \(CacheState closed entries) -> do
+    when closed (throwIO ReaderCacheClosed)
     let expired (Entry _ used busy _) = not busy && diffUTCTime now used >= 30
         stale=filter expired entries; live=filter (not . expired) entries
     mapM_ (\(Entry _ _ _ r)->closeArchiveReader r) stale
     case [e | e@(Entry k _ _ _) <- live,k == key] of
-      Entry _ _ True _:_->throwIO ReaderCacheBusy
-      Entry _ _ False r:_->pure (CacheState False [if k==key then Entry k now True value else e | e@(Entry k _ _ value)<-live],r)
+      Entry _ _ True _:_->pure (CacheState False live,Nothing)
+      Entry _ _ False r:_->pure (CacheState False [if k==key then Entry k now True value else e | e@(Entry k _ _ value)<-live],Just r)
       [] -> do
         let idle=sortOn (\(Entry _ used _ _)->used) [e | e@(Entry _ _ busy _)<-live,not busy]
-        (retained,evicted) <- if length live < 4 then pure (live,[]) else case idle of
-          [] -> throwIO ReaderCacheBusy
-          e@(Entry oldKey _ _ _):_ -> pure ([x | x@(Entry k _ _ _)<-live,k/=oldKey],[e])
-        mapM_ (\(Entry _ _ _ r)->closeArchiveReader r) evicted
-        r <- newArchiveReader pool manifest content
-        pure (CacheState False (Entry key now True r:retained),r)
-  -- Ordinary pagination caches verified bytes only. The native seek state is
-  -- request-owned and always released before returning its admission lease.
-  result <- try @SomeException (restore (action reader) `finally` pauseArchiveReader reader)
-  ended <- getCurrentTime
-  modifyMVar_ lock $ \(CacheState closed entries) -> do
-    case result of Left _ -> closeArchiveReader reader; Right _ -> pure ()
-    pure (CacheState closed [Entry k (if k==key then ended else used) (if k==key then False else busy) r
-      | Entry k used busy r <- entries, k/=key || either (const False) (const True) result])
-  either throwIO pure result
+        evicted <- if length live < 4 then pure (Just Nothing) else case idle of
+          [] -> pure Nothing
+          e:_ -> pure (Just (Just e))
+        case evicted of
+          Nothing -> pure (CacheState False live,Nothing)
+          Just old -> do
+            forM_ old (\(Entry _ _ _ r)->closeArchiveReader r)
+            let retained=[x | x@(Entry k _ _ _)<-live, maybe True (\(Entry oldKey _ _ _)->k/=oldKey) old]
+            r <- newArchiveReader pool manifest content
+            pure (CacheState False (Entry key now True r:retained),Just r)
+  case cached of
+    -- Uncached fill: a transient decoder and verified chunks owned by this
+    -- request alone, closed before returning.
+    Nothing -> do
+      transient <- newArchiveReader pool manifest content
+      restore (action transient) `finally` closeArchiveReader transient
+    Just reader -> do
+      -- Ordinary pagination caches verified bytes only. The native seek state is
+      -- request-owned and always released before returning its admission lease.
+      result <- try @SomeException (restore (action reader) `finally` pauseArchiveReader reader)
+      ended <- getCurrentTime
+      modifyMVar_ lock $ \(CacheState closed entries) -> do
+        case result of Left _ -> closeArchiveReader reader; Right _ -> pure ()
+        pure (CacheState closed [Entry k (if k==key then ended else used) (if k==key then False else busy) r
+          | Entry k used busy r <- entries, k/=key || either (const False) (const True) result])
+      either throwIO pure result

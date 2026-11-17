@@ -27,7 +27,9 @@ access) or `unresolved` (no ticket matched, or the bot identity was invalid).
 later dispatch cycle.
 
 Upgrade and connection lines also carry `admitted` (physical admissions),
-`leases` (delivery leases in use), `lease_waiters` and `quarantined`.
+`leases` (delivery leases in use), `lease_capacity` (the delivery pool size
+minus the dispatcher's connection, but never fewer than four; four when
+delivery shares the main pool), `lease_waiters` and `quarantined`. Physical admissions are not capped.
 
 Every upgrade, connection and initial replay is logged. Successful live
 replays, completed and refused turns, writes and joined cleanups are counted
@@ -70,8 +72,8 @@ measured only by test clients that observe the frame themselves.
 `readWebSocketTelemetry` emits pending events and returns per-key `count`,
 `timed`, `totalMs` and `maxMs`, keyed by event, label and outcome, plus:
 
-- admitted and retained physical admissions, delivery leases in use,
-  quarantined leases, lease waiters and the oldest quarantine age;
+- admitted and retained physical admissions, delivery leases in use and lease
+  capacity, quarantined leases, lease waiters and the oldest quarantine age;
 - canonical, activity and legacy clients, pending replays and the oldest open
   replay age;
 - dropped log events.

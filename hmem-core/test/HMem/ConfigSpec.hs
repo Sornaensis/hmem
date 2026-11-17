@@ -239,12 +239,32 @@ spec = do
       overridden.changeStream `shouldBe` ChangeStreamConfig 100 40 20
 
   describe "pool configuration" $ do
-    it "defaults the main pool to 15 and the delivery pool to 10 connections" $ do
-      defaultConfig.pool `shouldBe` PoolConfig { size = 15, deliverySize = 10, idleTimeout = 60, statementTimeoutMs = 30000 }
+    it "defaults the main pool to 64, the delivery pool to 10 and the checkout timeout to 60 s" $ do
+      defaultConfig.pool `shouldBe` PoolConfig { size = 64, deliverySize = 10, idleTimeout = 60, statementTimeoutMs = 30000, checkoutTimeoutMs = 60000 }
       mapM_ (\yaml -> case Yaml.decodeEither' yaml of
         Left err -> expectationFailure (show err)
         Right (cfg :: HMemConfig) -> cfg.pool `shouldBe` defaultConfig.pool)
-        ["{}", "pool: {}", "pool: {size: 15}", "pool: {delivery_size: 10}"]
+        ["{}", "pool: {}", "pool: {size: 64}", "pool: {delivery_size: 10}", "pool: {checkout_timeout_ms: 60000}"]
+      fst (validateConfig defaultConfig) `shouldSatisfy` all (not . isInfixOf "pool.")
+
+    it "reads, round-trips, clamps and warns about the checkout timeout" $ do
+      case Yaml.decodeEither' "pool: {checkout_timeout_ms: 45000}" of
+        Left err -> expectationFailure (show err)
+        Right (cfg :: HMemConfig) -> do
+          cfg.pool.checkoutTimeoutMs `shouldBe` 45000
+          Aeson.eitherDecode (Aeson.encode cfg.pool) `shouldBe` Right cfg.pool
+          fst (validateConfig cfg) `shouldSatisfy` all (not . isInfixOf "pool.")
+      let clamp ms = validateConfig defaultConfig { pool = defaultConfig.pool { checkoutTimeoutMs = ms } }
+          (lowWarnings, low) = clamp 999
+          (highWarnings, high) = clamp 600001
+          (belowWarnings, below) = clamp 20000
+      low.pool.checkoutTimeoutMs `shouldBe` 1000
+      high.pool.checkoutTimeoutMs `shouldBe` 600000
+      below.pool.checkoutTimeoutMs `shouldBe` 20000
+      lowWarnings `shouldSatisfy` any (isInfixOf "pool.checkout_timeout_ms: 999 is below minimum 1000")
+      highWarnings `shouldSatisfy` any (isInfixOf "pool.checkout_timeout_ms: 600001 exceeds maximum 600000")
+      belowWarnings `shouldSatisfy` any (isInfixOf "pool.checkout_timeout_ms: 20000 is below pool.statement_timeout_ms 30000")
+      fst (clamp 30000) `shouldSatisfy` all (not . isInfixOf "pool.checkout_timeout_ms")
 
     it "reads and round-trips independently configured pool sizes" $ do
       case Yaml.decodeEither' "pool: {size: 10, delivery_size: 15}" of
